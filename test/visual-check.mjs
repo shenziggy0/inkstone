@@ -50,7 +50,19 @@ try {
   await page.keyboard.insertText('# 即时排版验收\n\n普通段落含 **加粗**、`代码`、~~删除线~~、==高亮== 与 [链接](https://example.com)。\n\n- 第一项\n- 第二项\n\n1. 有序项\n2. 另一个有序项');
   await page.waitForTimeout(500);
   await page.screenshot({ path: '/tmp/inkstone-live-typing.png' });
-  // Third shot: type the three content-free prefixes character by character.
+  // Another shot: an IME composition in flight. The whole document must stay
+  // typeset while pinyin is being composed — the old implementation cleared
+  // every decoration and exposed raw Markdown as soon as composition started.
+  await page.locator('.topbar [data-command="new"]').click();
+  await page.locator('.cm-content').click();
+  await page.keyboard.insertText('# 组合输入验收\n\n第一段含 **加粗** 与 `代码`。\n\n- 列表项\n\n> 引用文字\n\n正在输入：');
+  await page.waitForFunction(() => document.querySelectorAll('.md-widget').length >= 4);
+  const ime = await page.context().newCDPSession(page);
+  await ime.send('Input.imeSetComposition', { text: 'zhongwen', selectionStart: 8, selectionEnd: 8 });
+  await page.waitForTimeout(350);
+  await page.screenshot({ path: '/tmp/inkstone-live-ime.png' });
+  await ime.send('Input.insertText', { text: '中文' });
+  // Next shot: type the three content-free prefixes character by character.
   // insertText supplies line breaks so CodeMirror's newline continuation does
   // not duplicate the list markers; the markers themselves are real keystrokes.
   await page.locator('.topbar [data-command="new"]').click();
@@ -68,7 +80,7 @@ try {
   await page.locator('[data-command="theme"]').click();
   await page.waitForTimeout(400);
   await page.screenshot({ path: dark });
-  console.log('screenshots written: light, typing, prefixes, dark (prefixes in dark theme)');
+  console.log('screenshots written: light, typing, ime-composition, prefixes, dark (prefixes in dark theme)');
 } finally {
   const closed = app.waitForEvent('close');
   await app.evaluate(({ app }) => app.exit(0));

@@ -546,6 +546,65 @@ try {
   assert.match(await second.locator('.cm-content').textContent(), /第二窗口独立文档/);
   assert.ok(!(await page.locator('.cm-content').textContent()).includes('第二窗口独立文档'), '不同窗口的文档必须相互独立');
   console.log('STEP independent new window with its own document store');
+  // CDP drives real compositionstart/update/end events into the contenteditable.
+  // An IME session must never tear down typesetting for the whole document.
+  await page.bringToFront();
+  await fresh();
+  await page.keyboard.insertText('# 标题\n\n第一段含 **加粗** 与 `代码`。\n\n- 列表项\n\n> 引用文字\n\n结尾段落。');
+  await page.waitForFunction(() => document.querySelectorAll('.md-widget').length >= 4);
+  const imeState = () => page.evaluate(() => ({
+    widgets: document.querySelectorAll('.md-widget').length,
+    live: document.querySelectorAll('.cm-live-line').length,
+    strong: document.querySelectorAll('.md-widget strong').length,
+    heading: document.querySelectorAll('.md-widget h1').length,
+    bare: /\*\*|`|^# |^- /m.test(document.querySelector('.cm-content').textContent)
+  }));
+  const beforeIme = await imeState();
+  assert.ok(beforeIme.widgets >= 4 && beforeIme.strong >= 1 && !beforeIme.bare, '组合输入前应是完整排版态');
+  // Focus without clicking the middle of the viewport (that would turn a
+  // rendered block into the active one and legitimately remove one widget).
+  await page.locator('.cm-content').focus();
+  await page.keyboard.press('End');
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('Input.imeSetComposition', { text: 'zhong', selectionStart: 5, selectionEnd: 5 });
+  await page.waitForTimeout(180);
+  const duringIme = await imeState();
+  assert.ok(duringIme.widgets >= 1 && duringIme.live >= 1 && !duringIme.bare,
+    `组合输入期间整篇排版不得退回源码: ${JSON.stringify(duringIme)}`);
+  assert.ok(duringIme.strong + duringIme.heading >= 1,
+    `组合输入期间渲染块样式必须保留: ${JSON.stringify(duringIme)}`);
+  assert.equal(duringIme.bare, false, '组合输入期间不得裸露 Markdown 语法');
+  assert.match(await page.locator('.cm-content').textContent(), /zhong/, '拼音组合文本应进入活跃块');
+  await cdp.send('Input.imeSetComposition', { text: 'zhongwen', selectionStart: 8, selectionEnd: 8 });
+  await page.waitForTimeout(120);
+  await cdp.send('Input.insertText', { text: '中文' });
+  await page.waitForTimeout(320);
+  const afterIme = await imeState();
+  assert.ok(afterIme.widgets >= 4 && !afterIme.bare, '组合结束后应保持排版');
+  const imeText = await page.locator('.cm-content').textContent();
+  assert.match(imeText, /结尾段落。中文/);
+  assert.ok(!imeText.includes('zhong'), '拼音组合文本不得留在文档里');
+  await page.locator('[data-command="source"]').click();
+  const imeLines = await page.evaluate(() => [...document.querySelectorAll('.cm-line')].map(l => l.textContent));
+  assert.ok(imeLines.includes('第一段含 **加粗** 与 `代码`。'), '组合输入不得破坏已有语法源码');
+  assert.equal(imeLines.at(-1), '结尾段落。中文', '候选确认必须只写入一次中文，不丢字不重复');
+  await ensureLive();
+  // The active block's own hidden inline syntax must also survive composition.
+  await fresh();
+  await page.keyboard.type('**加粗**', { delay: 20 });
+  await page.waitForFunction(() => document.querySelectorAll('.cm-hidden-mark').length >= 2);
+  const hiddenBefore = await page.locator('.cm-hidden-mark').count();
+  const cdp2 = await page.context().newCDPSession(page);
+  await cdp2.send('Input.imeSetComposition', { text: 'zhongwen', selectionStart: 8, selectionEnd: 8 });
+  await page.waitForTimeout(180);
+  assert.equal(await page.locator('.cm-hidden-mark').count(), hiddenBefore, '组合输入期间活跃块隐藏的语法标记不得消失');
+  assert.equal(await page.locator('.cm-lv-strong').count(), 1, '组合输入期间活跃块粗体样式不得消失');
+  await cdp2.send('Input.insertText', { text: '中文' });
+  await page.waitForTimeout(300);
+  await page.locator('[data-command="source"]').click();
+  assert.equal(await page.locator('.cm-content').textContent(), '**加粗**中文', '活跃块组合输入后源码必须完整');
+  await ensureLive();
+  console.log('STEP IME composition keeps typesetting across the document');
   // A narrow desktop window must not overflow horizontally or hide the editor.
   await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setBounds({ x: 100, y: 80, width: 760, height: 620 }));
   await page.waitForTimeout(300);
@@ -553,7 +612,7 @@ try {
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 2), false, '窄屏不应产生横向溢出');
   console.log('STEP narrow desktop viewport');
   assert.deepEqual(errors, []);
-  console.log('PASS: native startup, editing, undo/redo, character-level click positioning, source mode, save, math, Mermaid labels, task toggle, external conflict + live notification, self-contained fonts in HTML, PDF, version history, preferences, custom CSS theme + themed HTML export, typewriter, dark mode, cross-block rendering parity, graphical table editing, clipboard HTML/Markdown, command palette, persisted zoom, cross-block drag selection, typeset live preview + syntax reveal, grouped undo, frameless chrome, code copy, article panel, resizable sidebar, heading numbering, version diff, outline drag reorder, window bounds, table Tab navigation, 200k+ source fallback, toolbar-free layout, typing in typeset mode, in-place table cells, Enter rows, draggable columns, emoji autocomplete + picker, Pandoc gating, image context menu, independent new window, narrow desktop viewport, immediate typeset on closing delimiter, immediate heading/bullet/ordered/code typesetting, immediate empty list/task/quote prefixes, rendered empty task checkbox.');
+  console.log('PASS: native startup, editing, undo/redo, character-level click positioning, source mode, save, math, Mermaid labels, task toggle, external conflict + live notification, self-contained fonts in HTML, PDF, version history, preferences, custom CSS theme + themed HTML export, typewriter, dark mode, cross-block rendering parity, graphical table editing, clipboard HTML/Markdown, command palette, persisted zoom, cross-block drag selection, typeset live preview + syntax reveal, grouped undo, frameless chrome, code copy, article panel, resizable sidebar, heading numbering, version diff, outline drag reorder, window bounds, table Tab navigation, 200k+ source fallback, toolbar-free layout, typing in typeset mode, in-place table cells, Enter rows, draggable columns, emoji autocomplete + picker, Pandoc gating, image context menu, independent new window, narrow desktop viewport, immediate typeset on closing delimiter, immediate heading/bullet/ordered/code typesetting, immediate empty list/task/quote prefixes, rendered empty task checkbox, IME composition keeps whole-document typesetting.');
   if (process.env.INKSTONE_SCREENSHOT) await page.screenshot({ path: process.env.INKSTONE_SCREENSHOT });
 } finally {
   const closed = app.waitForEvent('close');

@@ -278,7 +278,7 @@ function parsedFor(source, id) {
 
 function liveDecorations(state, id) {
   const mode = state.field(modeField);
-  if (mode.source || mode.composing || state.doc.length > 200000) return Decoration.none;
+  if (mode.source || state.doc.length > 200000) return Decoration.none;
   const source = state.doc.toString();
   const { tokens, blocks } = parsedFor(source, id);
   const htmlByStart = new Map(blocks.map(block => [block.start, block.html]));
@@ -407,7 +407,18 @@ export function createEditor(parent, doc, onChange, onSelection, onCommand, onIm
   const spelling = new Compartment();
   const preview = StateField.define({
     create: state => liveDecorations(state, doc.id),
-    update: (value, tr) => tr.docChanged || tr.selection || tr.effects.some(e => e.is(modeEffect) || e.is(compositionEffect)) ? liveDecorations(tr.state, doc.id) : value,
+    update: (value, tr) => {
+      // An IME composition writes into the live contenteditable DOM. Rebuilding
+      // decorations (or clearing them to Decoration.none) at that moment tears
+      // down the node the browser is composing into, exposes raw Markdown for
+      // the whole document and can drop characters. Keep the existing typeset
+      // layout frozen, merely shifting positions if the document did change;
+      // recompute once compositionend arrives and the text is committed.
+      const mode = tr.state.field(modeField, false);
+      if (mode?.composing && !mode.source) return tr.docChanged ? value.map(tr.changes) : value;
+      return tr.docChanged || tr.selection || tr.effects.some(e => e.is(modeEffect) || e.is(compositionEffect))
+        ? liveDecorations(tr.state, doc.id) : value;
+    },
     provide: field => EditorView.decorations.from(field)
   });
   const eol = doc.content.includes('\r\n') ? '\r\n' : '\n';
