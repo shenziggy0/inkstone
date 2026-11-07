@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   parseTables, serializeTable, setCell, insertRow, removeRow,
   insertColumn, removeColumn, setAlignment, tableCellRanges,
-  readColumnWidths, columnWidthEdit, injectColumnWidths
+  readColumnWidths, columnWidthEdit, injectColumnWidths, rowPrefix
 } from '../src/table.js';
 
 const sample = '| 名称 | 数量 |\n| :--- | ---: |\n| 苹果 | 3 |\n| 梨 | 5 |\n';
@@ -38,6 +38,29 @@ test('serializeTable keeps alignment and is re-parseable', () => {
   const roundTrip = parseTables(serializeTable(table))[0];
   assert.deepEqual(roundTrip.rows, table.rows);
   assert.deepEqual(roundTrip.aligns, table.aligns);
+});
+
+test('parseTables skips example tables inside fenced code', () => {
+  const source = '```md\n| a | b |\n| --- | --- |\n```\n\n| c | d |\n| --- | --- |\n| 1 | 2 |\n\n~~~\n| e | f |\n| --- | --- |\n~~~\n';
+  const tables = parseTables(source);
+  assert.equal(tables.length, 1, '代码围栏内的示例表格不得计入序号');
+  assert.deepEqual(tables[0].rows, [['c', 'd'], ['1', '2']]);
+  assert.equal(source.slice(tables[0].start, tables[0].end), '| c | d |\n| --- | --- |\n| 1 | 2 |');
+  // An unterminated fence swallows the rest of the source, like a renderer does.
+  assert.deepEqual(parseTables('```\n| a | b |\n| --- | --- |\n'), []);
+});
+
+test('parseTables finds tables inside blockquotes and list items', () => {
+  const quoted = parseTables('> | a | b |\n> | --- | --- |\n> | 1 | 2 |\n')[0];
+  assert.deepEqual(quoted.rows, [['a', 'b'], ['1', '2']]);
+  assert.deepEqual(tableCellRanges('> | a | b |'), [{ from: 4, to: 5 }, { from: 8, to: 9 }], '单元格区间要跳过引用前缀');
+
+  const listed = parseTables('- 列表\n\n  | a | b |\n  | --- | --- |\n  | 1 | 2 |\n')[0];
+  assert.deepEqual(listed.rows, [['a', 'b'], ['1', '2']]);
+  assert.deepEqual(tableCellRanges('  | a | b |'), [{ from: 4, to: 5 }, { from: 8, to: 9 }], '单元格区间要跳过列表缩进');
+  assert.equal(rowPrefix('> - 列表'), '> ');
+  assert.equal(rowPrefix('| a | b |'), '');
+  assert.deepEqual(tableCellRanges('普通段落'), []);
 });
 
 test('cell, row and column operations keep the table rectangular', () => {

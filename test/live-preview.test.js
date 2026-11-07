@@ -33,13 +33,24 @@ test('links style only the label and hide brackets plus destination', () => {
   assert.deepEqual(bare(info.styles), [{ from: 1, to: 3, kind: 'link' }]);
 });
 
-test('nested emphasis keeps inner markers dim instead of replacing them', () => {
+test('nested emphasis hides inner markers instead of dimming them', () => {
+  // The parser gives the inner `*斜*` its own element, so its markers are
+  // hidden like every other completed syntax and reappear only when the caret
+  // enters that element. Before the parse-driven layer they were merely
+  // dimmed, which made `**粗 *斜* 字**` disagree with the rendered text.
   const line = '**粗 *斜* 字**';
   const info = liveLine(line);
   assert.ok(info.styles.some(style => style.kind === 'strong' && text(line, style.from, style.to) === '粗 *斜* 字'));
   assert.ok(info.styles.some(style => style.kind === 'em' && text(line, style.from, style.to) === '斜'));
-  assert.deepEqual(bare(info.marks.filter(mark => mark.kind === 'soft')), [
-    { from: 4, to: 5, kind: 'soft' }, { from: 6, to: 7, kind: 'soft' }
+  assert.deepEqual(bare(info.marks), [
+    { from: 0, to: 2, kind: 'syntax' },
+    { from: 4, to: 5, kind: 'syntax' },
+    { from: 6, to: 7, kind: 'syntax' },
+    { from: 9, to: 11, kind: 'syntax' }
+  ]);
+  assert.equal(info.marks.filter(mark => mark.kind === 'soft').length, 0);
+  assert.deepEqual(bare(info.groups), [
+    { from: 0, to: 11, kind: 'strong' }, { from: 4, to: 7, kind: 'em' }
   ]);
 });
 
@@ -112,18 +123,20 @@ test('content-free block prefixes typeset the instant they are complete', () => 
   assert.equal(liveLine('- [ ] 任务').prefix.kind, 'task', '有正文的任务项不能被破坏');
 });
 
-test('stray delimiters are dim, underscores inside words are content', () => {
-  assert.deepEqual(bare(liveLine('一段 * 文字').marks), [{ from: 3, to: 4, kind: 'soft' }]);
+test('unmatched delimiters are content, underscores inside words stay literal', () => {
+  // `一段 * 文字` renders the asterisk as text (it opens no emphasis), so the
+  // active block must show it as text too, not as dimmed syntax.
+  assert.deepEqual(bare(liveLine('一段 * 文字').marks), []);
   assert.deepEqual(liveLine('变量 snake_case 结束').marks, []);
+  assert.deepEqual(liveLine('2 * 3 * 4 与 a == b').marks, []);
 });
 
 test('escapes, subscript, superscript, HTML spans and emoji match rendered syntax', () => {
   const escaped = liveLine('\\*literal*');
+  // Only the backslash is syntax. The trailing `*` closes nothing, so it is
+  // ordinary content — exactly what markdown-it renders for `\*literal*`.
   assert.deepEqual(bare(escaped.marks), [{ from: 0, to: 1, kind: 'syntax' }]);
-  assert.deepEqual(bare(escaped.styles), [
-    { from: 1, to: 2, kind: 'literal' },
-    { from: 9, to: 10, kind: 'literal' }
-  ]);
+  assert.deepEqual(bare(escaped.styles), []);
 
   const extensions = liveLine('H~2~O x^2^ <u>线</u> :smile:');
   assert.ok(extensions.styles.some(style => style.kind === 'sub' && text('H~2~O x^2^ <u>线</u> :smile:', style.from, style.to) === '2'));
@@ -170,7 +183,9 @@ test('incomplete syntax has no group and therefore stays visible', () => {
   const info = liveLine('**加粗');
   assert.deepEqual(info.groups, []);
   assert.equal(revealFor(info, [{ from: 5, to: 5 }]).groups.size, 0);
-  assert.deepEqual(bare(info.marks), [{ from: 0, to: 2, kind: 'soft' }]);
+  // An unclosed delimiter opens nothing: the characters are plain text, just
+  // as they are in the rendered paragraph.
+  assert.deepEqual(bare(info.marks), []);
 });
 
 test('all ranges are ordered, disjoint and inside the line', () => {

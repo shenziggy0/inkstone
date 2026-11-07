@@ -29,6 +29,18 @@ const alignmentOf = cell => {
   return left && right ? 'center' : left ? 'left' : right ? 'right' : null;
 };
 
+/**
+ * Container prefix of a table row: list indentation and blockquote markers.
+ * A table may live inside `> …` or an indented list item, so the row's cells
+ * only start after this prefix and edits must never touch it.
+ */
+export function rowPrefix(text) {
+  // A UTF-8 BOM is part of the first line's source, never of its cells.
+  return /^[\uFEFF \t]*(?:>[ \t]?)*/.exec(text)[0];
+}
+
+const bodyOf = text => text.slice(rowPrefix(text).length);
+
 function linesOf(source) {
   const lines = [];
   let start = 0;
@@ -42,21 +54,34 @@ function linesOf(source) {
   return lines;
 }
 
-/** Find every GFM table and its exact [start, end) character range. */
+/**
+ * Find every GFM table and its exact [start, end) character range.
+ * Fenced code is literal text: a sample table inside a fence is not a table,
+ * otherwise every later table index (and its stored column widths) shifts.
+ */
 export function parseTables(source) {
   const lines = linesOf(source);
   const tables = [];
+  let fence = null;
   for (let i = 0; i + 1 < lines.length; i++) {
-    if (!lines[i].text.includes('|')) continue;
-    const header = splitRow(lines[i].text);
-    const delimiter = splitRow(lines[i + 1].text);
+    const body = bodyOf(lines[i].text);
+    if (fence) {
+      const closing = new RegExp(`^${fence[0]}{${fence.length},}\\s*$`);
+      if (closing.test(body.trim())) fence = null;
+      continue;
+    }
+    const opening = /^(`{3,}|~{3,})/.exec(body);
+    if (opening) { fence = opening[1]; continue; }
+    if (!body.includes('|')) continue;
+    const header = splitRow(body);
+    const delimiter = splitRow(bodyOf(lines[i + 1].text));
     if (header.length < 1 || delimiter.length !== header.length || !delimiter.every(cell => DELIMITER.test(cell))) continue;
     const rows = [header];
     let last = i + 1;
     for (let j = i + 2; j < lines.length; j++) {
-      const text = lines[j].text;
-      if (!text.trim() || !text.includes('|')) break;
-      const cells = splitRow(text);
+      const row = bodyOf(lines[j].text);
+      if (!row.trim() || !row.includes('|')) break;
+      const cells = splitRow(row);
       if (cells.every(cell => DELIMITER.test(cell))) break;
       rows.push(Array.from({ length: header.length }, (_, column) => cells[column] ?? ''));
       last = j;
@@ -168,21 +193,24 @@ export function injectColumnWidths(html, widths, offset = 0) {
  * start a new cell.
  */
 export function tableCellRanges(text) {
-  if (!/^\s*\|/.test(text)) return [];
+  const prefix = rowPrefix(text);
+  const body = text.slice(prefix.length);
+  if (!/^\s*\|/.test(body)) return [];
   const bars = [];
-  for (let index = 0; index < text.length; index++) {
-    if (text[index] !== '|') continue;
+  for (let index = 0; index < body.length; index++) {
+    if (body[index] !== '|') continue;
     let slashes = 0;
-    for (let back = index - 1; back >= 0 && text[back] === '\\'; back--) slashes++;
+    for (let back = index - 1; back >= 0 && body[back] === '\\'; back--) slashes++;
     if (slashes % 2 === 0) bars.push(index);
   }
   if (bars.length < 2) return [];
   const cells = [];
   for (let index = 0; index < bars.length - 1; index++) {
     let from = bars[index] + 1, to = bars[index + 1];
-    while (from < to && /\s/u.test(text[from])) from++;
-    while (to > from && /\s/u.test(text[to - 1])) to--;
-    cells.push({ from, to });
+    while (from < to && /\s/u.test(body[from])) from++;
+    while (to > from && /\s/u.test(body[to - 1])) to--;
+    // Ranges stay relative to the whole line so callers can slice it directly.
+    cells.push({ from: from + prefix.length, to: to + prefix.length });
   }
   return cells;
 }

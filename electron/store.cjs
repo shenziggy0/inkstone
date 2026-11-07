@@ -7,6 +7,19 @@ const inside = (root, candidate) => {
   const relative = path.relative(root, candidate);
   return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
 };
+/** Decode strict UTF-8 so invalid bytes are never silently replaced on save. */
+function decodeText(bytes) {
+  const content = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+  if (content.includes('\0')) throw new Error('该文件不是 UTF-8 文本。');
+  return content;
+}
+// Every history entry is `<epoch millis>-<uuid>-<original file name>`; parsing
+// the whole shape keeps `b-a.md` from matching the history of `a.md`.
+const HISTORY_ENTRY = /^(\d{10,16})-([0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})-(.+)$/;
+const HISTORY_LIMIT = 50;
+// Document ids double as folder names under `unsaved-assets/`, so they are
+// validated before ever being joined into a path.
+const SAFE_DOCUMENT_ID = /^[0-9a-f-]{36}$/i;
 
 async function atomicWrite(file, content) {
   const temporary = path.join(path.dirname(file), `.${path.basename(file)}.${crypto.randomUUID()}.tmp`);
@@ -26,9 +39,20 @@ async function atomicWrite(file, content) {
 }
 
 class DocumentStore {
-  constructor(recoveryDirectory) {
+  /**
+   * @param {string} recoveryDirectory per-window recovery folder
+   * @param {{historyDirectory?: string, legacyHistoryRoot?: string, unsavedAssetsDirectory?: string}} [options]
+   *   `historyDirectory` is shared by every window; `legacyHistoryRoot` still
+   *   hosts the old per-window `history/` folders that must stay readable;
+   *   `unsavedAssetsDirectory` is the shared root of the per-document image
+   *   folders an unsaved document uses (kept in sync on crash recovery).
+   */
+  constructor(recoveryDirectory, options = {}) {
     this.documents = new Map();
     this.recoveryDirectory = recoveryDirectory;
+    this.historyDirectory = options.historyDirectory || path.join(path.dirname(recoveryDirectory), 'history');
+    this.legacyHistoryRoot = options.legacyHistoryRoot || recoveryDirectory;
+    this.unsavedAssetsDirectory = options.unsavedAssetsDirectory || null;
     this.locks = new Map();
   }
   async serial(id, action) {
@@ -36,8 +60,17 @@ class DocumentStore {
     this.locks.set(id, pending);
     try { return await pending; } finally { if (this.locks.get(id) === pending) this.locks.delete(id); }
   }
-  create(content = '', file = null) {
-    const doc = { id: crypto.randomUUID(), path: file, name: file ? path.basename(file) : '未命名.md', content, savedContent: '', version: null, dirty: !!content };
+  /**
+   * @param {string} content initial text
+   * @param {string|null} file real path when the document already exists on disk
+   * @param {{name?: string, dirty?: boolean}} [options] `name` gives an unsaved
+   *   document its own title (the welcome page); `dirty: false` starts a document
+   *   with content that is deliberately not pending a save.
+   */
+  create(content = '', file = null, options = {}) {
+    const name = file ? path.basename(file) : (options.name || '未命名.md');
+    const dirty = typeof options.dirty === 'boolean' ? options.dirty : !!content;
+    const doc = { id: crypto.randomUUID(), path: file, name, content, savedContent: dirty ? '' : content, version: null, dirty };
     this.documents.set(doc.id, doc);
     return this.public(doc);
   }
@@ -54,9 +87,7 @@ class DocumentStore {
     const stat = await fs.stat(resolved);
     if (!stat.isFile() || stat.size > 20 * 1024 * 1024) throw new Error('请选择不超过 20 MB 的 Markdown 文本文件。');
     const bytes = await fs.readFile(resolved);
-    // A decoder that throws avoids silently replacing invalid bytes on the next save.
-    const content = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
-    if (content.includes('\0')) throw new Error('该文件不是 UTF-8 文本。');
+    const content = decodeText(bytes);
     const value = this.create(content, resolved);
     const doc = this.get(value.id);
     Object.assign(doc, { savedContent: content, version: digest(bytes), dirty: false });
@@ -79,6 +110,19 @@ class DocumentStore {
     if (!doc.dirty) { await fs.unlink(file).catch(() => {}); return; }
     await atomicWrite(file, JSON.stringify({ ...this.public(doc), updatedAt: new Date().toISOString() }));
   }
+  /**
+   * Keep the current in-memory text as a copy nobody prunes, so reloading the
+   * disk version (or recovering after a crash) can never destroy local work.
+   */
+  async discard(doc) {
+    if (!this.recoveryDirectory) return null;
+    const directory = path.join(this.recoveryDirectory, 'discarded');
+    await fs.mkdir(directory, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const file = path.join(directory, `${stamp}-${doc.name}`);
+    await atomicWrite(file, doc.content);
+    return file;
+  }
   async save(id, target) {
     return this.serial(id, async () => {
       const doc = this.get(id);
@@ -90,16 +134,19 @@ class DocumentStore {
         if (error.code !== 'ENOENT') throw error;
         return path.join(await fs.realpath(path.dirname(requestedFile)), path.basename(requestedFile));
       });
+      let diskContent = null;
       if (file === doc.path && doc.version !== null) {
         const current = await fs.readFile(file).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
         if (current === null || digest(current) !== doc.version) throw new Error('文件已被其他程序修改或删除。为避免覆盖，请另存为，或重新打开磁盘版本。');
+        // Remember the version we are about to replace whenever it differs from
+        // the local baseline (an accepted external edit, for example).
+        try { diskContent = decodeText(current); } catch { diskContent = null; }
       }
       const opened = [...this.documents.values()].find(d => d.id !== id && d.path === file);
       if (opened) throw new Error('目标文件已在另一个标签页打开，请选择其他名称。');
-      if (doc.path && doc.dirty && this.recoveryDirectory) {
-        const history = path.join(this.recoveryDirectory, 'history');
-        await fs.mkdir(history, { recursive: true });
-        await atomicWrite(path.join(history, `${Date.now()}-${crypto.randomUUID()}-${doc.name}`), doc.savedContent);
+      if (doc.path) {
+        if (doc.dirty) await this.writeHistory(doc, doc.savedContent);
+        if (diskContent !== null && diskContent !== doc.savedContent) await this.writeHistory(doc, diskContent);
       }
       await atomicWrite(file, doc.content);
       Object.assign(doc, { path: file, name: path.basename(file), savedContent: doc.content, version: digest(Buffer.from(doc.content)), dirty: false });
@@ -107,18 +154,151 @@ class DocumentStore {
       return this.public(doc);
     });
   }
-  /** Re-read the on-disk version into an already-open document. */
+  /**
+   * Point an open document at a new path without touching its text.
+   *
+   * Used when the folder around a document is renamed: the bytes on disk did not
+   * change, so the disk version (and therefore the dirty baseline) stays valid,
+   * and the version history moves with the file instead of being orphaned under
+   * the old path hash.
+   */
+  async rekey(id, target) {
+    return this.serial(id, async () => {
+      const doc = this.get(id);
+      if (!doc.path) return this.public(doc);
+      // Canonicalize like open()/save() do: a short 8.3 spelling, a junction or
+      // a case variant must not become the identity other code compares against.
+      const resolved = await fs.realpath(target).catch(() => target);
+      const previousKey = this.historyKey(doc);
+      doc.path = resolved;
+      doc.name = path.basename(resolved);
+      const nextKey = this.historyKey(doc);
+      if (previousKey !== nextKey) await this.moveHistory(previousKey, nextKey);
+      await this.recover(doc);
+      return this.public(doc);
+    });
+  }
+  /** Move one history folder to the key of the renamed file, never merging. */
+  async moveHistory(fromKey, toKey) {
+    const from = path.join(this.historyDirectory, fromKey);
+    const stat = await fs.stat(from).catch(() => null);
+    if (!stat?.isDirectory()) return false;
+    const to = path.join(this.historyDirectory, toKey);
+    if (await fs.stat(to).catch(() => null)) return false;
+    return fs.rename(from, to).then(() => true).catch(() => false);
+  }
+  /**
+   * Re-read the on-disk version into an already-open document. A dirty document
+   * leaves a copy of the local text under `<recovery>/discarded/` first.
+   */
   async reload(id) {
     return this.serial(id, async () => {
       const doc = this.get(id);
       if (!doc.path) throw new Error('文档尚未保存到文件。');
       const bytes = await fs.readFile(doc.path);
-      const content = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
-      if (content.includes('\0')) throw new Error('该文件不是 UTF-8 文本。');
+      const content = decodeText(bytes);
+      const discarded = doc.dirty && doc.content !== content ? await this.discard(doc) : null;
       Object.assign(doc, { content, savedContent: content, version: digest(bytes), dirty: false });
+      await this.recover(doc);
+      return { ...this.public(doc), discarded };
+    });
+  }
+  /**
+   * Accept whatever is on disk right now after the user chose to keep the local
+   * text: the next save may overwrite it instead of being blocked forever.
+   */
+  async acceptDisk(id) {
+    return this.serial(id, async () => {
+      const doc = this.get(id);
+      if (!doc.path) return this.public(doc);
+      const bytes = await fs.readFile(doc.path).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
+      doc.version = bytes === null ? null : digest(bytes);
+      return this.public(doc);
+    });
+  }
+  /** Detach a document from a file that disappeared, keeping its text unsaved. */
+  async detach(id) {
+    return this.serial(id, async () => {
+      const doc = this.get(id);
+      Object.assign(doc, { path: null, version: null, savedContent: '', dirty: !!doc.content });
       await this.recover(doc);
       return this.public(doc);
     });
+  }
+  /** Share the history of one file across every window, keyed by its real path. */
+  historyKey(doc) {
+    const resolved = path.resolve(doc.path);
+    return digest(process.platform === 'win32' ? resolved.toLowerCase() : resolved).slice(0, 16);
+  }
+  async writeHistory(doc, content) {
+    if (!doc.path || typeof content !== 'string') return null;
+    const directory = path.join(this.historyDirectory, this.historyKey(doc));
+    await fs.mkdir(directory, { recursive: true });
+    const name = `${Date.now()}-${crypto.randomUUID()}-${doc.name}`;
+    await atomicWrite(path.join(directory, name), content);
+    await this.pruneHistory(directory);
+    return name;
+  }
+  async pruneHistory(directory, limit = HISTORY_LIMIT) {
+    const names = await fs.readdir(directory).catch(() => []);
+    const versions = names
+      .map(name => ({ name, match: HISTORY_ENTRY.exec(name) }))
+      .filter(entry => entry.match)
+      .map(entry => ({ name: entry.name, time: Number(entry.match[1]) || 0 }))
+      .sort((a, b) => b.time - a.time);
+    for (const stale of versions.slice(limit)) await fs.unlink(path.join(directory, stale.name)).catch(() => {});
+  }
+  /** Resolve a history token (`new:<hash>` or `legacy:<folder>`) to a real file. */
+  historyFile(dir, name) {
+    if (typeof dir !== 'string' || typeof name !== 'string') throw new Error('历史版本名无效。');
+    if (!name || name !== path.basename(name) || /[\\/]/.test(name) || name.startsWith('.')) throw new Error('历史版本名无效。');
+    const legacy = dir.startsWith('legacy:') ? dir.slice('legacy:'.length) : null;
+    const current = dir.startsWith('new:') ? dir.slice('new:'.length) : null;
+    if (legacy === null && current === null) throw new Error('历史版本名无效。');
+    const root = legacy === null ? this.historyDirectory : this.legacyHistoryRoot;
+    const base = path.resolve(root, legacy === null ? current : legacy);
+    if (!inside(root, base)) throw new Error('历史版本名无效。');
+    const file = path.join(base, name);
+    if (!inside(base, file)) throw new Error('历史版本名无效。');
+    return file;
+  }
+  async listHistory(id) {
+    const doc = this.get(id);
+    const entries = [];
+    const collect = async (base, directory, legacy) => {
+      const names = await fs.readdir(base).catch(() => []);
+      for (const name of names) {
+        const match = HISTORY_ENTRY.exec(name);
+        // Legacy folders mix every document, so only an exact file name matches.
+        if (!match || (legacy && match[3] !== doc.name)) continue;
+        const stat = await fs.stat(path.join(base, name)).catch(() => null);
+        if (!stat?.isFile()) continue;
+        const stamp = Number(match[1]);
+        const time = Number.isFinite(stamp) && stamp > 0 ? stamp : stat.mtimeMs;
+        // The stored file name carries a timestamp and a UUID, and the folder
+        // name is a path hash: neither belongs in the dialog. Show the document
+        // name with the version time instead, and name the origin separately.
+        entries.push({
+          name, dir: directory, time,
+          label: `${match[3]} · ${new Date(time).toLocaleString('zh-CN')}`,
+          hint: legacy ? '旧版历史记录' : '当前文件',
+          legacy
+        });
+      }
+    };
+    if (doc.path) {
+      const key = this.historyKey(doc);
+      await collect(path.join(this.historyDirectory, key), `new:${key}`, false);
+    }
+    await collect(path.join(this.legacyHistoryRoot, 'history'), 'legacy:history', true);
+    for (const folder of await fs.readdir(this.legacyHistoryRoot).catch(() => [])) {
+      if (!/^window-\d+$/.test(folder)) continue;
+      await collect(path.join(this.legacyHistoryRoot, folder, 'history'), `legacy:${folder}/history`, true);
+    }
+    return entries.sort((a, b) => b.time - a.time).slice(0, HISTORY_LIMIT);
+  }
+  async readHistory(dir, name) {
+    return fs.readFile(this.historyFile(dir, name), 'utf8');
   }
   async close(id) {
     return this.serial(id, async () => {
@@ -126,11 +306,36 @@ class DocumentStore {
       if (this.recoveryDirectory) await fs.unlink(path.join(this.recoveryDirectory, `${id}.json`)).catch(() => {});
     });
   }
+  /**
+   * Move the pasted images of an unsaved document to the id of its recovered
+   * copy. A crash leaves the pictures under the old id and recovery always
+   * creates a new document, so without this the draft comes back with broken
+   * images and the folder is pruned a week later. When the old document is
+   * still open in this process (a renderer reload keeps the store entry alive)
+   * the folder is copied instead of moved, so neither document loses it.
+   */
+  async carryUnsavedAssets(fromId, toId) {
+    if (!this.unsavedAssetsDirectory || !SAFE_DOCUMENT_ID.test(fromId || '') || !SAFE_DOCUMENT_ID.test(toId || '') || fromId === toId) return false;
+    const source = path.join(this.unsavedAssetsDirectory, fromId);
+    const target = path.join(this.unsavedAssetsDirectory, toId);
+    const stat = await fs.stat(source).catch(() => null);
+    if (!stat?.isDirectory()) return false;
+    if (await fs.stat(target).catch(() => null)) return false;
+    try {
+      if (this.documents.has(fromId)) await fs.cp(source, target, { recursive: true });
+      else await fs.rename(source, target);
+      return true;
+    } catch { return false; }
+  }
   async recoverAll(includeNested = false) {
     if (!this.recoveryDirectory) return [];
     await fs.mkdir(this.recoveryDirectory, { recursive: true });
     const recovered = [];
     const files = [];
+    // A recovered draft must win over the session file it came from: the path
+    // is remembered here so the startup restore can skip that document instead
+    // of opening the same file twice.
+    this.recoveredPaths = new Set();
     const collect = async directory => {
       for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
         const file = path.join(directory, entry.name);
@@ -143,8 +348,11 @@ class DocumentStore {
       try {
         const record = JSON.parse(await fs.readFile(file, 'utf8'));
         if (typeof record.content !== 'string') continue;
+        if (typeof record.path === 'string') this.recoveredPaths.add(record.path);
         const doc = this.create(record.content);
         this.get(doc.id).name = `恢复-${record.name || '未命名.md'}`;
+        // Pasted images follow the document to its new id before anything renders.
+        await this.carryUnsavedAssets(record.id, doc.id);
         await this.recover(this.get(doc.id));
         recovered.push(this.public(this.get(doc.id)));
         await fs.unlink(file);
@@ -157,30 +365,77 @@ class DocumentStore {
 /**
  * Keep relative `assets/` images usable when a document is saved or renamed
  * into a different directory. Only references actually used by the document
- * are copied; the strict basename check prevents path traversal.
+ * are copied; the strict basename check prevents path traversal. A target that
+ * already holds different bytes is never overwritten: a free name is picked and
+ * the reference inside the returned content is rewritten to match. `renamed`
+ * lists those reference rewrites so the renderer can mirror them in the editor.
+ *
+ * `options.fromDirectory` replaces `path.dirname(previousPath)`: an unsaved
+ * document has no previous path, but its pasted images still live in the
+ * per-document temporary folder, which is then migrated by the same rules.
  */
-async function syncAssets(content, previousPath, nextPath) {
-  if (!previousPath || !nextPath || typeof content !== 'string') return 0;
-  const fromDir = path.dirname(previousPath), toDir = path.dirname(nextPath);
-  if (fromDir === toDir) return 0;
-  const names = new Set();
+async function syncAssets(content, previousPath, nextPath, options = {}) {
+  const result = { copied: 0, skipped: 0, renamed: [], content };
+  if (!nextPath || typeof content !== 'string') return result;
+  const fromDir = options.fromDirectory || (previousPath ? path.dirname(previousPath) : null);
+  if (!fromDir) return result;
+  const toDir = path.dirname(nextPath);
+  if (fromDir === toDir) return result;
+  const references = [];
   for (const match of content.matchAll(/!\[[^\]]*\]\(([^)\s]+)\)/g)) {
     let reference;
     try { reference = decodeURIComponent(match[1]); } catch { continue; }
     if (!/^assets\/[^/\\]+$/.test(reference)) continue;
     const name = path.basename(reference);
-    if (name && name !== '.' && name !== '..') names.add(name);
+    if (!name || name === '.' || name === '..') continue;
+    references.push({ raw: match[1], name });
   }
-  if (!names.size) return 0;
+  if (!references.length) return result;
   await fs.mkdir(path.join(toDir, 'assets'), { recursive: true });
-  let copied = 0;
-  for (const name of names) {
-    const source = path.join(fromDir, 'assets', name);
-    const target = path.join(toDir, 'assets', name);
-    if (source === target) continue;
-    try { await fs.copyFile(source, target); copied++; } catch { /* missing asset stays a visible broken link */ }
+  const assigned = new Map();
+  const targetAssets = path.join(toDir, 'assets');
+  const pickName = async (name, bytes) => {
+    const extension = path.extname(name);
+    const stem = name.slice(0, name.length - extension.length);
+    for (let index = 1; index <= 999; index++) {
+      const candidate = `${stem}-${index}${extension}`;
+      const existing = await fs.readFile(path.join(targetAssets, candidate)).catch(() => null);
+      if (existing === null) return { name: candidate, copy: true };
+      if (existing.equals(bytes)) return { name: candidate, copy: false };
+    }
+    throw new Error('目标文件夹中无法为该图片找到可用的文件名。');
+  };
+  for (const { name } of references) {
+    if (assigned.has(name)) continue;
+    const bytes = await fs.readFile(path.join(fromDir, 'assets', name)).catch(() => null);
+    // A missing asset stays a visible broken link instead of failing the save.
+    if (bytes === null) { assigned.set(name, null); continue; }
+    const existing = await fs.readFile(path.join(targetAssets, name)).catch(() => null);
+    if (existing !== null && existing.equals(bytes)) { assigned.set(name, name); result.skipped++; continue; }
+    if (existing === null) {
+      await fs.copyFile(path.join(fromDir, 'assets', name), path.join(targetAssets, name));
+      assigned.set(name, name);
+      result.copied++;
+      continue;
+    }
+    const picked = await pickName(name, bytes);
+    if (picked.copy) {
+      await fs.copyFile(path.join(fromDir, 'assets', name), path.join(targetAssets, picked.name));
+      result.copied++;
+    } else result.skipped++;
+    assigned.set(name, picked.name);
   }
-  return copied;
+  let next = content;
+  for (const { raw, name } of references) {
+    const replacement = assigned.get(name);
+    if (!replacement || replacement === name) continue;
+    const target = `assets/${encodeURIComponent(replacement)}`;
+    next = next.split(`](${raw})`).join(`](${target})`);
+    // Report each textual rewrite once, exactly as it appears in the document.
+    if (!result.renamed.some(entry => entry.from === raw && entry.to === target)) result.renamed.push({ from: raw, to: target });
+  }
+  result.content = next;
+  return result;
 }
 
 async function listMarkdown(root, base = root, depth = 0, budget = { count: 0 }) {
@@ -191,8 +446,10 @@ async function listMarkdown(root, base = root, depth = 0, budget = { count: 0 })
     if (entry.name.startsWith('.') || ['node_modules', 'dist', 'target'].includes(entry.name) || entry.isSymbolicLink()) continue;
     const full = path.join(base, entry.name);
     if (entry.isDirectory()) {
+      // An empty folder is listed as well: the file tree creates folders, and a
+      // folder that just disappeared from the tree could never be filled.
       const children = await listMarkdown(root, full, depth + 1, budget).catch(() => []);
-      if (children.length) result.push({ name: entry.name, path: full, children });
+      result.push({ name: entry.name, path: full, children });
     } else if (/\.(md|markdown|mdown|txt)$/i.test(entry.name)) {
       result.push({ name: entry.name, path: full });
       if (++budget.count >= 5000) break;
@@ -200,4 +457,4 @@ async function listMarkdown(root, base = root, depth = 0, budget = { count: 0 })
   }
   return result;
 }
-module.exports = { DocumentStore, atomicWrite, inside, listMarkdown, syncAssets };
+module.exports = { DocumentStore, atomicWrite, inside, listMarkdown, syncAssets, HISTORY_LIMIT };

@@ -1,6 +1,7 @@
 import { _electron as electron } from '@playwright/test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -52,6 +53,86 @@ try {
   await page.locator('.topbar [data-command="sidebar"]').click();
   assert.equal(await page.locator('.sidebar').isVisible(), false, '侧栏仍应能一键收起');
   console.log('STEP default Typora-like chrome (title bar, typography, paper, sidebar toggle)');
+  // The welcome page is a pristine document, not an unsaved draft.
+  const welcomeShell = await page.evaluate(() => ({
+    location: document.querySelector('#location').textContent,
+    title: document.title,
+    listed: [...document.querySelectorAll('#open-documents .open-document-name span')].map(node => node.textContent)
+  }));
+  assert.equal(welcomeShell.location, '欢迎使用.md', '欢迎页在标题栏里不应带未保存标记');
+  assert.ok(welcomeShell.title && !welcomeShell.title.startsWith('•'), `窗口标题不应标记未保存，实际 ${welcomeShell.title}`);
+  assert.deepEqual(welcomeShell.listed, ['欢迎使用.md'], '欢迎页应出现在侧栏的已打开文档中');
+  console.log('STEP welcome page starts unmodified as 欢迎使用.md');
+  if (process.platform !== 'darwin') {
+    // One 38px row: the application topbar is the title bar, the native menu bar
+    // is hidden and the system window buttons sit in a theme-aware overlay.
+    const shellInfo = await app.evaluate(({ BrowserWindow }) => {
+      const win = BrowserWindow.getAllWindows()[0];
+      return { bounds: win.getBounds(), content: win.getContentBounds(), autoHideMenuBar: win.isMenuBarAutoHide() };
+    });
+    assert.equal(shellInfo.content.y, shellInfo.bounds.y, `不应再有原生标题栏占位（内容区顶部等于窗口顶部），实际 ${JSON.stringify(shellInfo)}`);
+    assert.ok(shellInfo.content.height >= shellInfo.bounds.height - 2, `内容区应占满窗口高度，实际 ${JSON.stringify(shellInfo)}`);
+    assert.equal(shellInfo.autoHideMenuBar, true, 'Windows / Linux 上应隐藏原生菜单栏');
+    const bar = await page.evaluate(() => {
+      const topbar = document.querySelector('.topbar');
+      const style = getComputedStyle(topbar);
+      return {
+        height: topbar.getBoundingClientRect().height,
+        paddingRight: parseFloat(style.paddingRight),
+        drag: style.webkitAppRegion,
+        interactive: getComputedStyle(topbar.querySelector('.icon-button')).webkitAppRegion,
+        menuDisplay: getComputedStyle(document.querySelector('.app-menu-button')).display,
+        controls: parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--titlebar-controls-width'))
+      };
+    });
+    assert.equal(bar.height, 38, '应用 topbar 就是标题栏，高度应为 38px');
+    assert.equal(bar.drag, 'drag', '标题栏必须是窗口拖动区域');
+    assert.equal(bar.interactive, 'no-drag', '标题栏按钮不得落在拖动区域');
+    assert.notEqual(bar.menuDisplay, 'none', 'Windows / Linux 上应显示“菜单”按钮');
+    assert.ok(bar.controls >= 120, `应为系统窗口按钮预留宽度，实际 ${bar.controls}`);
+    assert.ok(bar.paddingRight >= bar.controls, `右侧按钮必须避开系统窗口按钮，实际 ${bar.paddingRight} / ${bar.controls}`);
+    await app.evaluate(({ Menu }) => {
+      globalThis.__menuPopups = 0;
+      globalThis.__originalPopup = Menu.prototype.popup;
+      Menu.prototype.popup = function () { globalThis.__menuPopups++; };
+    });
+    await page.locator('.app-menu-button').click();
+    assert.equal(await app.evaluate(() => globalThis.__menuPopups), 1, '菜单按钮必须弹出完整原生菜单（Menu.popup）');
+    await app.evaluate(({ Menu }) => { if (globalThis.__originalPopup) Menu.prototype.popup = globalThis.__originalPopup; });
+    // The overlay colours follow the paper colour of the active theme.
+    await app.evaluate(({ BrowserWindow }) => {
+      const win = BrowserWindow.getAllWindows()[0];
+      globalThis.__overlays = [];
+      const original = win.setTitleBarOverlay.bind(win);
+      globalThis.__originalOverlay = original;
+      win.setTitleBarOverlay = options => { globalThis.__overlays.push(options); return original(options); };
+    });
+    await page.locator('[data-command="theme"]').click();
+    await page.waitForFunction(() => document.documentElement.dataset.theme === 'dark');
+    await page.waitForTimeout(200);
+    const darkOverlay = await app.evaluate(() => globalThis.__overlays.at(-1) || null);
+    assert.ok(darkOverlay, '切换主题后必须调用 setTitleBarOverlay');
+    assert.equal(darkOverlay.height, 38, '标题栏覆盖层高度应保持 38px');
+    assert.equal(darkOverlay.color, '#282c34', `深色主题下窗口按钮区应改为深色，实际 ${JSON.stringify(darkOverlay)}`);
+    assert.ok(darkOverlay.symbolColor && darkOverlay.symbolColor !== '#3b3f46', '深色模式下窗口按钮符号必须换色才可见');
+    await page.locator('[data-command="theme"]').click();
+    await page.locator('[data-command="theme"]').click();
+    await page.waitForFunction(() => document.documentElement.dataset.theme === 'light');
+    const lightOverlay = await app.evaluate(() => globalThis.__overlays.at(-1));
+    assert.equal(lightOverlay.color, '#ffffff', '回到浅色主题后窗口按钮区颜色也要跟着回来');
+    await app.evaluate(({ BrowserWindow }) => {
+      const win = BrowserWindow.getAllWindows()[0];
+      if (globalThis.__originalOverlay) win.setTitleBarOverlay = globalThis.__originalOverlay;
+    });
+    // Full screen hides the overlay buttons, so the reserved space goes away.
+    await page.evaluate(() => window.desktop.fullscreen());
+    await page.waitForFunction(() => document.body.classList.contains('is-fullscreen'), null, { timeout: 10000 });
+    assert.equal(await page.evaluate(() => getComputedStyle(document.querySelector('.topbar')).paddingRight), '10px', '全屏下不应再为窗口按钮留出空间');
+    await page.evaluate(() => window.desktop.fullscreen());
+    await page.waitForFunction(() => !document.body.classList.contains('is-fullscreen'), null, { timeout: 10000 });
+    assert.ok(await page.evaluate(() => parseFloat(getComputedStyle(document.querySelector('.topbar')).paddingRight)) >= bar.controls, '退出全屏后必须重新让出窗口按钮的位置');
+    console.log('STEP Windows title bar: one 38px row, native menu popup, theme-aware overlay');
+  }
   // The dense workbench stays available for users who want tabs / toolbar.
   await page.locator('[data-command="settings"]').click();
   await page.locator('#preferences [name="uiMode"]').selectOption('workbench');
@@ -70,7 +151,7 @@ try {
   console.log('STEP edit + source');
   await page.keyboard.press(process.platform === 'darwin' ? 'Meta+z' : 'Control+z');
   assert.equal(await page.locator('.cm-placeholder').count(), 1);
-  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+Shift+z' : 'Control+Shift+z');
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+Shift+z' : 'Control+y');
   await page.waitForFunction(() => document.querySelector('.cm-content').textContent.includes('Desktop verification'));
   console.log('STEP undo + redo');
   await page.locator('[data-command="source"]').click();
@@ -112,13 +193,17 @@ try {
   await page.locator('[data-command="save"]').click();
   await page.waitForFunction(() => document.querySelector('#save-status').textContent === '已保存');
   assert.match(await fs.readFile(savePath, 'utf8'), /- \[x\] pending/);
+  // Only a dirty document asks the user; a clean one is reloaded silently.
+  await page.locator('.md-widget').first().click();
+  await page.keyboard.insertText('本地未保存改动');
+  await page.waitForFunction(() => document.querySelector('#save-status').textContent === '有未保存的更改');
   await fs.writeFile(savePath, 'changed externally');
   await page.locator('[data-command="save"]').click();
   await page.waitForFunction(() => document.querySelector('#notification').textContent.includes('其他程序'));
   assert.equal(await fs.readFile(savePath, 'utf8'), 'changed externally');
   // The disk watcher should also report the external edit without a save.
-  await page.locator('#dialog').getByText('文件已在编辑器外修改').waitFor({ timeout: 8000 });
-  await page.locator('[data-menu-command="keep-local"]').click();
+  await page.locator('#dialog').getByText('文件已在编辑器外修改').waitFor({ timeout: 10000 });
+  await page.locator('[data-external-action="keep-local"]').click();
   console.log('STEP external change notification');
   const htmlPath = path.join(root, 'note.html');
   await app.evaluate(({ dialog }, filePath) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath }); }, htmlPath);
@@ -531,6 +616,60 @@ try {
   await page.keyboard.type(' 引用文字', { delay: 25 });
   assert.ok((await page.locator('.cm-content').textContent()).includes('引用文字'), '引用正文应可见');
   console.log('STEP immediate typesetting for empty list, task and quote prefixes');
+  // Ordinary characters are not syntax. These lines used to lose the `*`, the
+  // `==`, the `~` and the `$` while the block was active, because the previous
+  // layer matched delimiters with regular expressions instead of parsing.
+  const plainLines = [
+    '2 * 3 * 4 = 24',
+    '判断 a == b 和 c == d',
+    '路径 ~/.bashrc 和 ~/.zshrc',
+    '价格 $5 和 $6',
+    'x^2 + y^2 = z^2'
+  ];
+  for (const sample of plainLines) {
+    await fresh();
+    await page.keyboard.type(sample, { delay: 15 });
+    const active = await page.locator('.cm-live-line').first().textContent();
+    assert.equal(active, sample, `活跃块不得吞掉普通字符：${sample}`);
+    // Leaving the block must keep the same text in the rendered view.
+    await page.keyboard.press('End');
+    await page.keyboard.press('Enter');
+    await page.keyboard.type('尾段', { delay: 15 });
+    await page.waitForFunction(() => document.querySelectorAll('.md-widget').length >= 1);
+    const rendered = await page.locator('.md-widget p').first().textContent();
+    assert.equal(rendered.trim(), sample, `活跃块与渲染文本不一致：${sample}`);
+  }
+  console.log('STEP ordinary characters stay visible in the active block');
+  // Nested emphasis: the inner markers are hidden like every other completed
+  // syntax, so no asterisk is left on screen while the caret is outside.
+  await fresh();
+  // The trailing `X` keeps the caret outside the element: pressing End right
+  // after a hidden marker lands in front of it, because the zero-width widget
+  // is atomic for cursor movement.
+  await page.keyboard.type('**粗 *斜* 字**X', { delay: 15 });
+  assert.equal(await page.locator('.cm-live-line').first().textContent(), '粗 斜 字X', '嵌套强调的内层标记也应隐藏');
+  assert.ok(!(await page.locator('.cm-content').textContent()).includes('*'), '嵌套强调不应留下星号');
+  assert.equal(await page.locator('.cm-lv-strong').count(), 1, '外层仍是粗体');
+  assert.equal(await page.locator('.cm-lv-em').count(), 1, '内层仍是斜体');
+  console.log('STEP nested emphasis hides every marker');
+  // A code block nested in a list item and a `$$` formula block are literal:
+  // clicking into them shows the source exactly as written.
+  await fresh();
+  await page.keyboard.insertText('- 列表\n  ```sh\n  rm *.txt && echo *\n  ```');
+  await page.keyboard.press('ArrowUp');
+  await page.keyboard.press('ArrowUp');
+  let literalLines = await page.locator('.cm-live-line').allTextContents();
+  assert.ok(literalLines.includes('  rm *.txt && echo *'), `列表内代码块应完整可见，实际 ${JSON.stringify(literalLines)}`);
+  assert.ok(literalLines.includes('  ```sh'), '代码围栏应按源码显示');
+  await fresh();
+  await page.keyboard.insertText('$$\n\\sum_{i=1}^{m} x_i^2\n$$\n\n尾段');
+  await page.keyboard.press('ArrowUp');
+  await page.keyboard.press('ArrowUp');
+  await page.keyboard.press('ArrowUp');
+  literalLines = await page.locator('.cm-live-line').allTextContents();
+  assert.ok(literalLines.includes('\\sum_{i=1}^{m} x_i^2'), `公式块内容应保持字面量，实际 ${JSON.stringify(literalLines)}`);
+  assert.ok(literalLines.includes('$$'), '公式分隔符应按源码显示');
+  console.log('STEP literal code and formula blocks show their full source');
   // Leaving the block must not bring the raw `[ ]` back: the rendered widget
   // has to agree with the checkbox shown while the line was being typed.
   await fresh();
@@ -549,7 +688,16 @@ try {
   await page.locator('.cm-content').click();
   await page.keyboard.type(':smi');
   await page.locator('.cm-tooltip-autocomplete').waitFor();
+  // Wait for the accepted option itself: the tooltip element can exist one
+  // frame before its list is populated, and Enter would then insert a newline.
+  // Wait for the accepted option itself: the tooltip element can exist one
+  // frame before its list is populated, and Enter would then insert a newline.
+  await page.locator('.cm-tooltip-autocomplete li').first().waitFor();
+  // CodeMirror ignores the accept key for `interactionDelay` (75ms) after a
+  // completion opens, so a machine-speed Enter press lands on the plain keymap.
+  await page.waitForTimeout(120);
   await page.keyboard.press('Enter');
+  await page.waitForFunction(() => document.querySelector('.cm-content').textContent.includes('😄'));
   assert.match(await sourceText(), /😄/, '短代码补全应写入 Unicode 表情');
   console.log('STEP emoji shortcode autocomplete');
   // The picker is searchable and inserts at the caret.
@@ -705,14 +853,1648 @@ try {
   await page.waitForFunction(() => document.querySelector('#save-status').textContent === '已保存');
   assert.equal(await fs.readFile(crlfPath, 'utf8'), '- [ ] first\r\n- [x] second\r\n');
   console.log('STEP CRLF rendered task coordinates');
+  // ── Newline fidelity and rendered-table fixes ───────────────────────────
+  const openFile = async filePath => {
+    await app.evaluate(({ dialog }, target) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [target] }); }, filePath);
+    await page.locator('[data-command="open"]').click();
+    // Opening is asynchronous: wait for the new tab to become the active one.
+    await page.waitForFunction(name => document.querySelector('#location').textContent.includes(name), path.basename(filePath));
+    await page.locator('.cm-content').waitFor();
+  };
+  // A second window may own index 0 in getAllWindows(); broadcast so the
+  // assertion always sees the effect in the window this test drives.
+  const broadcast = command => app.evaluate(({ BrowserWindow }, name) => {
+    for (const window of BrowserWindow.getAllWindows()) window.webContents.send('inkstone:command', name);
+  }, command);
+  const saveOpenFile = async () => {
+    await page.locator('[data-command="save"]').click();
+    await page.waitForFunction(() => document.querySelector('#save-status').textContent === '已保存');
+  };
+  const sourceLines = () => page.locator('.cm-line').allTextContents();
+  const onlyCrlf = text => !text.replace(/\r\n/g, '').includes('\n');
+  // A CRLF file must stay CRLF after every kind of inserted line break, and
+  // the whole document must keep rendering (the old bug left "\r" characters
+  // inside line contents, which broke every block).
+  const crlfBlocks = path.join(root, 'crlf-blocks.md');
+  await fs.writeFile(crlfBlocks, '第一段\r\n\r\n第二段\r\n');
+  await openFile(crlfBlocks);
+  await page.locator('.md-widget p').first().click();
+  await page.keyboard.press('End');
+  await page.keyboard.press('Enter');
+  await page.keyboard.type('新段落', { delay: 20 });
+  await page.keyboard.press('Shift+Enter');
+  await page.keyboard.type('软换行', { delay: 20 });
+  // A blank line is what lets the inserted table start its own block.
+  await page.keyboard.press('Enter');
+  // The app's "insert table" inserts exactly this text at the caret.
+  await broadcast('table');
+  await page.waitForFunction(() => document.querySelectorAll('.md-widget table').length >= 1);
+  await saveOpenFile();
+  const crlfBlocksText = await fs.readFile(crlfBlocks, 'utf8');
+  assert.equal(onlyCrlf(crlfBlocksText), true, `CRLF 文档不得写入裸 LF：${JSON.stringify(crlfBlocksText)}`);
+  assert.match(crlfBlocksText, /第一段\r\n新段落\r\n软换行\r\n/);
+  assert.match(crlfBlocksText, /\| 列一 \| 列二 \|/);
+  assert.ok(await page.locator('.md-widget').count() >= 1, 'CRLF 文档仍应渲染块');
+  assert.equal(await page.locator('.md-widget table').count(), 1, '插入的表格应渲染');
+  console.log('STEP CRLF Enter / Shift+Enter / inserted table stay CRLF and render');
+  // Dragging a column edge on a CRLF table must write the width comment at the
+  // right place: table offsets come from the LF document, not from the CRLF text.
+  const crlfTable = path.join(root, 'crlf-table.md');
+  await fs.writeFile(crlfTable, '前言\r\n\r\n| 甲 | 乙 |\r\n| --- | --- |\r\n| 1 | 2 |\r\n');
+  await openFile(crlfTable);
+  await page.locator('.md-widget .table-column-resizer').first().waitFor();
+  await page.waitForTimeout(250);
+  const crlfHeader = await page.locator('.md-widget table th').first().boundingBox();
+  const crlfX = crlfHeader.x + crlfHeader.width - 5, crlfY = crlfHeader.y + crlfHeader.height / 2;
+  await page.mouse.move(crlfX, crlfY);
+  await page.mouse.down();
+  await page.mouse.move(crlfX + 60, crlfY, { steps: 8 });
+  await page.mouse.up();
+  await page.waitForFunction(() => document.querySelectorAll('.md-widget table colgroup col').length >= 2);
+  await saveOpenFile();
+  const crlfTableText = await fs.readFile(crlfTable, 'utf8');
+  assert.match(crlfTableText, /inkstone:columns/, 'CRLF 文档拖列宽必须写入注释');
+  assert.equal(onlyCrlf(crlfTableText), true, `列宽注释不得写入裸 LF：${JSON.stringify(crlfTableText)}`);
+  assert.match(crlfTableText, /\| 1 \| 2 \|\r\n\r\n<!-- inkstone:columns [\d.,]+ -->\r\n$/, '注释应在文档末尾，不得切断表格');
+  assert.match(crlfTableText, /^前言\r\n/, '拖动列宽不得动到前面的段落');
+  // The grid editor also takes its replacement range from the LF document.
+  await page.locator('.md-widget table td').first().click({ button: 'right' });
+  await page.locator('.table-editor').waitFor();
+  await page.locator('[data-cell="1-0"]').fill('7');
+  await page.locator('[data-table-op="apply"]').click();
+  await saveOpenFile();
+  const crlfGridText = await fs.readFile(crlfTable, 'utf8');
+  assert.match(crlfGridText, /^\| 7 +\| 2 +\|$/m, '图形化编辑器在 CRLF 文档中必须改到正确的表格');
+  assert.match(crlfGridText, /^前言\r\n\r\n\| 甲 +\| 乙 +\|$/m, '图形化编辑器不得吃掉前面的段落');
+  assert.equal(onlyCrlf(crlfGridText), true, '图形化编辑后仍是纯 CRLF');
+  console.log('STEP CRLF column drag writes the width comment in place');
+  // Mixed endings: only the edited line changes, and an untouched save is
+  // byte-for-byte identical.
+  const mixedPath = path.join(root, 'mixed-eol.md');
+  const mixed = '第一行\r\n\r\n第二行\n\n第三行\n\n第四行\r\n';
+  await fs.writeFile(mixedPath, mixed);
+  await openFile(mixedPath);
+  await page.locator('.md-widget p').filter({ hasText: '第三行' }).click();
+  await page.keyboard.press('End');
+  await page.keyboard.type('X');
+  await saveOpenFile();
+  assert.equal(await fs.readFile(mixedPath, 'utf8'), mixed.replace('第三行\n', '第三行X\n'),
+    '混合换行文件只应改动被编辑的那一行');
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+z' : 'Control+z');
+  await page.waitForTimeout(150);
+  await saveOpenFile();
+  assert.equal(await fs.readFile(mixedPath, 'utf8'), mixed, '混合换行文件未修改保存必须逐字节一致');
+  console.log('STEP mixed newline file keeps per-line endings on edit and unchanged save');
+  // Clicking a rendered cell without typing must never rewrite it. The old
+  // code copied the *rendered* text back, so `**b**` and links were lost.
+  const cellPath = path.join(root, 'cells.md');
+  const cellSource = '| a **b** c | [链接](https://x.y) |\n| --- | --- |\n| 1 | 2 |\n';
+  await fs.writeFile(cellPath, cellSource);
+  await openFile(cellPath);
+  await page.locator('.md-widget table th').first().click();
+  assert.equal(await page.locator('.md-widget table th').first().getAttribute('contenteditable'), 'plaintext-only');
+  assert.equal(await page.locator('.md-widget table th').first().textContent(), 'a **b** c', '编辑时应显示单元格的 Markdown 源码');
+  await page.locator('.md-widget table th').nth(1).click();
+  await page.keyboard.press('Escape');
+  assert.equal(await page.locator('.md-widget table strong').count(), 1, '未修改时应恢复原渲染 DOM');
+  assert.equal(await page.locator('.md-widget table a').count(), 1);
+  await page.locator('[data-command="source"]').click();
+  assert.deepEqual(await sourceLines(), cellSource.split('\n'), '只点击单元格不得改动文档');
+  await page.locator('[data-command="source"]').click();
+  await saveOpenFile();
+  await page.waitForTimeout(150);
+  assert.equal(await fs.readFile(cellPath, 'utf8'), cellSource, '只点击单元格再离开，文件必须不变');
+  console.log('STEP clicking a rendered cell without editing leaves the file untouched');
+  // Editing that cell keeps its inline Markdown syntax intact.
+  await page.locator('.md-widget table th').first().click();
+  await page.keyboard.press('End');
+  await page.keyboard.type(' X');
+  await page.keyboard.press('Tab');
+  await page.waitForFunction(() => document.activeElement?.closest?.('td, th')?.textContent === '[链接](https://x.y)', { timeout: 8000 });
+  assert.equal(await page.locator('.md-widget table th').nth(1).getAttribute('contenteditable'), 'plaintext-only', 'Tab 提交后应进入下一格继续编辑');
+  await page.keyboard.press('Escape');
+  await page.locator('[data-command="source"]').click();
+  assert.deepEqual(await sourceLines(), ['| a **b** c X | [链接](https://x.y) |', '| --- | --- |', '| 1 | 2 |', ''],
+    '修改含粗体的单元格必须保留 Markdown 语法');
+  await page.locator('[data-command="source"]').click();
+  assert.equal(await page.locator('.md-widget table strong').first().textContent(), 'b');
+  console.log('STEP editing a bold cell preserves its Markdown syntax');
+  // Tab walks cells and Enter appends a row, both from the rendered table.
+  await page.locator('.topbar [data-command="new"]').click();
+  await page.locator('.cm-content').click();
+  await page.keyboard.insertText('| 甲 | 乙 |\n| --- | --- |\n| 1 | 2 |\n');
+  await page.locator('.md-widget table td').first().click();
+  await page.keyboard.type('9');
+  await page.keyboard.press('Tab');
+  await page.waitForFunction(() => document.activeElement?.closest?.('td, th')?.textContent === '2', { timeout: 8000 });
+  const rowsBefore = await page.locator('.md-widget table tr').count();
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(rows => document.querySelectorAll('.md-widget table tr').length === rows + 1, rowsBefore, { timeout: 8000 });
+  const focusedCell = await page.evaluate(() => {
+    const cell = document.activeElement?.closest?.('td, th');
+    return cell ? { editable: cell.isContentEditable, index: cell.cellIndex, last: cell.parentElement === cell.closest('table').rows[cell.closest('table').rows.length - 1] } : null;
+  });
+  assert.deepEqual(focusedCell, { editable: true, index: 0, last: true }, 'Enter 提交后应追加一行并进入新行第一格');
+  await page.keyboard.press('Escape');
+  await page.locator('[data-command="source"]').click();
+  assert.deepEqual(await sourceLines(), ['| 甲 | 乙 |', '| --- | --- |', '| 9 | 2 |', '|  |  |', ''],
+    '渲染单元格内 Tab / Enter 应写回真实源码');
+  await page.locator('[data-command="source"]').click();
+  console.log('STEP rendered cell Tab / Enter navigation and row append');
+  // A table inside a blockquote is editable and keeps its container prefix.
+  await page.locator('.topbar [data-command="new"]').click();
+  await page.locator('.cm-content').click();
+  await page.keyboard.insertText('> | a | b |\n> | --- | --- |\n> | 1 | 2 |\n');
+  await page.locator('.md-widget blockquote table th').first().waitFor();
+  await page.locator('.md-widget blockquote table th').first().click();
+  assert.equal(await page.locator('.md-widget blockquote table th').first().getAttribute('contenteditable'), 'plaintext-only', '引用内的表格也要能就地编辑');
+  await page.keyboard.press('End');
+  await page.keyboard.type('Q');
+  await page.keyboard.press('Tab');
+  await page.waitForTimeout(200);
+  await page.keyboard.press('Escape');
+  await page.locator('[data-command="source"]').click();
+  assert.deepEqual(await sourceLines(), ['> | aQ | b |', '> | --- | --- |', '> | 1 | 2 |', ''],
+    '引用内表格的改动只影响单元格文本，不破坏 "> " 前缀');
+  await page.locator('[data-command="source"]').click();
+  assert.match(await page.locator('.md-widget blockquote table').textContent(), /aQ/);
+  console.log('STEP table inside a blockquote is editable');
+  // ── Iteration 11: incremental block rendering ───────────────────────────
+  // Typing may only re-render the block that changed. Everything else must keep
+  // its DOM (so Mermaid, KaTeX and images are never re-created) and every click
+  // that resolves through a widget must still hit the right source character
+  // even though the block moved.
+  const incrementalPath = path.join(root, 'incremental.md');
+  const incrementalSource = [
+    '# 增量渲染', '', '[TOC]', '',
+    '图表上方的段落。', '',
+    '```mermaid', 'flowchart LR', '  A[输入] --> B[输出]', '```', '',
+    '## 重复标题', '', '图表下方的段落文字。', '',
+    '| 甲 | 乙 |', '| --- | --- |', '| 1 | 2 |', '',
+    '- [ ] 下方任务', '',
+    '引用脚注[^a] 与 [链接][ref]。', '',
+    '## 重复标题', '',
+    '[^a]: 脚注定义', '',
+    '[ref]: https://example.com/ref', ''
+  ].join('\n');
+  await fs.writeFile(incrementalPath, incrementalSource);
+  await openFile(incrementalPath);
+  await ensureLive();
+  await page.waitForFunction(() => document.querySelectorAll('#editor-host .mermaid svg').length === 1);
+  // Make the block above the diagram active first, so the typing below happens
+  // inside an editable block instead of the pristine reading view.
+  await page.locator('#editor-host .md-widget p').filter({ hasText: '图表上方的段落' }).click();
+  await page.keyboard.press('End');
+  await page.waitForFunction(() => document.querySelectorAll('#editor-host .md-widget').length >= 4);
+  // Everything is scoped to #editor-host: documents that are no longer active
+  // keep their rendered DOM elsewhere in the page.
+  const beforeTyping = await page.evaluate(() => {
+    const host = document.querySelector('#editor-host');
+    const widgets = [...host.querySelectorAll('.md-widget')];
+    widgets.forEach(widget => { widget.dataset.keep = widget.dataset.from; });
+    host.querySelector('.mermaid svg').dataset.keep = 'diagram';
+    return {
+      widgets: widgets.length,
+      toc: [...host.querySelectorAll('.toc a')].map(link => link.getAttribute('href')),
+      duplicate: !!host.querySelector('[id="重复标题-1"]'),
+      footnote: host.querySelector('sup.footnote-ref a')?.getAttribute('title') || '',
+      reference: host.querySelector('.md-widget a[href="https://example.com/ref"]')?.textContent || ''
+    };
+  });
+  assert.deepEqual(beforeTyping.toc, ['#增量渲染', '#重复标题', '#重复标题-1'], `[TOC] 应列出全部标题：${JSON.stringify(beforeTyping.toc)}`);
+  assert.equal(beforeTyping.duplicate, true, '重复标题应有编号锚点');
+  assert.equal(beforeTyping.footnote, '脚注定义', '脚注引用应带上定义文本作为悬浮提示');
+  assert.equal(beforeTyping.reference, '链接', '引用式链接应跨块解析');
+  await page.keyboard.insertText('XYZ');
+  await page.waitForTimeout(150);
+  const afterTyping = await page.evaluate(() => {
+    const host = document.querySelector('#editor-host');
+    const widgets = [...host.querySelectorAll('.md-widget')];
+    const svg = host.querySelector('.mermaid svg');
+    return {
+      svgKept: svg?.dataset.keep === 'diagram',
+      diagrams: host.querySelectorAll('.mermaid svg').length,
+      widgets: widgets.length,
+      marked: widgets.filter(widget => widget.dataset.keep).length,
+      unmarked: widgets.filter(widget => !widget.dataset.keep).map(widget => widget.textContent.slice(0, 12)),
+      toc: [...host.querySelectorAll('.toc a')].map(link => link.getAttribute('href'))
+    };
+  });
+  assert.equal(afterTyping.svgKept, true, '在上方段落输入不得重建 Mermaid SVG 节点');
+  assert.equal(afterTyping.diagrams, 1);
+  assert.equal(afterTyping.marked, afterTyping.widgets, `除被编辑的块外，其余 widget 必须复用 DOM：${JSON.stringify(afterTyping.unmarked)}`);
+  assert.deepEqual(afterTyping.toc, beforeTyping.toc, '[TOC] 在输入后仍应列出同样的锚点');
+  // A block that moved must still resolve clicks to the correct source column,
+  // which is the whole trap of reusing widget DOM: its handlers captured the
+  // old document positions.
+  const paragraphPoint = offset => page.evaluate(at => {
+    const paragraph = [...document.querySelectorAll('#editor-host .md-widget p')].find(node => (node.textContent || '').includes('图表下方的段落文字'));
+    const text = [...paragraph.childNodes].find(node => node.nodeType === 3);
+    const range = document.createRange();
+    range.setStart(text, at);
+    range.setEnd(text, at);
+    const rect = range.getBoundingClientRect();
+    return { x: rect.left + 1, y: rect.top + rect.height / 2 };
+  }, offset);
+  const caretAfterTyping = await page.locator('#position').textContent();
+  const paragraphClick = await paragraphPoint(6);
+  await page.mouse.click(paragraphClick.x, paragraphClick.y);
+  const clicked = await page.locator('#position').textContent();
+  assert.match(caretAfterTyping, /^行 5，列 \d+$/, `输入后光标应停在第 5 行的段落里，实际 ${caretAfterTyping}`);
+  assert.match(clicked, /^行 14，列 [78]$/, `点击图表下方段落第 7 个字符应落到第 14 行第 7 列，实际 ${clicked}`);
+  // The same applies to a cell edit and a task toggle further down: both write
+  // back through the (now shifted) positions of their block.
+  await ensureLive();
+  await page.locator('#editor-host .md-widget table td').first().click();
+  assert.equal(await page.locator('#editor-host .md-widget table td').first().getAttribute('contenteditable'), 'plaintext-only');
+  await page.keyboard.insertText('9');
+  // Tab commits the cell and enters the next one; Escape leaves that edit
+  // untouched, so the task checkbox below is clicked from a clean state.
+  await page.keyboard.press('Tab');
+  await page.waitForTimeout(150);
+  await page.keyboard.press('Escape');
+  await page.locator('#editor-host .md-widget input[type="checkbox"]').first().click();
+  await saveOpenFile();
+  const incrementalSaved = await fs.readFile(incrementalPath, 'utf8');
+  assert.match(incrementalSaved, /图表上方的段落。XYZ/, '输入必须落在上方段落');
+  assert.match(incrementalSaved, /^\| 9 +\| 2 +\|$/m, `单元格写回位置必须正确：${incrementalSaved}`);
+  assert.match(incrementalSaved, /- \[x\] 下方任务/, '任务勾选写回位置必须正确');
+  assert.match(incrementalSaved, /^\| 甲 +\| 乙 +\|$/m, '写回不得破坏表头或其它行');
+  assert.match(incrementalSaved, /引用脚注\[\^a\] 与 \[链接\]\[ref\]。/, '引用式链接与脚注源码不得被改写');
+  assert.equal(await page.evaluate(() => document.querySelectorAll('#editor-host .mermaid svg').length), 1);
+  console.log('STEP incremental block rendering keeps widget DOM and click positions');
+  // A Save As into a folder that already owns a different image with the same
+  // name renames the copy; the editor must follow that rewrite, or the next save
+  // silently points the document at the wrong image again.
+  const logoFrom = path.join(root, 'logo-from'), logoTo = path.join(root, 'logo-to');
+  await fs.mkdir(path.join(logoFrom, 'assets'), { recursive: true });
+  await fs.mkdir(path.join(logoTo, 'assets'), { recursive: true });
+  await fs.writeFile(path.join(logoFrom, 'assets', 'logo.png'), 'logo-from-a');
+  await fs.writeFile(path.join(logoTo, 'assets', 'logo.png'), 'logo-from-b');
+  const logoPath = path.join(logoFrom, 'doc.md');
+  await fs.writeFile(logoPath, '图片引用：\n\n![图](assets/logo.png)\n');
+  await openFile(logoPath);
+  await ensureLive();
+  // Make the document dirty so the Save As below really writes (and so a local
+  // edit is proven to survive the reference rewrite).
+  await page.locator('.md-widget p').first().click();
+  await page.keyboard.press('End');
+  await page.keyboard.insertText('A');
+  await page.waitForFunction(() => document.querySelector('#save-status').textContent === '有未保存的更改');
+  const logoTarget = path.join(logoTo, 'doc.md');
+  await app.evaluate(({ dialog }, filePath) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath }); }, logoTarget);
+  await page.locator('[data-command="document-menu"]').click();
+  await page.locator('[data-menu-command="save-as"]').click();
+  await page.waitForFunction(() => document.querySelector('#save-status').textContent === '已保存');
+  assert.match(await fs.readFile(logoTarget, 'utf8'), /assets\/logo-1\.png/, '磁盘上的引用应改成不冲突的新名字');
+  assert.match(await fs.readFile(logoTarget, 'utf8'), /图片引用：A/, '本地编辑不得因引用改写而丢失');
+  assert.equal(await fs.readFile(path.join(logoTo, 'assets', 'logo.png'), 'utf8'), 'logo-from-b', '不得覆盖目标目录已有的同名图片');
+  assert.equal(await fs.readFile(path.join(logoTo, 'assets', 'logo-1.png'), 'utf8'), 'logo-from-a');
+  await page.locator('[data-command="source"]').click();
+  assert.match(await sourceText(), /assets\/logo-1\.png/, '编辑器源码必须跟上引用改写');
+  assert.ok(!(await sourceText()).includes('](assets/logo.png)'), '编辑器不得保留旧引用');
+  await page.waitForTimeout(800);
+  assert.equal(await page.locator('#save-status').textContent(), '已保存', '改写引用后文档不得变成未保存状态');
+  // The next save must not put the stale reference back on disk.
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+End' : 'Control+End');
+  await page.keyboard.insertText('X');
+  await page.locator('[data-command="save"]').click();
+  await page.waitForFunction(() => document.querySelector('#save-status').textContent === '已保存');
+  const logoAfter = await fs.readFile(logoTarget, 'utf8');
+  assert.match(logoAfter, /assets\/logo-1\.png/, '再次保存不得把图片引用改回去');
+  assert.ok(!logoAfter.includes('](assets/logo.png)'), `再次保存后引用仍必须指向新名字：${logoAfter}`);
+  assert.match(logoAfter, /X/);
+  await page.locator('[data-command="source"]').click();
+  console.log('STEP Save As keeps rewritten asset references in the editor');
+  // ── Image references, document HTML, export residue ────────────────────
+  // Real PNG bytes so a loaded <img> proves the asset protocol found the file.
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAaklEQVR4nAXB0QAAAAhDwZGMJJJI+nwUkYwkou4kYVGixYgVESckY1OmzZg1MWekwkUVXUyxRYorpMZNNd1Ms02aa6TBQw09zLBDhhukxUstvcyyS5ZbpOBQocOEDQkXpMNHHX3MsUeOOx6wLFSBm6x5zwAAAABJRU5ErkJggg==', 'base64');
+  const exists = file => fs.access(file).then(() => true, () => false);
+  const imagesRoot = path.join(root, 'images');
+  const imageDoc = path.join(imagesRoot, 'docs', 'images.md');
+  await fs.mkdir(path.join(imagesRoot, 'docs', 'assets'), { recursive: true });
+  await fs.mkdir(path.join(imagesRoot, 'shared'), { recursive: true });
+  await fs.writeFile(path.join(imagesRoot, 'docs', 'assets', '图片.png'), png);
+  await fs.writeFile(path.join(imagesRoot, 'docs', 'assets', 'my pic.png'), png);
+  await fs.writeFile(path.join(imagesRoot, 'shared', '上级.png'), png);
+  await fs.writeFile(path.join(imagesRoot, 'absolute.png'), png);
+  // A real local server proves `http:` images are displayed and kept verbatim.
+  const imageServer = http.createServer((request, response) => {
+    if (request.url === '/a.png') { response.writeHead(200, { 'Content-Type': 'image/png' }); response.end(png); return; }
+    response.writeHead(404).end();
+  });
+  await new Promise(resolve => imageServer.listen(0, '127.0.0.1', resolve));
+  imageServer.unref();
+  const imagePort = imageServer.address().port;
+  // Several windows exist by now, so test commands are addressed to the window
+  // this test drives instead of relying on window order or focus.
+  await page.evaluate(() => { window.__inkstoneTestMarker = 'target'; });
+  const sendTestCommand = name => app.evaluate(async ({ BrowserWindow }, commandName) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      const mine = await window.webContents.executeJavaScript('window.__inkstoneTestMarker === "target"').catch(() => false);
+      if (mine) { window.webContents.send('inkstone:command', commandName); return true; }
+    }
+    return false;
+  }, name);
+  try {
+    const absoluteImage = path.join(imagesRoot, 'absolute.png').split(path.sep).join('/');
+    await fs.writeFile(imageDoc, [
+      '# 图片引用', '',
+      '![](assets/图片.png)', '',
+      '![](assets/my%20pic.png)', '',
+      '![](<assets/my pic.png>)', '',
+      '![](../shared/上级.png)', '',
+      `![](<${absoluteImage}>)`, '',
+      `![](http://127.0.0.1:${imagePort}/a.png)`, '',
+      // Network references: no host is ever contacted, so no src is generated.
+      '![](file://192.0.2.1/share/a.png)', '',
+      '![](//192.0.2.1/share/a.png)', ''
+    ].join('\n'));
+    await openFile(imageDoc);
+    await ensureLive();
+    await page.waitForFunction(() => document.querySelectorAll('#editor-host .md-widget img').length === 8);
+    const imageState = await page.evaluate(async () => {
+      const nodes = [...document.querySelectorAll('#editor-host .md-widget img')];
+      await Promise.all(nodes.map(node => new Promise(resolve => {
+        node.loading = 'eager';
+        if (node.complete) return resolve();
+        node.addEventListener('load', () => resolve(), { once: true });
+        node.addEventListener('error', () => resolve(), { once: true });
+        setTimeout(resolve, 8000);
+      })));
+      return nodes.map(node => ({ src: node.getAttribute('src') || '', naturalWidth: node.naturalWidth, mdSrc: node.dataset.mdSrc || '' }));
+    });
+    assert.equal(imageState.length, 8);
+    imageState.slice(0, 6).forEach((image, index) => assert.ok(image.naturalWidth > 0, `第 ${index + 1} 张图片必须加载成功：${JSON.stringify(image)}`));
+    assert.match(imageState[5].src, new RegExp(`^http://127\\.0\\.0\\.1:${imagePort}/a\\.png$`), 'http 图片应保留原 URL');
+    for (const image of imageState.slice(0, 5)) assert.match(image.src, /^inkstone-asset:\/\//, '本地图片必须走资产协议');
+    // UNC and host-ful file URLs are dropped in the renderer: no asset URL is
+    // built, so opening the document cannot make Windows contact that host.
+    for (const image of imageState.slice(6)) {
+      assert.equal(image.src, '', `网络引用不得生成 src：${JSON.stringify(image)}`);
+      assert.equal(image.naturalWidth, 0);
+    }
+    assert.equal(decodeURIComponent(imageState[0].mdSrc), 'assets/图片.png', 'data-md-src 必须保留 Markdown 中的写法');
+    const imageHtmlPath = path.join(root, 'images.html');
+    await app.evaluate(({ dialog }, filePath) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath }); }, imageHtmlPath);
+    await page.locator('[data-command="export"]').click();
+    await page.locator('[data-export="html"]').click();
+    await page.waitForFunction(() => !document.querySelector('#dialog').open);
+    const imageHtml = await fs.readFile(imageHtmlPath, 'utf8');
+    assert.equal((imageHtml.match(/data:image\/png;base64,/g) || []).length, 5, '导出应内联五张本地图片');
+    assert.ok(!imageHtml.includes('inkstone-asset://'), '导出不得残留应用内部图片协议');
+    assert.ok(imageHtml.includes(`http://127.0.0.1:${imagePort}/a.png`), 'http 图片在导出中保持原 URL');
+    console.log('STEP image paths (encoded, angle-bracket, ../, absolute, http) render and export inlines local ones');
+    // Document HTML must never reach the application's own click delegation.
+    const injectedSource = [
+      '# 注入检查', '',
+      '<span data-command="toggle-ui">注入命令</span>', '',
+      '<span data-menu-command="trash">菜单命令</span>', '',
+      '<span data-path="C:/secret.md">路径委托</span>', '',
+      '<span data-copy-code>伪复制</span>', '',
+      // Attribute names are case-insensitive, and SVG / MathML attributes go
+      // through the same FORBID_ATTR lookup as HTML ones.
+      '<span DATA-COMMAND="upper" Data-Path="mixed">大写委托</span>', '',
+      '<svg width="12" height="12" data-command="svg"><circle DATA-EXPORT="x" r="5"/></svg>', '',
+      '<math data-menu-command="math"><mi data-section="1">m</mi></math>', '',
+      '```js', 'const injected = 1;', '```', ''
+    ].join('\n');
+    await page.locator('.topbar [data-command="new"]').click();
+    await page.locator('.cm-content').click();
+    await page.keyboard.insertText(injectedSource);
+    await page.waitForFunction(() => document.querySelectorAll('#editor-host .md-widget .code-copy').length === 1);
+    assert.equal(await page.locator('#editor-host .md-widget [data-command]').count(), 0, '文档内容不得保留 data-command');
+    assert.equal(await page.locator('#editor-host .md-widget [data-menu-command]').count(), 0, '文档内容不得保留 data-menu-command');
+    assert.equal(await page.locator('#editor-host .md-widget [data-path]').count(), 0, '文档内容不得保留 data-path');
+    assert.equal(await page.locator('#editor-host .md-widget [data-copy-code]:not(.code-copy)').count(), 0, '文档内容不得伪造复制按钮');
+    assert.equal(await page.locator('#editor-host .md-widget .code-copy').count(), 1, '代码块复制按钮仍由应用插入');
+    // The SVG / MathML nodes must really be in the document for the check below
+    // to mean anything, and no delegated attribute may survive on any of them.
+    assert.ok(await page.locator('#editor-host .md-widget svg').count() >= 1, '文档中的 SVG 应保留');
+    assert.ok(await page.locator('#editor-host .md-widget math').count() >= 1, '文档中的 MathML 应保留');
+    assert.equal(await page.evaluate(() => {
+      const reserved = /^(data-(?:command|menu-command|quick-command|quick-path|path|table-op|index|cell|align|copy-code|image-action|external-action|dismiss|history|history-dir|history-name|export|side|close|document|section|emoji|md-skip|md-src|from|to|inkstone-index))$/i;
+      // Descendants only: the widget root carries the editor's own data-from/data-to.
+      return [...document.querySelectorAll('#editor-host .md-widget *')]
+        // The copy button is the application's own control, inserted after sanitising.
+        .filter(node => !(node.classList?.contains('code-copy')))
+        .some(node => [...(node.attributes || [])].some(attribute => reserved.test(attribute.name)));
+    }), false, '大小写变体与 SVG/MathML 上的保留属性同样必须被剥离');
+    const uiBefore = await page.evaluate(() => ({ ui: document.documentElement.dataset.ui, open: document.querySelector('#dialog').open, tabs: document.querySelectorAll('.document-tab').length }));
+    await page.locator('#editor-host .md-widget span').filter({ hasText: '注入命令' }).click();
+    await page.waitForTimeout(350);
+    const uiAfter = await page.evaluate(() => ({ ui: document.documentElement.dataset.ui, open: document.querySelector('#dialog').open, tabs: document.querySelectorAll('.document-tab').length }));
+    assert.deepEqual(uiAfter, uiBefore, '点击文档内伪造的 data-* 委托不得驱动应用');
+    // The real copy button still works (the system clipboard is not available
+    // in this environment, so the button's own confirmation is the evidence).
+    await page.locator('#editor-host .md-widget .code-copy').click();
+    await page.waitForFunction(() => document.querySelector('#editor-host .md-widget .code-copy')?.textContent === '已复制');
+    console.log('STEP document-injected data-* attributes are inert, the real copy button still copies');
+    // Exports and the clipboard payload must not carry editor-only chrome.
+    const cleanSource = '# 导出检查\n\n```js\nconst exportedMarker = 42;\n```\n';
+    await page.locator('.topbar [data-command="new"]').click();
+    await page.locator('.cm-content').click();
+    await page.keyboard.insertText(cleanSource);
+    await page.waitForFunction(() => document.querySelectorAll('#editor-host .md-widget .code-copy').length === 1);
+    const cleanHtmlPath = path.join(root, 'clean.html');
+    await app.evaluate(({ dialog }, filePath) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath }); }, cleanHtmlPath);
+    await page.locator('[data-command="export"]').click();
+    await page.locator('[data-export="html"]').click();
+    await page.waitForFunction(() => !document.querySelector('#dialog').open);
+    const cleanHtml = await fs.readFile(cleanHtmlPath, 'utf8');
+    assert.ok(!cleanHtml.includes('code-copy'), '导出 HTML 不得包含复制按钮或其样式');
+    assert.ok(!cleanHtml.includes('data-copy-code'), '导出 HTML 不得包含复制按钮属性');
+    assert.ok(!cleanHtml.includes('复制'), '导出 HTML 不得包含复制按钮文字');
+    assert.match(cleanHtml, /exportedMarker/, '导出仍必须包含正文');
+    // PDF prints the same DOM, so the print container is checked before printing
+    // (PDF text itself cannot be asserted without a PDF text extractor).
+    assert.equal(await page.locator('#print-document .code-copy').count(), 0, '打印用 DOM 不得包含复制按钮');
+    assert.ok(!(await page.locator('#print-document').textContent()).includes('复制'), '打印用 DOM 不得包含复制按钮文字');
+    // Intercept the clipboard write itself: the payload must be chrome-free.
+    await app.evaluate(({ clipboard }) => {
+      globalThis.__clipboardWrites = [];
+      const original = clipboard.write.bind(clipboard);
+      clipboard.write = async items => {
+        try {
+          for (const item of items) {
+            if (!item.types?.includes('text/html')) continue;
+            const value = await item.getType('text/html');
+            globalThis.__clipboardWrites.push(String(typeof value === 'string' ? value : await value.text()));
+          }
+        } catch { /* recording only */ }
+        return original(items);
+      };
+    });
+    await page.locator('.cm-content').click();
+    await page.keyboard.press(process.platform === 'darwin' ? 'Meta+a' : 'Control+a');
+    await sendTestCommand('copy-html');
+    let copiedHtml = null;
+    for (let attempt = 0; attempt < 40 && !copiedHtml; attempt++) {
+      copiedHtml = (await app.evaluate(() => globalThis.__clipboardWrites || [])).find(html => typeof html === 'string' && html.includes('exportedMarker')) || null;
+      if (!copiedHtml) await page.waitForTimeout(100);
+    }
+    assert.ok(copiedHtml, '复制为 HTML 必须经过被拦截的剪贴板写入');
+    assert.ok(!copiedHtml.includes('code-copy'), '复制为 HTML 不得包含复制按钮');
+    assert.ok(!copiedHtml.includes('复制'), '复制为 HTML 不得包含复制按钮文字');
+    console.log('STEP exported HTML and copy-as-HTML carry no copy button');
+  } finally {
+    imageServer.close();
+  }
+  // ── An unsaved document keeps pasted images in the app temp folder ─────
+  const pastedSource = path.join(root, '图片 示例.png');
+  await fs.writeFile(pastedSource, png);
+  const activeDocumentId = () => page.evaluate(() => [...document.querySelectorAll('[data-document]')].find(node => node.getAttribute('aria-selected') === 'true')?.dataset.document);
+  const insertFromDialog = async filePath => {
+    await app.evaluate(({ dialog }, target) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [target] }); }, filePath);
+    // The real IPC, driven directly: the dialog stub names the picture (Chinese
+    // plus a space), and the returned reference is inserted as the editor would.
+    const inserted = await page.evaluate(id => window.desktop.insertImage(id), await activeDocumentId());
+    assert.ok(inserted.ok, `插入图片失败：${JSON.stringify(inserted)}`);
+    await page.locator('.cm-content').click();
+    await page.keyboard.insertText(`![图片](${inserted.value})\n`);
+    await page.waitForFunction(() => document.querySelectorAll('#editor-host .md-widget img').length === 1);
+    return inserted.value;
+  };
+  await page.locator('.topbar [data-command="new"]').click();
+  await page.locator('.cm-content').click();
+  const unsavedId = await activeDocumentId();
+  assert.ok(unsavedId);
+  await insertFromDialog(pastedSource);
+  const tempImage = await page.evaluate(async () => {
+    const node = document.querySelector('#editor-host .md-widget img');
+    await new Promise(resolve => {
+      node.loading = 'eager';
+      if (node.complete) return resolve();
+      node.addEventListener('load', () => resolve(), { once: true });
+      node.addEventListener('error', () => resolve(), { once: true });
+      setTimeout(resolve, 8000);
+    });
+    return { naturalWidth: node.naturalWidth, src: node.getAttribute('src') || '', mdSrc: node.dataset.mdSrc || '' };
+  });
+  assert.ok(tempImage.naturalWidth > 0, `未保存文档粘贴的图片必须立即显示：${JSON.stringify(tempImage)}`);
+  const insertedName = decodeURIComponent(tempImage.mdSrc.split('/').pop());
+  assert.match(insertedName, /^图片-示例-[0-9a-f]{8}\.png$/, `中文与空格的图片名应保留：${insertedName}`);
+  const tempDirectory = path.join(root, 'profile', 'unsaved-assets', unsavedId);
+  assert.equal(await exists(path.join(tempDirectory, 'assets', insertedName)), true, '未保存文档的图片应写入按文档 id 划分的临时目录');
+  const unsavedTarget = path.join(root, 'unsaved-save', '未保存文档.md');
+  await app.evaluate(({ dialog }, filePath) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath }); }, unsavedTarget);
+  await page.locator('[data-command="save"]').click();
+  await page.waitForFunction(() => document.querySelector('#save-status').textContent === '已保存');
+  assert.ok((await fs.readFile(unsavedTarget, 'utf8')).includes(`assets/${insertedName}`), '保存后的文档必须引用迁移过去的图片');
+  assert.deepEqual(await fs.readdir(path.join(root, 'unsaved-save', 'assets')), [insertedName], '临时图片应迁移到文档旁的 assets');
+  assert.ok((await fs.readFile(path.join(root, 'unsaved-save', 'assets', insertedName))).equals(png), '迁移的字节必须一致');
+  assert.equal(await exists(tempDirectory), false, '首次保存后应清理临时目录');
+  assert.ok((await page.locator('#location').textContent()).includes('未保存文档.md'), '另存为后文档应脱离未保存状态');
+  await page.waitForFunction(() => document.querySelector('#editor-host .md-widget img')?.naturalWidth > 0);
+  console.log('STEP unsaved document inserts an image, shows it, and migrates it on Save As');
+  // Closing a never-saved document with "保存" migrates its images first.
+  await fs.mkdir(path.join(root, 'close-save'), { recursive: true });
+  await page.locator('.topbar [data-command="new"]').click();
+  await page.locator('.cm-content').click();
+  const closeSaveId = await activeDocumentId();
+  const closeSaveRef = await insertFromDialog(pastedSource);
+  const closeSaveName = decodeURIComponent(closeSaveRef.split('/').pop());
+  const closeTarget = path.join(root, 'close-save', 'closing.md');
+  await app.evaluate(({ dialog }, filePath) => {
+    dialog.showSaveDialog = async () => ({ canceled: false, filePath });
+    dialog.showMessageBox = async () => ({ response: 0, checkboxChecked: false });
+  }, closeTarget);
+  await sendTestCommand('close');
+  await page.waitForFunction(id => ![...document.querySelectorAll('[data-document]')].some(node => node.dataset.document === id), closeSaveId, { timeout: 10000 });
+  assert.ok((await fs.readFile(closeTarget, 'utf8')).includes(closeSaveRef), '关闭时保存必须写出图片引用');
+  assert.ok(await exists(path.join(root, 'close-save', 'assets', closeSaveName)), '关闭时保存也必须迁移临时图片');
+  assert.equal(await exists(path.join(root, 'profile', 'unsaved-assets', closeSaveId)), false, '迁移后应清理临时目录');
+  console.log('STEP closing an unsaved document with Save migrates its images');
+  // Closing a never-saved document discards its temporary images.
+  await page.locator('.topbar [data-command="new"]').click();
+  await page.locator('.cm-content').click();
+  const discardId = await activeDocumentId();
+  await insertFromDialog(pastedSource);
+  const discardDirectory = path.join(root, 'profile', 'unsaved-assets', discardId);
+  assert.equal(await exists(discardDirectory), true);
+  await app.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 2, checkboxChecked: false }); });
+  await sendTestCommand('close');
+  await page.waitForFunction(id => ![...document.querySelectorAll('[data-document]')].some(node => node.dataset.document === id), discardId, { timeout: 10000 });
+  await page.waitForTimeout(400);
+  assert.equal(await exists(discardDirectory), false, '关闭未保存的文档应清理临时图片目录');
+  console.log('STEP closing an unsaved document cleans its temporary images');
   // A narrow desktop window must not overflow horizontally or hide the editor.
   await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setBounds({ x: 100, y: 80, width: 760, height: 620 }));
   await page.waitForTimeout(300);
   assert.ok(await page.locator('#editor-host').isVisible(), '窄屏下编辑区仍可见');
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 2), false, '窄屏不应产生横向溢出');
   console.log('STEP narrow desktop viewport');
+  // ── Document lifecycle safety and robustness ───────────────────────────
+  // 1) Reloading a dirty document after an external edit must leave a copy of
+  //    the local text that nothing prunes automatically.
+  const reloadPath = path.join(root, 'reload-discard.md');
+  await fs.writeFile(reloadPath, 'disk version one\n');
+  await openFile(reloadPath);
+  await page.locator('.md-widget p').first().click();
+  await page.keyboard.press('End');
+  await page.keyboard.type('LOCALEDIT', { delay: 20 });
+  await page.waitForFunction(() => document.querySelector('#save-status').textContent === '有未保存的更改');
+  await page.waitForTimeout(700);
+  await fs.writeFile(reloadPath, 'disk version two\n');
+  await page.locator('#dialog').getByText('文件已在编辑器外修改').waitFor({ timeout: 15000 });
+  assert.match(await page.locator('#dialog .dialog-description').textContent(), /恢复副本/, '对话框必须如实说明本地内容会被保留');
+  await page.locator('[data-external-action="reload"]').click();
+  await page.waitForFunction(() => !document.querySelector('#dialog').open);
+  await page.waitForFunction(() => document.querySelector('.cm-content').textContent.includes('disk version two'));
+  await page.waitForFunction(() => document.querySelector('#notification').textContent.includes('另存为'));
+  const reloadNotice = await page.locator('#notification').textContent();
+  const discardedDirectory = path.join(root, 'profile', 'recovery', 'discarded');
+  const discardedNames = (await fs.readdir(discardedDirectory)).filter(name => name.endsWith('-reload-discard.md'));
+  assert.equal(discardedNames.length, 1, `重新加载应留下一个恢复副本，实际 ${discardedNames.length}`);
+  const discardedFile = path.join(discardedDirectory, discardedNames[0]);
+  assert.match(await fs.readFile(discardedFile, 'utf8'), /LOCALEDIT/, '副本必须是本地版本');
+  assert.match(await fs.readFile(discardedFile, 'utf8'), /disk version one/);
+  assert.ok(reloadNotice.includes(discardedFile), `界面必须告知副本位置，实际：${reloadNotice}`);
+  console.log('STEP reload keeps a discarded copy of dirty local text');
+  // 2) "Keep local text" must unblock the next save, and the disk version that
+  //    gets overwritten has to stay in the save history.
+  const keepPath = path.join(root, 'keep-local.md');
+  await fs.writeFile(keepPath, 'base line\n');
+  await openFile(keepPath);
+  await page.locator('.md-widget p').first().click();
+  await page.keyboard.press('End');
+  await page.keyboard.type('KEEP', { delay: 20 });
+  await page.waitForFunction(() => document.querySelector('#save-status').textContent === '有未保存的更改');
+  await page.waitForTimeout(700);
+  await fs.writeFile(keepPath, 'external wins\n');
+  await page.locator('#dialog').getByText('文件已在编辑器外修改').waitFor({ timeout: 15000 });
+  await page.locator('[data-external-action="keep-local"]').click();
+  await page.waitForFunction(() => !document.querySelector('#dialog').open);
+  await saveOpenFile();
+  assert.match(await fs.readFile(keepPath, 'utf8'), /KEEP/, '保留本地内容后保存必须写入本地版本');
+  assert.doesNotMatch(await fs.readFile(keepPath, 'utf8'), /external wins/);
+  await page.locator('[data-command="document-menu"]').click();
+  await page.locator('[data-menu-command="history"]').click();
+  await page.locator('.history-item').first().waitFor();
+  const historyCount = await page.locator('.history-item').count();
+  let keptDiskVersion = false;
+  for (let index = 0; index < historyCount; index++) {
+    await page.locator('.history-item').nth(index).click();
+    if ((await page.locator('#history-preview').textContent()).includes('external wins')) { keptDiskVersion = true; break; }
+  }
+  assert.ok(keptDiskVersion, '被覆盖的磁盘版本必须能在保存历史中恢复');
+  await page.locator('#dialog [data-dismiss]').first().click();
+  await page.waitForFunction(() => !document.querySelector('#dialog').open);
+  console.log('STEP keep-local unblocks saving and backs up the overwritten disk version');
+  // 3) Two documents edited externally at the same time must produce two
+  //    prompts, not one prompt plus silence.
+  const queueA = path.join(root, 'queue-a.md'), queueB = path.join(root, 'queue-b.md');
+  await fs.writeFile(queueA, 'A base\n'); await fs.writeFile(queueB, 'B base\n');
+  for (const [file, text] of [[queueA, 'AAA'], [queueB, 'BBB']]) {
+    await openFile(file);
+    await page.locator('.md-widget p').first().click();
+    await page.keyboard.press('End');
+    await page.keyboard.type(text, { delay: 20 });
+    await page.waitForFunction(() => document.querySelector('#save-status').textContent === '有未保存的更改');
+    await page.waitForTimeout(650);
+  }
+  await fs.writeFile(queueA, 'A external\n');
+  await fs.writeFile(queueB, 'B external\n');
+  await page.locator('#dialog').getByText('文件已在编辑器外修改').waitFor({ timeout: 15000 });
+  const firstPrompt = await page.locator('#dialog .dialog-description').textContent();
+  // The two prompts may arrive in either order; the second must name the other file.
+  const firstName = firstPrompt.includes('queue-a.md') ? 'queue-a.md' : 'queue-b.md';
+  const secondName = firstName === 'queue-a.md' ? 'queue-b.md' : 'queue-a.md';
+  await page.locator('[data-external-action="keep-local"]').click();
+  // The second prompt must appear without any further external change.
+  await page.waitForFunction(name => {
+    const dialog = document.querySelector('#dialog');
+    return !!dialog.open && (dialog.querySelector('.dialog-description')?.textContent || '').includes(name);
+  }, secondName, { timeout: 10000 });
+  const secondPrompt = await page.locator('#dialog .dialog-description').textContent();
+  assert.notEqual(firstPrompt, secondPrompt, '两个文件的提示必须是两次独立的提示');
+  assert.match(firstPrompt, new RegExp(firstName.replace('.', '\\.')));
+  assert.match(secondPrompt, new RegExp(secondName.replace('.', '\\.')));
+  await page.locator('[data-external-action="keep-local"]').click();
+  await page.waitForFunction(() => !document.querySelector('#dialog').open);
+  console.log('STEP simultaneous external changes queue two prompts');
+  // A queued prompt must wait for an unrelated dialog instead of replacing it.
+  await page.locator('[data-command="settings"]').click();
+  await page.locator('#preferences').waitFor();
+  await fs.writeFile(queueA, 'A external again\n');
+  await page.waitForTimeout(4200);
+  assert.match(await page.locator('#dialog-title').textContent(), /偏好设置/, '外部变更不得覆盖已打开的对话框');
+  await page.locator('#dialog [data-dismiss]').click();
+  await page.locator('#dialog').getByText('文件已在编辑器外修改').waitFor({ timeout: 10000 });
+  await page.locator('[data-external-action="keep-local"]').click();
+  await page.waitForFunction(() => !document.querySelector('#dialog').open);
+  console.log('STEP external prompt waits for an open dialog');
+  // 4) A clean document follows the disk silently, with only a light notice.
+  const cleanPath = path.join(root, 'clean-reload.md');
+  await fs.writeFile(cleanPath, 'clean one\n');
+  await openFile(cleanPath);
+  await page.waitForFunction(() => document.querySelector('.cm-content').textContent.includes('clean one'));
+  await fs.writeFile(cleanPath, 'clean two\n');
+  await page.waitForFunction(() => document.querySelector('.cm-content').textContent.includes('clean two'), null, { timeout: 15000 });
+  assert.equal(await page.locator('#dialog').isVisible(), false, '未修改的文档不应弹出对话框');
+  assert.match(await page.locator('#notification').textContent(), /自动重新加载/, '静默重载也要给一条轻提示');
+  console.log('STEP clean document reloads external changes automatically');
+  // 5) A deleted file is reported after two polls, then can be saved elsewhere
+  //    or kept as an unsaved document.
+  const gonePath = path.join(root, 'gone.md');
+  await fs.writeFile(gonePath, 'still here\n');
+  await openFile(gonePath);
+  await page.locator('.md-widget p').first().click();
+  await page.keyboard.press('End');
+  await page.keyboard.type('LOCAL', { delay: 20 });
+  await page.waitForFunction(() => document.querySelector('#save-status').textContent === '有未保存的更改');
+  await page.waitForTimeout(650);
+  await fs.unlink(gonePath);
+  await page.locator('#dialog').getByText('文件已被删除').waitFor({ timeout: 20000 });
+  const rescuedPath = path.join(root, 'gone-rescued.md');
+  await app.evaluate(({ dialog }, filePath) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath }); }, rescuedPath);
+  await page.locator('[data-external-action="save-as"]').click();
+  await page.waitForFunction(() => document.querySelector('#save-status').textContent === '已保存', null, { timeout: 15000 });
+  assert.match(await fs.readFile(rescuedPath, 'utf8'), /LOCAL/, '删除提示中的另存为必须写出本地内容');
+  const orphanPath = path.join(root, 'orphan.md');
+  await fs.writeFile(orphanPath, 'orphan base\n');
+  await openFile(orphanPath);
+  await page.locator('.md-widget p').first().click();
+  await page.keyboard.press('End');
+  await page.keyboard.type('ORPHAN', { delay: 20 });
+  await page.waitForFunction(() => document.querySelector('#save-status').textContent === '有未保存的更改');
+  await page.waitForTimeout(650);
+  await fs.unlink(orphanPath);
+  await page.locator('#dialog').getByText('文件已被删除').waitFor({ timeout: 20000 });
+  await page.locator('[data-external-action="detach"]').click();
+  await page.waitForFunction(() => !document.querySelector('#dialog').open);
+  await page.waitForFunction(() => document.querySelector('#location').textContent.includes('orphan.md'));
+  assert.equal(await page.locator('#save-status').textContent(), '有未保存的更改', '保留下来的文档应仍是未保存状态');
+  console.log('STEP external deletion prompts, then Save As / keep as unsaved');
+  // 6) Reopening closed files restores exactly one document per command.
+  const reopenA = path.join(root, 'reopen-a.md'), reopenB = path.join(root, 'reopen-b.md');
+  await fs.writeFile(reopenA, '# A\n'); await fs.writeFile(reopenB, '# B\n');
+  const closeActive = async name => {
+    await page.locator('.document-tab.active .close-tab').click();
+    await page.waitForFunction(target => !document.querySelector('#location').textContent.includes(target), name);
+  };
+  await openFile(reopenA);
+  await openFile(reopenB);
+  await closeActive('reopen-b.md');
+  await closeActive('reopen-a.md');
+  const tabsBefore = await page.locator('.document-tab').count();
+  await broadcast('reopen-closed');
+  await page.waitForFunction(count => document.querySelectorAll('.document-tab').length === count + 1, tabsBefore, { timeout: 10000 });
+  await page.waitForFunction(() => document.querySelector('#location').textContent.includes('reopen-a.md'));
+  assert.equal(await page.locator('.document-tab').count(), tabsBefore + 1, '一次只应重开最近关闭的一个文件');
+  const tabText = await page.locator('#document-tabs').textContent();
+  assert.ok(tabText.includes('reopen-a.md') && !tabText.includes('reopen-b.md'), `只应重开最近关闭的文件，实际标签：${tabText}`);
+  await page.waitForTimeout(200);
+  assert.equal(await page.locator('.document-tab').count(), tabsBefore + 1, '不应连续重开其余已关闭文件');
+  console.log('STEP reopen closed restores only the most recent document');
+  // ── Document actions, open documents and the Chinese interface ──────────
+  // The tab strip is hidden in the default appearance, so every document action
+  // must also be reachable from the native 文件 menu and the command palette.
+  const actionFile = path.join(root, 'action-source.md');
+  await fs.writeFile(actionFile, '# 操作测试\n');
+  await openFile(actionFile);
+  await page.locator('.md-widget h1').click();
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+End' : 'Control+End');
+  await page.keyboard.insertText(' 一');
+  await saveOpenFile();
+  await page.keyboard.insertText(' 二');
+  await saveOpenFile();
+  const trashLabel = process.platform === 'darwin' ? '废纸篓' : '回收站';
+  const menuModel = await app.evaluate(({ Menu }) => {
+    const menu = Menu.getApplicationMenu();
+    const accelerators = [];
+    const walk = items => items.forEach(item => { if (item.accelerator) accelerators.push(item.accelerator); if (item.submenu) walk(item.submenu.items); });
+    walk(menu.items);
+    return {
+      groups: Object.fromEntries(menu.items.map(item => [item.label, (item.submenu?.items || []).map(entry => entry.label)])),
+      accelerators
+    };
+  });
+  for (const label of ['另存为…', '重命名 / 移动…', '在文件夹中显示', '查看保存历史…']) {
+    assert.ok(menuModel.groups['文件'].includes(label), `文件菜单应包含“${label}”`);
+  }
+  assert.ok(menuModel.groups['文件'].includes(`移到${trashLabel}`), `文件菜单应包含“移到${trashLabel}”`);
+  assert.ok(menuModel.groups['段落'].includes('插入图表'), '段落菜单应包含“插入图表”');
+  for (const label of ['下一个文档', '上一个文档']) assert.ok(menuModel.groups['窗口'].includes(label), `窗口菜单应包含“${label}”`);
+  for (const label of ['剪切', '复制', '粘贴', '全选']) assert.ok(menuModel.groups['编辑'].includes(label), `编辑菜单角色项应为中文：“${label}”`);
+  for (const label of ['最小化', '全屏']) {
+    const everywhere = Object.values(menuModel.groups).flat();
+    assert.ok(everywhere.includes(label), `菜单角色项应为中文：“${label}”`);
+  }
+  assert.deepEqual(menuModel.accelerators.filter((value, index, all) => all.indexOf(value) !== index), [], '菜单快捷键不得重复');
+  // Palette labels must read exactly like the menu entries.
+  const openPalette = async () => {
+    await broadcast('quick-open');
+    await page.locator('#quick-filter').waitFor();
+  };
+  const paletteLabels = async query => {
+    await page.locator('#quick-filter').fill(query);
+    return page.evaluate(() => [...document.querySelectorAll('#quick-results [data-quick-command] strong')].map(node => node.textContent));
+  };
+  // `suffix` is the visible marker that the command actually ran: some commands
+  // replace the palette with their own dialog, others just act on the document.
+  const paletteCommand = async (query, label) => {
+    await openPalette();
+    await paletteLabels(query);
+    await page.locator('#quick-results [data-quick-command]').filter({ hasText: label }).first().click();
+    await page.waitForTimeout(250);
+  };
+  await openPalette();
+  const fileCommands = await paletteLabels('');
+  for (const label of ['另存为…', '重命名 / 移动…', '在文件夹中显示', '查看保存历史…']) {
+    assert.ok(fileCommands.includes(label), `命令面板条目应与菜单一致：“${label}”`);
+  }
+  assert.ok(fileCommands.includes(`移到${trashLabel}`), `命令面板应包含“移到${trashLabel}”`);
+  assert.ok((await paletteLabels('图表')).includes('插入图表'), '命令面板应能插入图表');
+  await page.locator('#dialog [data-dismiss]').click();
+  // Version history shows the document name and time, never a UUID or hash.
+  await paletteCommand('保存历史', '查看保存历史…');
+  await page.locator('.history-item').first().waitFor();
+  const historyLabels = await page.locator('.history-item strong').allTextContents();
+  assert.ok(historyLabels.length >= 2, `应至少有两条历史版本，实际 ${historyLabels.length}`);
+  for (const label of historyLabels) {
+    assert.ok(!/\d{10,16}-[0-9a-f]{8}-/i.test(label), `历史列表不得显示 UUID 文件名：${label}`);
+    assert.ok(!/[0-9a-f]{16}\b/i.test(label), `历史列表不得显示哈希目录名：${label}`);
+    assert.match(label, /\.md · /, `历史条目应显示“文档名 · 时间”：${label}`);
+    assert.match(label, /\d{4}/, `历史条目应带时间：${label}`);
+  }
+  assert.equal(await page.locator('.history-item span').first().textContent(), '当前文件', '历史条目应说明版本来源而不是哈希目录');
+  await page.locator('#dialog [data-dismiss]').first().click();
+  // Reveal from the native menu, with the shell call stubbed.
+  await app.evaluate(({ shell }) => {
+    globalThis.__revealed = [];
+    globalThis.__originalReveal = shell.showItemInFolder;
+    shell.showItemInFolder = item => { globalThis.__revealed.push(item); };
+  });
+  await app.evaluate(({ Menu }) => {
+    const file = Menu.getApplicationMenu().items.find(item => item.label === '文件');
+    file.submenu.items.find(entry => entry.label === '在文件夹中显示').click();
+  });
+  await page.waitForTimeout(300);
+  assert.deepEqual(await app.evaluate(() => globalThis.__revealed), [await fs.realpath(actionFile)], '“在文件夹中显示”必须调用 shell.showItemInFolder');
+  // Rename / move through the palette.
+  const renamedPath = path.join(root, 'action-renamed.md');
+  await app.evaluate(({ dialog, shell }, target) => {
+    globalThis.__trashed = [];
+    globalThis.__originalTrash = shell.trashItem;
+    shell.trashItem = async item => { globalThis.__trashed.push(item); };
+    dialog.showSaveDialog = async () => ({ canceled: false, filePath: target });
+  }, renamedPath);
+  await paletteCommand('重命名', '重命名 / 移动…');
+  await page.waitForFunction(() => document.querySelector('#location').textContent.includes('action-renamed.md'), null, { timeout: 15000 });
+  assert.deepEqual(await app.evaluate(() => globalThis.__trashed), [await fs.realpath(actionFile)], '重命名应把原文件移到废纸篓 / 回收站');
+  // Trash from the native menu in the platform's own wording.
+  await app.evaluate(({ dialog }) => {
+    globalThis.__trashPrompts = [];
+    globalThis.__originalMessageBox = dialog.showMessageBox;
+    dialog.showMessageBox = async (_window, options) => { globalThis.__trashPrompts.push(options); return { response: 1, checkboxChecked: false }; };
+  });
+  await app.evaluate(({ Menu }) => {
+    const file = Menu.getApplicationMenu().items.find(item => item.label === '文件');
+    file.submenu.items.find(entry => entry.label.startsWith('移到')).click();
+  });
+  await page.waitForFunction(() => document.querySelector('#save-status').textContent === '有未保存的更改', null, { timeout: 15000 });
+  const trashPrompt = await app.evaluate(() => globalThis.__trashPrompts.at(-1));
+  assert.match(trashPrompt.message, new RegExp(`移到${trashLabel}`), `确认框应使用“${trashLabel}”`);
+  assert.deepEqual(trashPrompt.buttons, ['取消', `移到${trashLabel}`], `确认框按钮应使用“${trashLabel}”`);
+  assert.deepEqual(await app.evaluate(() => globalThis.__trashed), [await fs.realpath(actionFile), await fs.realpath(renamedPath)], '移到废纸篓 / 回收站应移动当前文件');
+  // Chart insertion from the palette.
+  await page.locator('.topbar [data-command="new"]').click();
+  await paletteCommand('图表', '插入图表');
+  await page.locator('[data-command="source"]').click();
+  await page.waitForFunction(() => document.querySelector('.cm-content').textContent.includes('```mermaid'), null, { timeout: 10000 });
+  await page.locator('[data-command="source"]').click();
+  await app.evaluate(({ dialog, shell }) => {
+    if (globalThis.__originalMessageBox) dialog.showMessageBox = globalThis.__originalMessageBox;
+    if (globalThis.__originalTrash) shell.trashItem = globalThis.__originalTrash;
+    if (globalThis.__originalReveal) shell.showItemInFolder = globalThis.__originalReveal;
+  });
+  console.log('STEP file menu + palette reach rename / reveal / trash / diagram, history names stay readable');
+  // Multi-document visibility in the default appearance.
+  if (!await page.locator('.sidebar').isVisible()) await page.locator('.topbar [data-command="sidebar"]').click();
+  const openDocuments = () => page.evaluate(() => [...document.querySelectorAll('#open-documents .open-document')].map(node => ({
+    name: node.querySelector('.open-document-name span').textContent,
+    current: node.querySelector('.open-document-name').getAttribute('aria-current') === 'true',
+    label: node.querySelector('.open-document-name').getAttribute('aria-label'),
+    tag: node.querySelector('.open-document-name').tagName,
+    close: node.querySelector('.open-document-close').getAttribute('aria-label')
+  })));
+  const listed = await openDocuments();
+  assert.ok(listed.length >= 2, `侧栏应列出全部已打开文档，实际 ${listed.length}`);
+  assert.equal(listed.filter(entry => entry.current).length, 1, '侧栏中只应有一个当前文档');
+  assert.equal(listed.at(-1).current, true, '当前文档必须在侧栏中高亮');
+  assert.equal(listed.at(-1).tag, 'BUTTON', '侧栏文档条目必须是按钮，才能用 Tab / Enter 操作');
+  assert.match(listed.at(-1).label, /^切换到 /, '侧栏条目需要 aria 标签');
+  assert.match(listed.at(-1).close, /^关闭 /, '关闭按钮需要 aria 标签');
+  const activeName = () => page.evaluate(() => document.querySelector('#location').textContent.replace(/^• /, ''));
+  const beforeSwitch = await activeName();
+  await broadcast('next-document');
+  await page.waitForFunction(name => document.querySelector('#location').textContent.replace(/^• /, '') !== name, beforeSwitch, { timeout: 10000 });
+  await broadcast('previous-document');
+  await page.waitForFunction(name => document.querySelector('#location').textContent.replace(/^• /, '') === name, beforeSwitch, { timeout: 10000 });
+  // Keyboard: focus another entry and press Enter to switch to it.
+  const keyboardTarget = listed[0].name;
+  await page.locator('#open-documents .open-document-name').first().focus();
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(name => document.querySelector('#location').textContent.replace(/^• /, '') === name, keyboardTarget, { timeout: 10000 });
+  await page.locator('.cm-content').click();
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+End' : 'Control+End');
+  await page.keyboard.insertText('改');
+  await page.waitForFunction(() => !!document.querySelector('#open-documents .open-document-name[aria-current="true"] .dirty-mark'), null, { timeout: 10000 });
+  const closeName = await activeName();
+  const beforeClose = (await openDocuments()).length;
+  await app.evaluate(({ dialog }) => {
+    globalThis.__closePrompts = [];
+    globalThis.__originalMessageBox = dialog.showMessageBox;
+    dialog.showMessageBox = async (_window, options) => { globalThis.__closePrompts.push(options.message); return { response: 2, checkboxChecked: false }; };
+  });
+  await page.locator('#open-documents .open-document:has(.open-document-name[aria-current="true"]) .open-document-close').click();
+  await page.waitForFunction(count => document.querySelectorAll('#open-documents .open-document').length === count - 1, beforeClose, { timeout: 15000 });
+  assert.match((await app.evaluate(() => globalThis.__closePrompts)).join('|'), new RegExp(closeName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), '侧栏关闭未保存文档必须走保存提示');
+  await app.evaluate(({ dialog }) => { if (globalThis.__originalMessageBox) dialog.showMessageBox = globalThis.__originalMessageBox; });
+  console.log('STEP sidebar lists open documents: switch, dirty marker, keyboard, close prompt');
+  // The find / replace panel speaks Chinese too.
+  await page.locator('.cm-content').click();
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+f' : 'Control+f');
+  await page.locator('.cm-search').waitFor();
+  const searchLabels = await page.evaluate(() => {
+    const node = document.querySelector('.cm-search');
+    return [...node.querySelectorAll('button, label, input')].map(entry => entry.textContent || entry.getAttribute('aria-label') || entry.placeholder || '');
+  });
+  assert.equal(await page.locator('.cm-search button[name="close"]').getAttribute('aria-label'), '关闭', '查找面板关闭按钮应为中文');
+  for (const label of ['查找', '替换', '下一个', '上一个', '全部', '区分大小写', '正则表达式', '全词匹配', '全部替换']) {
+    assert.ok(searchLabels.includes(label), `查找面板应为中文：“${label}”，实际 ${JSON.stringify(searchLabels)}`);
+  }
+  assert.ok(!searchLabels.some(label => /^(next|previous|all|replace|replace all|match case|regexp|by word|close)$/i.test(String(label).trim())), `查找面板不得残留英文：${JSON.stringify(searchLabels)}`);
+  await page.keyboard.press('Escape');
+  console.log('STEP find / replace panel is fully Chinese');
+  // 7) Windows cold start: a document path on the command line must be opened,
+  //    while the app directory argument must never be treated as a file.
+  const argvRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'inkstone-argv-'));
+  const argvFile = path.join(argvRoot, 'from-argv.md');
+  await fs.writeFile(argvFile, '# 从命令行打开\n\n参数文件内容。\n');
+  const argvEnv = { ...process.env, INKSTONE_TEST_USER_DATA: path.join(argvRoot, 'profile') };
+  delete argvEnv.ELECTRON_RUN_AS_NODE;
+  const argvApp = await electron.launch({ args: [project, argvFile, '--no-sandbox', '--disable-gpu'], env: argvEnv });
+  try {
+    const argvPage = await argvApp.firstWindow();
+    argvPage.setDefaultTimeout(20000);
+    await argvPage.locator('.cm-content').waitFor();
+    await argvPage.waitForFunction(() => document.querySelector('#location').textContent.includes('from-argv.md'));
+    assert.equal(await argvPage.locator('.document-tab').count(), 1, '命令行只应打开一个文档');
+    await argvPage.waitForFunction(() => document.querySelector('.cm-content').textContent.includes('参数文件内容'));
+    console.log('STEP cold start opens the document named on the command line');
+  } finally {
+    const argvClosed = argvApp.waitForEvent('close').catch(() => {});
+    await argvApp.evaluate(({ app }) => app.exit(0)).catch(() => {});
+    await argvClosed;
+    await argvApp.close().catch(() => {});
+    await fs.rm(argvRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+  // 7b) Temporary image folders are pruned at startup once they are 7 days old,
+  //     but never when a recovery copy still names that document id.
+  const pruneRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'inkstone-prune-'));
+  const pruneProfile = path.join(pruneRoot, 'profile');
+  const oldAssetId = '11111111-1111-4111-8111-111111111111';
+  const freshAssetId = '22222222-2222-4222-8222-222222222222';
+  const recoveredAssetId = '33333333-3333-4333-8333-333333333333';
+  const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+  try {
+    for (const id of [oldAssetId, freshAssetId, recoveredAssetId]) {
+      await fs.mkdir(path.join(pruneProfile, 'unsaved-assets', id, 'assets'), { recursive: true });
+      await fs.writeFile(path.join(pruneProfile, 'unsaved-assets', id, 'assets', 'a.png'), png);
+    }
+    await fs.utimes(path.join(pruneProfile, 'unsaved-assets', oldAssetId), eightDaysAgo, eightDaysAgo);
+    await fs.utimes(path.join(pruneProfile, 'unsaved-assets', recoveredAssetId), eightDaysAgo, eightDaysAgo);
+    await fs.mkdir(path.join(pruneProfile, 'recovery'), { recursive: true });
+    await fs.writeFile(path.join(pruneProfile, 'recovery', `${recoveredAssetId}.json`), JSON.stringify({ id: recoveredAssetId, name: '恢复.md', content: '![图](assets/a.png)\n', dirty: true }));
+    const pruneEnv = { ...process.env, INKSTONE_TEST_USER_DATA: pruneProfile };
+    delete pruneEnv.ELECTRON_RUN_AS_NODE;
+    const pruneApp = await electron.launch({ args: [project, '--no-sandbox', '--disable-gpu'], env: pruneEnv });
+    try {
+      const prunePage = await pruneApp.firstWindow();
+      await prunePage.locator('.cm-content').waitFor();
+      // The recovery copy is restored under a new id, and its image folder moves
+      // with it, so wait for that document before inspecting the folders.
+      await prunePage.waitForFunction(() => document.querySelector('#location').textContent.includes('恢复-'));
+      await prunePage.waitForTimeout(300);
+      const recoveredDocId = await prunePage.evaluate(() => [...document.querySelectorAll('[data-document]')].find(node => node.getAttribute('aria-selected') === 'true')?.dataset.document);
+      assert.ok(recoveredDocId, '恢复的文档应有一个 id');
+      const exists = file => fs.access(file).then(() => true, () => false);
+      assert.equal(await exists(path.join(pruneProfile, 'unsaved-assets', oldAssetId)), false, '超过 7 天的临时图片目录应在启动时清理');
+      assert.equal(await exists(path.join(pruneProfile, 'unsaved-assets', freshAssetId)), true, '未过期的临时图片目录必须保留');
+      assert.equal(await exists(path.join(pruneProfile, 'unsaved-assets', recoveredAssetId)), false, '恢复后图片目录随文档换到新 id');
+      assert.equal(await exists(path.join(pruneProfile, 'unsaved-assets', recoveredDocId, 'assets', 'a.png')), true, '恢复副本引用的临时图片不得删除');
+      console.log('STEP stale unsaved image folders are pruned but recovery references are kept');
+    } finally {
+      const pruneClosed = pruneApp.waitForEvent('close').catch(() => {});
+      await pruneApp.evaluate(({ app }) => app.exit(0)).catch(() => {});
+      await pruneClosed;
+      await pruneApp.close().catch(() => {});
+    }
+  } finally {
+    await fs.rm(pruneRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+  // 7c) A crash must not lose the images pasted into an unsaved document: the
+  //     recovered draft takes over the image folder of the id it crashed under.
+  const recoverRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'inkstone-recover-'));
+  const recoverProfile = path.join(recoverRoot, 'profile');
+  const recoverEnv = { ...process.env, INKSTONE_TEST_USER_DATA: recoverProfile };
+  delete recoverEnv.ELECTRON_RUN_AS_NODE;
+  const recoverImage = path.join(recoverRoot, '崩溃 图片.png');
+  await fs.writeFile(recoverImage, png);
+  try {
+    const firstRun = await electron.launch({ args: [project, '--no-sandbox', '--disable-gpu'], env: recoverEnv });
+    try {
+      const firstPage = await firstRun.firstWindow();
+      firstPage.setDefaultTimeout(20000);
+      await firstPage.locator('.cm-content').waitFor();
+      await firstPage.locator('.topbar [data-command="new"]').click();
+      await firstPage.locator('.cm-content').click();
+      const draftId = await firstPage.evaluate(() => [...document.querySelectorAll('[data-document]')].find(node => node.getAttribute('aria-selected') === 'true')?.dataset.document);
+      await firstRun.evaluate(({ dialog }, target) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [target] }); }, recoverImage);
+      const inserted = await firstPage.evaluate(id => window.desktop.insertImage(id), draftId);
+      assert.ok(inserted.ok, `插入图片失败：${JSON.stringify(inserted)}`);
+      await firstPage.locator('.cm-content').click();
+      await firstPage.keyboard.insertText(`![图片](${inserted.value})\n`);
+      await firstPage.waitForFunction(() => document.querySelector('#editor-host .md-widget img')?.naturalWidth > 0);
+      // Let the debounced flush write the recovery copy, then exit hard: this is
+      // what a crash leaves behind (no save, no cleanup).
+      await firstPage.waitForTimeout(900);
+      const firstClosed = firstRun.waitForEvent('close').catch(() => {});
+      await firstRun.evaluate(({ app }) => app.exit(0)).catch(() => {});
+      await firstClosed;
+    } finally {
+      await firstRun.close().catch(() => {});
+    }
+    const secondRun = await electron.launch({ args: [project, '--no-sandbox', '--disable-gpu'], env: recoverEnv });
+    try {
+      const secondPage = await secondRun.firstWindow();
+      secondPage.setDefaultTimeout(20000);
+      await secondPage.locator('.cm-content').waitFor();
+      await secondPage.waitForFunction(() => document.querySelector('#location').textContent.includes('恢复-'));
+      await secondPage.waitForFunction(() => document.querySelectorAll('#editor-host .md-widget img').length === 1);
+      const recoveredImage = await secondPage.evaluate(async () => {
+        const node = document.querySelector('#editor-host .md-widget img');
+        await new Promise(resolve => {
+          node.loading = 'eager';
+          if (node.complete) return resolve();
+          node.addEventListener('load', () => resolve(), { once: true });
+          node.addEventListener('error', () => resolve(), { once: true });
+          setTimeout(resolve, 8000);
+        });
+        return { naturalWidth: node.naturalWidth, src: node.getAttribute('src') || '', mdSrc: node.dataset.mdSrc || '' };
+      });
+      assert.ok(recoveredImage.naturalWidth > 0, `崩溃恢复后的草稿必须仍显示粘贴的图片：${JSON.stringify(recoveredImage)}`);
+      assert.match(recoveredImage.src, /^inkstone-asset:\/\//);
+      assert.match(decodeURIComponent(recoveredImage.mdSrc), /^assets\/崩溃-图片-/);
+      console.log('STEP a crashed draft keeps its pasted images through recovery');
+    } finally {
+      const secondClosed = secondRun.waitForEvent('close').catch(() => {});
+      await secondRun.evaluate(({ app }) => app.exit(0)).catch(() => {});
+      await secondClosed;
+      await secondRun.close().catch(() => {});
+    }
+  } finally {
+    await fs.rm(recoverRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+  // 8) A crashed renderer must never leave an unclosable window: the prompt
+  //    offers a reload, and choosing to close really closes it.
+  const crashRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'inkstone-crash-'));
+  const crashEnv = { ...process.env, INKSTONE_TEST_USER_DATA: path.join(crashRoot, 'profile') };
+  delete crashEnv.ELECTRON_RUN_AS_NODE;
+  const crashApp = await electron.launch({ args: [project, '--no-sandbox', '--disable-gpu'], env: crashEnv });
+  try {
+    const crashPage = await crashApp.firstWindow();
+    await crashPage.locator('.cm-content').waitFor();
+    await crashApp.evaluate(({ dialog }) => {
+      globalThis.__crashPrompt = null;
+      dialog.showMessageBox = async (_window, options) => { globalThis.__crashPrompt = options; return { response: 0, checkboxChecked: false }; };
+    });
+    await crashApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.forcefullyCrashRenderer());
+    // A crashed target stays dead for Playwright even after a reload, so the
+    // reloaded window is verified through the main process.
+    const crashState = await crashApp.evaluate(async ({ BrowserWindow }) => {
+      const contents = BrowserWindow.getAllWindows()[0].webContents;
+      const loaded = new Promise(resolve => contents.once('did-finish-load', () => resolve(true)));
+      const timeout = new Promise(resolve => setTimeout(() => resolve(false), 25000));
+      await Promise.race([loaded, timeout]);
+      let count = 0;
+      for (let attempt = 0; attempt < 100 && count !== 1; attempt++) {
+        count = await contents.executeJavaScript('document.querySelectorAll(".cm-content").length').catch(() => 0);
+        if (count === 1) break;
+        await new Promise(resolve => setTimeout(resolve, 200));
+      }
+      return { crashed: contents.isCrashed(), count };
+    });
+    const crashPrompt = await crashApp.evaluate(() => globalThis.__crashPrompt);
+    assert.deepEqual(crashPrompt?.buttons, ['重新加载窗口', '关闭窗口'], `崩溃提示应提供重新加载与关闭，实际 ${JSON.stringify(crashPrompt?.buttons)}`);
+    assert.deepEqual(crashState, { crashed: false, count: 1 }, `选择重新加载后窗口应恢复可用，实际 ${JSON.stringify(crashState)}`);
+    await crashApp.evaluate(({ dialog, BrowserWindow }) => {
+      dialog.showMessageBox = async () => ({ response: 1, checkboxChecked: false });
+      BrowserWindow.getAllWindows()[0].webContents.forcefullyCrashRenderer();
+    });
+    await crashApp.waitForEvent('close', { timeout: 30000 });
+    console.log('STEP renderer crash prompts, reloads, and still allows closing');
+  } finally {
+    await crashApp.close().catch(() => {});
+    await fs.rm(crashRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+  // 9) Quitting asks every window in order, a cancel aborts the whole quit, and
+  //    a window whose renderer never answers is still closed after 5 seconds.
+  const quitRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'inkstone-quit-'));
+  const quitEnv = { ...process.env, INKSTONE_TEST_USER_DATA: path.join(quitRoot, 'profile') };
+  delete quitEnv.ELECTRON_RUN_AS_NODE;
+  const quitApp = await electron.launch({ args: [project, '--no-sandbox', '--disable-gpu'], env: quitEnv });
+  try {
+    const quitPage = await quitApp.firstWindow();
+    quitPage.setDefaultTimeout(20000);
+    await quitPage.locator('.cm-content').waitFor();
+    // The welcome page is pristine and closing it asks nothing, so the quit
+    // prompt needs a document with real unsaved text.
+    await quitPage.locator('.topbar [data-command="new"]').click();
+    await quitPage.locator('.cm-content').click();
+    await quitPage.keyboard.insertText('退出前的未保存内容');
+    await quitPage.waitForFunction(() => document.querySelector('#save-status').textContent === '有未保存的更改');
+    const secondOpened = quitApp.waitForEvent('window', { timeout: 20000 });
+    await quitPage.evaluate(() => window.desktop.newWindow());
+    const secondWindow = await secondOpened;
+    await secondWindow.locator('.cm-content').waitFor();
+    const windowCount = () => quitApp.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().length);
+    assert.equal(await windowCount(), 2);
+    const quitMenu = () => quitApp.evaluate(({ Menu }) => {
+      for (const top of Menu.getApplicationMenu().items) {
+        for (const item of top.submenu?.items || []) {
+          if (item.label === '退出' || item.label === '退出墨页') { item.click(); return true; }
+        }
+      }
+      throw new Error('退出菜单项不存在');
+    });
+    // A renderer that acknowledged the quit owns the close flow: a native save
+    // prompt may stay open far longer than the 5 second fallback without the
+    // window being taken away underneath the user.
+    await quitApp.evaluate(({ dialog }) => {
+      dialog.showMessageBox = () => new Promise(resolve => {
+        setTimeout(() => resolve({ response: 1, checkboxChecked: false }), 7000);
+      });
+    });
+    await quitMenu();
+    await quitPage.waitForTimeout(6200);
+    assert.equal(await windowCount(), 2, '保存提示未选择前不得因 5 秒保底关窗');
+    assert.ok(await quitPage.locator('.cm-content').count() >= 1, '保存提示等待期间文档必须仍在');
+    await quitPage.waitForTimeout(2500);
+    assert.equal(await windowCount(), 2, '选择取消后退出必须整体取消');
+    assert.ok(await quitPage.locator('.cm-content').count() >= 1);
+    console.log('STEP quit save prompt may outlive the 5s fallback');
+    // A cancel in the first window must abort the whole application quit.
+    await quitApp.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 1, checkboxChecked: false }); });
+    await quitMenu();
+    await quitPage.waitForTimeout(2000);
+    assert.equal(await windowCount(), 2, '任一窗口取消保存后必须整体取消退出');
+    console.log('STEP quit cancel keeps every window open');
+    // The last window never answers the quit command; the fallback closes it.
+    await quitApp.evaluate(({ dialog, BrowserWindow }) => {
+      dialog.showMessageBox = async () => ({ response: 2, checkboxChecked: false });
+      const windows = BrowserWindow.getAllWindows();
+      windows[windows.length - 1].webContents.send = () => {};
+    });
+    const quitStarted = Date.now();
+    const quitFinished = quitApp.waitForEvent('close', { timeout: 40000 });
+    await quitMenu();
+    await quitFinished;
+    assert.ok(Date.now() - quitStarted >= 4500, `无响应的窗口应由 5 秒保底关闭，实际 ${Date.now() - quitStarted}ms`);
+    console.log('STEP multi-window quit walks every window with a 5s fallback');
+  } finally {
+    await quitApp.close().catch(() => {});
+    await fs.rm(quitRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+  // 10) The welcome page is pristine, replaced by the first opened file, and only
+  //     a user edit turns it into a normal unsaved document. Selecting an open
+  //     document in the palette works with no folder open.
+  const welcomeRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'inkstone-welcome-'));
+  const welcomeEnv = { ...process.env, INKSTONE_TEST_USER_DATA: path.join(welcomeRoot, 'profile') };
+  delete welcomeEnv.ELECTRON_RUN_AS_NODE;
+  const openedFile = path.join(welcomeRoot, '第一份文档.md');
+  await fs.writeFile(openedFile, '# 打开的文件\n');
+  try {
+    const firstRun = await electron.launch({ args: [project, '--no-sandbox', '--disable-gpu'], env: welcomeEnv });
+    try {
+      const firstPage = await firstRun.firstWindow();
+      firstPage.setDefaultTimeout(20000);
+      await firstPage.locator('.cm-content').waitFor();
+      const pristine = await firstPage.evaluate(() => ({
+        location: document.querySelector('#location').textContent,
+        title: document.title,
+        listed: [...document.querySelectorAll('#open-documents .open-document-name span')].map(node => node.textContent)
+      }));
+      assert.equal(pristine.location, '欢迎使用.md', '欢迎页不应以未保存状态启动');
+      assert.ok(!pristine.title.includes('•'), `窗口标题不应标记未保存：${pristine.title}`);
+      assert.deepEqual(pristine.listed, ['欢迎使用.md']);
+      await firstPage.locator('.topbar [data-command="new"]').click();
+      await firstPage.waitForFunction(() => document.querySelectorAll('#open-documents .open-document').length === 2, null, { timeout: 10000 });
+      await firstRun.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.send('inkstone:command', 'quick-open'));
+      await firstPage.locator('#quick-filter').waitFor();
+      await firstPage.locator('#quick-filter').fill('欢迎');
+      const paletteDocs = firstPage.locator('#quick-results [data-quick-document]');
+      assert.equal(await paletteDocs.count(), 1, '未打开文件夹时命令面板也必须列出已打开的文档');
+      await paletteDocs.first().click();
+      await firstPage.waitForFunction(() => document.querySelector('#location').textContent.includes('欢迎使用.md'));
+      assert.equal(await firstPage.evaluate(() => document.querySelectorAll('#open-documents .open-document').length), 2, '选中已打开文档只切换，不应再打开一份');
+      await firstRun.evaluate(({ dialog }) => {
+        globalThis.__prompts = [];
+        dialog.showMessageBox = async (_window, options) => { globalThis.__prompts.push(options.message); return { response: 2, checkboxChecked: false }; };
+      });
+      if (!await firstPage.locator('.sidebar').isVisible()) await firstPage.locator('.topbar [data-command="sidebar"]').click();
+      // Close the extra (untouched) document, leaving only the welcome page.
+      await firstPage.locator('#open-documents .open-document').filter({ hasText: '未命名.md' }).locator('.open-document-close').click();
+      await firstPage.waitForFunction(() => document.querySelectorAll('#open-documents .open-document').length === 1, null, { timeout: 15000 });
+      assert.deepEqual(await firstRun.evaluate(() => globalThis.__prompts), [], '未修改的文档关闭时不应提示保存');
+      await firstRun.evaluate(({ dialog }, target) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [target] }); }, openedFile);
+      await firstRun.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.send('inkstone:command', 'open'));
+      await firstPage.waitForFunction(() => document.querySelector('#location').textContent.includes('第一份文档.md'), null, { timeout: 15000 });
+      const afterOpen = await firstPage.evaluate(() => [...document.querySelectorAll('#open-documents .open-document-name span')].map(node => node.textContent));
+      assert.deepEqual(afterOpen, ['第一份文档.md'], '打开文件应替换未修改的欢迎页，不留下多余标签');
+      assert.deepEqual(await firstRun.evaluate(() => globalThis.__prompts), [], '替换欢迎页不应触发保存提示');
+      await firstPage.locator('.cm-content').click();
+      await firstPage.keyboard.press(process.platform === 'darwin' ? 'Meta+End' : 'Control+End');
+      await firstPage.keyboard.insertText('本地改动');
+      await firstPage.waitForFunction(() => document.querySelector('#location').textContent.startsWith('•'), null, { timeout: 10000 });
+      await firstRun.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.send('inkstone:command', 'close'));
+      await firstPage.waitForFunction(() => !document.querySelector('#location').textContent.includes('第一份文档.md'), null, { timeout: 15000 });
+      const editPrompts = await firstRun.evaluate(() => globalThis.__prompts);
+      assert.equal(editPrompts.length, 1, '编辑过的文档关闭时必须提示保存');
+      assert.match(editPrompts[0], /第一份文档\.md/, '提示必须使用真实文件名');
+      console.log('STEP welcome page stays pristine, the first opened file replaces it, edits make it dirty');
+    } finally {
+      const closed = firstRun.waitForEvent('close').catch(() => {});
+      await firstRun.evaluate(({ app }) => app.exit(0)).catch(() => {});
+      await closed;
+      await firstRun.close().catch(() => {});
+    }
+    const secondRun = await electron.launch({ args: [project, '--no-sandbox', '--disable-gpu'], env: welcomeEnv });
+    try {
+      const secondPage = await secondRun.firstWindow();
+      secondPage.setDefaultTimeout(20000);
+      await secondPage.locator('.cm-content').waitFor();
+      await secondPage.waitForFunction(() => document.querySelector('#location').textContent === '欢迎使用.md', null, { timeout: 10000 });
+      await secondRun.evaluate(({ dialog }) => {
+        globalThis.__prompts = [];
+        dialog.showMessageBox = async (_window, options) => { globalThis.__prompts.push(options.message); return { response: 2, checkboxChecked: false }; };
+      });
+      await secondPage.locator('.cm-content').click();
+      await secondPage.keyboard.press(process.platform === 'darwin' ? 'Meta+End' : 'Control+End');
+      await secondPage.keyboard.insertText('编辑欢迎页');
+      await secondPage.waitForFunction(() => document.querySelector('#location').textContent.startsWith('•'), null, { timeout: 10000 });
+      await secondRun.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.send('inkstone:command', 'close'));
+      await secondPage.waitForFunction(() => !document.querySelector('#location').textContent.includes('欢迎使用.md'), null, { timeout: 15000 });
+      const prompts = await secondRun.evaluate(() => globalThis.__prompts);
+      assert.equal(prompts.length, 1, '编辑过的欢迎页关闭时必须提示保存');
+      assert.match(prompts[0], /欢迎使用\.md/, '主进程与渲染层必须使用同一个欢迎页名称');
+      assert.ok(!prompts[0].includes('未命名.md'), `保存提示不得再出现“未命名.md”：${prompts[0]}`);
+      console.log('STEP an edited welcome page behaves like a normal unsaved document');
+    } finally {
+      const closed = secondRun.waitForEvent('close').catch(() => {});
+      await secondRun.evaluate(({ app }) => app.exit(0)).catch(() => {});
+      await closed;
+      await secondRun.close().catch(() => {});
+    }
+  } finally {
+    await fs.rm(welcomeRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+  // ── Batch 6: folder search, file tree, links, code highlighting, previews ──
+  const featureFolder = path.join(root, '每日 功能');
+  await fs.mkdir(featureFolder, { recursive: true });
+  await fs.writeFile(path.join(featureFolder, '甲.md'), '# 甲文档\n\n共同关键词 在甲\n');
+  await fs.writeFile(path.join(featureFolder, '乙.md'), '# 乙文档\n\n别的段落\n\n## 第二节\n\n共同关键词 在乙\n');
+  await fs.writeFile(path.join(featureFolder, '链接目标.md'), '# 第一节\n\n目标内容\n\n## 第二节\n\n更多内容\n');
+  await fs.writeFile(path.join(featureFolder, 'index.md'), [
+    '# 索引', '', '[相对链接](./链接目标.md)', '', '[锚点链接](./链接目标.md#第二节)',
+    '', '[文档内锚点](#索引)', '', '[网络](file://server/share/a.md)', ''
+  ].join('\n'));
+  await fs.writeFile(path.join(featureFolder, '代码.md'), [
+    '# 代码示例', '', '```js', 'const answer = 42;', 'function greet(name) {', '  return `hi ${name}`;', '}', '```',
+    '', '```haskell', 'main :: IO ()', 'main = putStrLn "hello"', '```', ''
+  ].join('\n'));
+  await fs.writeFile(path.join(featureFolder, '预览.md'), [
+    '# 预览', '', '$$', 'a^2 + b^2', '$$', '', '```mermaid', 'flowchart LR', '  A[开始] --> B[结束]', '```', '', '段落。', ''
+  ].join('\n'));
+  await app.evaluate(({ dialog }, target) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [target] }); }, featureFolder);
+  await app.evaluate(({ BrowserWindow }) => { const win = BrowserWindow.getAllWindows()[0]; win.show(); win.focus(); });
+  if (!await page.locator('.sidebar').isVisible()) await page.locator('.topbar [data-command="sidebar"]').click();
+  // Clicking the folder command in the page keeps the IPC on the window under
+  // test instead of depending on which window currently has focus.
+  await page.evaluate(() => document.querySelector('[data-command="folder"]').click());
+  const treeItem = name => page.locator('.file-item').filter({ hasText: name });
+  await page.waitForFunction(() => [...document.querySelectorAll('.file-item span')].some(node => node.textContent === '甲.md'), null, { timeout: 20000 });
+  await page.locator('[data-side="files"]').click();
+
+  // ── folder-wide search ──
+  await page.locator('[data-side="search"]').click();
+  await page.locator('#folder-search-input').fill('共同关键词');
+  await page.waitForFunction(() => document.querySelectorAll('.search-hit').length >= 2, null, { timeout: 20000 });
+  assert.equal(await page.locator('.search-file').count(), 2, '搜索结果必须按文件分组');
+  assert.ok(await page.locator('.search-hit mark').count() >= 2, '命中片段必须带高亮');
+  assert.match(await page.locator('#folder-search-summary').textContent(), /2 个文件/);
+  // A second query replaces the first, and case sensitivity is honoured.
+  await page.locator('[data-search-option="caseSensitive"]').check();
+  await page.locator('#folder-search-input').fill('共同关键词');
+  await page.waitForFunction(() => document.querySelectorAll('.search-hit').length >= 2, null, { timeout: 20000 });
+  await page.locator('[data-search-option="caseSensitive"]').uncheck();
+  console.log('STEP folder search groups matches with highlighted snippets');
+
+  // ── unsaved editor content participates in the search ──
+  await page.locator('[data-side="files"]').click();
+  await treeItem('甲.md').click();
+  await page.waitForFunction(() => document.querySelector('#location').textContent.includes('甲.md'));
+  await page.locator('.cm-content').click();
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+End' : 'Control+End');
+  await page.keyboard.insertText('\n未保存标记词');
+  await page.waitForFunction(() => document.querySelector('#save-status').textContent === '有未保存的更改');
+  await page.locator('[data-side="search"]').click();
+  await page.locator('#folder-search-input').fill('未保存标记词');
+  await page.waitForFunction(() => [...document.querySelectorAll('.search-hit')].some(node => node.textContent.includes('未保存标记词')), null, { timeout: 20000 });
+  const unsavedHit = page.locator('.search-hit').filter({ hasText: '未保存标记词' }).first();
+  const hitLine = (await unsavedHit.locator('.search-line').textContent()).trim();
+  assert.equal(await page.locator('.search-file').count(), 1, '只有未保存的甲.md 含该标记词');
+  await unsavedHit.click();
+  await page.waitForFunction(() => document.querySelector('#location').textContent.includes('甲.md'));
+  await page.waitForFunction(line => document.querySelector('#position').textContent.includes(`行 ${line}`), hitLine, { timeout: 10000 });
+  await page.waitForFunction(() => /已选 \d+ 字/.test(document.querySelector('#selection-status').textContent), null, { timeout: 10000 });
+  console.log('STEP unsaved editor content is searchable and a hit moves the caret to the match');
+
+  // ── recent documents ──
+  // Open a second document (and close it again) so the menu has to re-open it
+  // from disk rather than merely switching to an open tab.
+  await page.locator('[data-side="files"]').click();
+  await treeItem('乙.md').click();
+  await page.waitForFunction(() => document.querySelector('#location').textContent.includes('乙.md'));
+  await page.locator('#open-documents .open-document').filter({ hasText: '乙.md' }).locator('.open-document-close').click();
+  await page.waitForFunction(() => !document.querySelector('#location').textContent.includes('乙.md'), null, { timeout: 15000 });
+  const recent = await page.evaluate(async () => (await window.desktop.recentFiles()).value);
+  assert.ok(recent.some(file => file.path.endsWith('甲.md')), `最近打开的文件应被记录，实际 ${JSON.stringify(recent)}`);
+  assert.ok(recent.some(file => file.path.endsWith('乙.md')), '第二个文档也必须进入最近列表');
+  await page.waitForTimeout(500);
+  const recentLabels = await app.evaluate(({ Menu }) => {
+    const file = Menu.getApplicationMenu()?.items.find(item => item.label === '文件');
+    const recentMenu = file?.submenu.items.find(item => item.label === '最近打开');
+    return recentMenu ? recentMenu.submenu.items.map(item => item.label) : [];
+  });
+  assert.ok(recentLabels.includes('甲.md'), `文件菜单必须列出最近打开的文件，实际 ${JSON.stringify(recentLabels)}`);
+  assert.ok(recentLabels.includes('乙.md'), `已关闭的最近文件也应出现在菜单里，实际 ${JSON.stringify(recentLabels)}`);
+  assert.ok(recentLabels.includes('清除记录'), '最近打开菜单必须提供清除记录');
+  // The menu entry itself is exercised in the single-window session run below:
+  // a menu command follows the focused window, and this window shares the
+  // application with the extra window opened earlier.
+  console.log('STEP recent files menu lists documents and offers a clear action');
+
+  // ── file tree: create, rename, trash ──
+  await page.locator('[data-side="files"]').click();
+  await page.locator('[data-file-op="new-file"]').click();
+  await page.locator('#entry-name').fill('新建笔记');
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(() => [...document.querySelectorAll('.file-item')].some(node => node.textContent.trim() === '新建笔记.md'), null, { timeout: 20000 });
+  assert.ok((await fs.readdir(featureFolder)).includes('新建笔记.md'), '新建文件必须真的写到磁盘上');
+  await page.locator('[data-file-op="new-folder"]').click();
+  await page.locator('#entry-name').fill('草稿');
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(() => [...document.querySelectorAll('summary')].some(node => node.textContent.includes('草稿')), null, { timeout: 20000 });
+  assert.ok((await fs.stat(path.join(featureFolder, '草稿'))).isDirectory(), '新建文件夹必须真的写到磁盘上');
+  console.log('STEP file tree creates files and folders');
+
+  // The native popup cannot take text input, so it reports the action and the
+  // renderer asks for the name. The stub clicks the entry it is asked for.
+  const stubPopup = label => app.evaluate(({ Menu }, wanted) => {
+    globalThis.__originalPopup ||= Menu.prototype.popup;
+    Menu.prototype.popup = function (options) {
+      this.items.find(item => item.label.startsWith(wanted))?.click();
+      options?.callback?.();
+    };
+  }, label);
+  await stubPopup('重命名');
+  await treeItem('新建笔记.md').click({ button: 'right' });
+  await page.locator('#entry-name').waitFor();
+  assert.equal(await page.locator('#entry-name').inputValue(), '新建笔记.md', '重命名对话框应带上原文件名');
+  await page.locator('#entry-name').fill('改名的笔记');
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(() => document.querySelector('#location').textContent.includes('改名的笔记.md'), null, { timeout: 20000 });
+  assert.ok((await fs.readdir(featureFolder)).includes('改名的笔记.md'));
+  assert.ok(!(await fs.readdir(featureFolder)).includes('新建笔记.md'), '重命名后旧文件名必须消失');
+  console.log('STEP file tree rename renames the file and the open tab');
+
+  // A dirty document asks before it goes to the trash, and keeps its text.
+  await treeItem('甲.md').click();
+  await page.waitForFunction(() => document.querySelector('#location').textContent.includes('甲.md'));
+  await app.evaluate(({ shell, dialog }) => {
+    globalThis.__trashed = [];
+    shell.trashItem = async target => { globalThis.__trashed.push(target); };
+    dialog.showMessageBox = async () => ({ response: 1, checkboxChecked: false });
+  });
+  await stubPopup('移到');
+  await treeItem('甲.md').click({ button: 'right' });
+  await page.waitForFunction(() => document.querySelector('#location').getAttribute('title') === '甲.md', null, { timeout: 20000 });
+  const trashed = await app.evaluate(() => globalThis.__trashed);
+  assert.ok(trashed.some(file => file.endsWith('甲.md')), '文件树的删除必须走 shell.trashItem');
+  assert.match(await page.evaluate(() => document.querySelector('.cm-content').textContent), /共同关键词/, '移到回收站后未保存的文字必须保留');
+  await app.evaluate(({ Menu }) => { if (globalThis.__originalPopup) Menu.prototype.popup = globalThis.__originalPopup; });
+  console.log('STEP file tree trash confirms dirty documents and keeps the text');
+
+  // Another program creating a file shows up without a manual refresh.
+  await fs.writeFile(path.join(featureFolder, '外部新增.md'), '# 外部新增\n');
+  await page.waitForFunction(() => [...document.querySelectorAll('.file-item')].some(node => node.textContent.trim() === '外部新增.md'), null, { timeout: 25000 });
+  console.log('STEP file tree picks up a file created by another program');
+
+  // ── local Markdown links and anchors ──
+  await page.locator('[data-side="files"]').click();
+  await treeItem('index.md').click();
+  await page.waitForFunction(() => document.querySelector('#location').textContent.includes('index.md'));
+  await ensureLive();
+  await page.locator('.md-widget a').filter({ hasText: '相对链接' }).click();
+  await page.waitForFunction(() => document.querySelector('#location').textContent.includes('链接目标.md'), null, { timeout: 15000 });
+  await treeItem('index.md').click();
+  await page.waitForFunction(() => document.querySelector('#location').textContent.includes('index.md'));
+  await page.locator('.md-widget a').filter({ hasText: '锚点链接' }).click();
+  await page.waitForFunction(() => document.querySelector('#location').textContent.includes('链接目标.md'));
+  await page.waitForFunction(() => document.querySelector('#position').textContent.includes('行 5'), null, { timeout: 15000 });
+  await treeItem('index.md').click();
+  await page.waitForFunction(() => document.querySelector('#location').textContent.includes('index.md'));
+  await page.locator('.md-widget a').filter({ hasText: '文档内锚点' }).click();
+  await page.waitForFunction(() => document.querySelector('#position').textContent.includes('行 1'), null, { timeout: 15000 });
+  await page.locator('.md-widget a').filter({ hasText: '网络' }).click();
+  await page.waitForFunction(() => {
+    const note = document.querySelector('#notification');
+    return !!note && !note.hidden && note.textContent.includes('网络');
+  }, null, { timeout: 15000 });
+  assert.match(await page.locator('#notification').textContent(), /不支持指向网络位置的链接/);
+  console.log('STEP relative .md links, cross-document anchors and network-link refusal');
+
+  // ── active code block highlighting, including an on-demand language ──
+  await treeItem('代码.md').click();
+  await page.waitForFunction(() => document.querySelector('#location').textContent.includes('代码.md'));
+  // The rendered page highlights through highlight.js: `js` is registered up
+  // front, `haskell` arrives through the lazy loader and only its own block is
+  // re-rendered.
+  await page.waitForFunction(() => {
+    const blocks = [...document.querySelectorAll('.md-widget pre.code-block')];
+    const haskell = blocks.find(block => block.textContent.includes('putStrLn'));
+    return blocks.length >= 2 && !!haskell && haskell.querySelectorAll('code.hljs span[class*="hljs-"]').length > 0;
+  }, null, { timeout: 25000 });
+  await page.locator('.md-widget pre.code-block').filter({ hasText: 'putStrLn' }).locator('code').click();
+  await page.waitForFunction(() => [...document.querySelectorAll('.cm-line')].some(node => node.textContent.includes('putStrLn')), null, { timeout: 15000 });
+  // @codemirror/language-data loads the grammar on demand for the active block.
+  await page.waitForFunction(() => {
+    const line = [...document.querySelectorAll('.cm-line')].find(node => node.textContent.includes('putStrLn'));
+    return !!line && [...line.querySelectorAll('span')].some(node => node.className);
+  }, null, { timeout: 25000 });
+  const tokenState = await page.evaluate(() => {
+    const line = [...document.querySelectorAll('.cm-line')].find(node => node.textContent.includes('main ::'));
+    const tokens = line ? [...line.querySelectorAll('span')].map(node => ({ cls: node.className, text: node.textContent, color: getComputedStyle(node).color })) : [];
+    const plain = line ? getComputedStyle(line).color : '';
+    return { tokens, plain };
+  });
+  // Syntax tokens carry a generated highlight class (not one of the editor's
+  // own `cm-` classes) and a colour from the shared palette.
+  const highlightTokens = tokenState.tokens.filter(token => token.cls && !token.cls.split(' ').every(name => name.startsWith('cm-')));
+  assert.ok(highlightTokens.length > 0, `活跃代码块必须有高亮 token 类，实际 ${JSON.stringify(tokenState.tokens)}`);
+  assert.ok(highlightTokens.some(token => token.color !== tokenState.plain), '高亮 token 的颜色必须与正文不同');
+  console.log('STEP active code block gets syntax tokens, on-demand haskell included');
+
+  // ── live preview of a formula / diagram block being edited ──
+  await treeItem('预览.md').click();
+  await page.waitForFunction(() => document.querySelector('#location').textContent.includes('预览.md'));
+  await ensureLive();
+  await page.locator('.md-widget .katex').first().click();
+  await page.waitForFunction(() => document.querySelector('.md-live-preview .katex'), null, { timeout: 20000 });
+  // The preview follows typing after the debounce, and is never editable.
+  assert.equal(await page.evaluate(() => document.querySelector('.md-live-preview').isContentEditable), false);
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('End');
+  await page.keyboard.insertText(' + c^2');
+  await page.waitForFunction(() => {
+    const preview = document.querySelector('.md-live-preview');
+    return !!preview && preview.textContent.includes('c');
+  }, null, { timeout: 15000 });
+  await page.keyboard.insertText(' \\frac{');
+  await page.waitForFunction(() => document.querySelector('.md-live-preview .md-live-preview-error')?.textContent.includes('公式语法错误'), null, { timeout: 15000 });
+  console.log('STEP formula block preview updates while typing and reports syntax errors');
+  // The diagram block previews the same way, and a broken diagram says so.
+  await page.locator('.md-widget pre.mermaid').first().click({ position: { x: 6, y: 6 } });
+  await page.waitForFunction(() => document.querySelector('.md-live-preview pre.mermaid svg'), null, { timeout: 25000 });
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('End');
+  await page.keyboard.insertText(' ???');
+  await page.waitForFunction(() => document.querySelector('.md-live-preview .diagram-error-message')?.textContent.includes('图表渲染失败'), null, { timeout: 25000 });
+  // Clicking the preview only puts the caret back at the end of the source block.
+  await page.locator('.md-live-preview').click();
+  await page.waitForFunction(() => document.querySelector('#position').textContent.includes('行 10'), null, { timeout: 10000 });
+  console.log('STEP diagram block preview renders, reports errors and is not editable');
+
+  // ── folder rename / trash keeps the open documents in sync ──
+  const syncRoot = path.join(featureFolder, '同步');
+  await fs.mkdir(path.join(syncRoot, 'a'), { recursive: true });
+  await fs.writeFile(path.join(syncRoot, 'a', 'x.md'), '# x\n\n第一行\n');
+  await page.locator('[data-side="files"]').click();
+  await page.locator('[data-file-op="refresh"]').click();
+  await page.waitForFunction(() => [...document.querySelectorAll('.file-item span')].some(node => node.textContent === 'x.md'), null, { timeout: 20000 });
+  await page.locator('.file-item').filter({ hasText: /^x\.md$/ }).click();
+  await page.waitForFunction(() => document.querySelector('#location').textContent.includes('x.md'));
+  const oldSyncPath = await fs.realpath(path.join(syncRoot, 'a', 'x.md'));
+  assert.equal(await page.evaluate(() => document.querySelector('#location').getAttribute('title')), oldSyncPath, '打开时标签应显示真实路径');
+  await stubPopup('重命名');
+  await page.locator('summary').filter({ hasText: /^a$/ }).click({ button: 'right' });
+  await page.locator('#entry-name').waitFor();
+  await page.locator('#entry-name').fill('b');
+  await page.keyboard.press('Enter');
+  // The document follows the folder: same tab, same text, new path.
+  await page.waitForFunction(() => /[\\/]b[\\/]x\.md$/.test(document.querySelector('#location').getAttribute('title') || ''), null, { timeout: 20000 });
+  assert.equal(await fs.stat(path.join(syncRoot, 'a')).then(() => true).catch(() => false), false, '文件夹必须真的改名');
+  assert.equal(await fs.readFile(path.join(syncRoot, 'b', 'x.md'), 'utf8'), '# x\n\n第一行\n');
+  // Editing and saving after the rename must write the new location only.
+  await page.locator('.cm-content').click();
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+End' : 'Control+End');
+  await page.keyboard.insertText('保存到新路径');
+  await page.locator('[data-command="save"]').click();
+  await page.waitForFunction(() => document.querySelector('#save-status').textContent === '已保存', null, { timeout: 20000 });
+  assert.match(await fs.readFile(path.join(syncRoot, 'b', 'x.md'), 'utf8'), /保存到新路径/);
+  assert.equal(await fs.stat(path.join(syncRoot, 'a')).then(() => true).catch(() => false), false, '保存不得重新创建旧文件夹');
+  console.log('STEP renaming a folder moves the open document with it');
+
+  // Trashing that folder keeps the text and turns the document unsaved.
+  await app.evaluate(({ shell, dialog }) => {
+    globalThis.__trashedPaths = [];
+    globalThis.__openedPaths = [];
+    shell.trashItem = async target => { globalThis.__trashedPaths.push(target); };
+    shell.openPath = async target => { globalThis.__openedPaths.push(target); return ''; };
+    dialog.showMessageBox = async () => ({ response: 1, checkboxChecked: false });
+  });
+  await page.locator('[data-file-op="refresh"]').click();
+  await stubPopup('移到');
+  await page.locator('summary').filter({ hasText: /^b$/ }).click({ button: 'right' });
+  await page.waitForFunction(() => document.querySelector('#location').getAttribute('title') === 'x.md', null, { timeout: 20000 });
+  assert.match(await page.evaluate(() => document.querySelector('.cm-content').textContent), /保存到新路径/, '移到回收站后文字必须保留');
+  assert.ok((await app.evaluate(() => globalThis.__trashedPaths)).some(target => target.endsWith('b')), '文件夹必须走 shell.trashItem');
+  await app.evaluate(({ Menu }) => { if (globalThis.__originalPopup) Menu.prototype.popup = globalThis.__originalPopup; });
+  console.log('STEP trashing a folder turns its open documents into unsaved ones');
+
+  // ── the opened folder itself is not a valid target ──
+  const renameRoot = await page.evaluate(target => window.desktop.renameEntry(target, '根目录'), featureFolder);
+  assert.equal(renameRoot.ok, false, '不能重命名已打开的文件夹本身');
+  assert.match(renameRoot.error, /不能对已打开的文件夹本身执行此操作/);
+  const trashRoot = await page.evaluate(target => window.desktop.trashEntry(target), featureFolder);
+  assert.equal(trashRoot.ok, false, '不能把已打开的文件夹移到回收站');
+  assert.match(trashRoot.error, /不能对已打开的文件夹本身执行此操作/);
+  // …while creating an entry in it and revealing it stay allowed.
+  const createdInRoot = await page.evaluate(target => window.desktop.createEntry(target, '根目录新建', 'folder'), featureFolder);
+  assert.equal(createdInRoot.ok, true, '在已打开文件夹中新建仍然允许');
+  await app.evaluate(({ shell }) => { globalThis.__revealed = []; shell.showItemInFolder = target => { globalThis.__revealed.push(target); }; });
+  const revealed = await page.evaluate(target => window.desktop.revealPath(target), featureFolder);
+  assert.equal(revealed.ok, true, '在文件夹中显示仍然允许');
+  assert.equal((await app.evaluate(() => globalThis.__revealed)).length, 1);
+  console.log('STEP the workspace root refuses rename / trash but allows create / reveal');
+
+  // ── network locations are refused before the filesystem is touched ──
+  const uncTarget = String.raw`\\host\share\notes.md`;
+  for (const method of ['openPath', 'openLocalFile', 'openFolderPath']) {
+    const started = Date.now();
+    const refused = await page.evaluate(([name, target]) => window.desktop[name](target), [method, uncTarget]);
+    assert.equal(refused.ok, false, `${method} 必须拒绝网络路径`);
+    assert.match(refused.error, /不支持.*网络位置/, `${method} 必须给出中文提示：${refused.error}`);
+    assert.ok(Date.now() - started < 2000, `${method} 不得真的访问网络位置`);
+  }
+  console.log('STEP openPath / openLocalFile / openFolderPath refuse network paths');
+
+  // ── a document link may never launch an executable ──
+  await fs.writeFile(path.join(featureFolder, 'setup.bat'), '@echo off\r\n');
+  await fs.writeFile(path.join(featureFolder, '危险链接.md'), '# 危险\n\n[运行脚本](./setup.bat)\n');
+  await page.locator('[data-file-op="refresh"]').click();
+  await page.waitForFunction(() => [...document.querySelectorAll('.file-item span')].some(node => node.textContent === '危险链接.md'), null, { timeout: 20000 });
+  await treeItem('危险链接.md').click();
+  await page.waitForFunction(() => document.querySelector('#location').textContent.includes('危险链接.md'));
+  await ensureLive();
+  await app.evaluate(({ shell }) => { globalThis.__openedPaths = []; shell.openPath = async target => { globalThis.__openedPaths.push(target); return ''; }; });
+  await page.locator('.md-widget a').filter({ hasText: '运行脚本' }).click();
+  await page.waitForFunction(() => {
+    const note = document.querySelector('#notification');
+    return !!note && !note.hidden && note.textContent.includes('可执行文件');
+  }, null, { timeout: 15000 });
+  assert.match(await page.locator('#notification').textContent(), /出于安全考虑，不能从文档中打开可执行文件。/);
+  assert.deepEqual(await app.evaluate(() => globalThis.__openedPaths), [], '安全校验必须在 shell.openPath 之前完成');
+  console.log('STEP a link to an executable is refused and never reaches the shell');
+
+  // ── session restore across two launches (shared userData) ──
+  const sessionRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'inkstone-session-desktop-'));
+  const sessionEnv = { ...process.env, INKSTONE_TEST_USER_DATA: path.join(sessionRoot, 'profile') };
+  delete sessionEnv.ELECTRON_RUN_AS_NODE;
+  const sessionFolder = path.join(sessionRoot, '工作 区');
+  await fs.mkdir(sessionFolder, { recursive: true });
+  await fs.writeFile(path.join(sessionFolder, '一.md'), '# 一\n\n第一份\n');
+  await fs.writeFile(path.join(sessionFolder, '二.md'), '# 二\n\n第二份\n');
+  const firstRun = await electron.launch({ args: [project, '--no-sandbox', '--disable-gpu'], env: sessionEnv });
+  try {
+    const firstPage = await firstRun.firstWindow();
+    firstPage.setDefaultTimeout(20000);
+    await firstPage.locator('.cm-content').waitFor();
+    await firstRun.evaluate(({ dialog }, target) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [target] }); }, sessionFolder);
+    await firstPage.evaluate(() => document.querySelector('[data-command="folder"]').click());
+    await firstPage.waitForFunction(() => document.querySelectorAll('.file-item').length >= 2, null, { timeout: 20000 });
+    await firstPage.locator('.file-item').filter({ hasText: '一.md' }).click();
+    await firstPage.waitForFunction(() => document.querySelector('#location').textContent.includes('一.md'));
+    await firstPage.locator('.file-item').filter({ hasText: '二.md' }).click();
+    await firstPage.waitForFunction(() => document.querySelector('#location').textContent.includes('二.md'));
+    await firstPage.waitForTimeout(1200);
+    const stored = JSON.parse(await fs.readFile(path.join(sessionRoot, 'profile', 'session.json'), 'utf8'));
+    assert.equal(stored.folder, await fs.realpath(sessionFolder), '会话必须记住上次的文件夹');
+    assert.equal(stored.files.length, 2, '会话必须记住已保存的文档');
+    assert.ok(stored.active.endsWith('二.md'), '会话必须记住当前文档');
+    // «文件 → 最近打开» really opens a document that was closed again.
+    await firstPage.locator('#open-documents .open-document').filter({ hasText: '二.md' }).locator('.open-document-close').click();
+    await firstPage.waitForFunction(() => !document.querySelector('#location').textContent.includes('二.md'), null, { timeout: 15000 });
+    const clicked = await firstRun.evaluate(({ Menu }) => {
+      const file = Menu.getApplicationMenu()?.items.find(item => item.label === '文件');
+      const recentMenu = file?.submenu.items.find(item => item.label === '最近打开');
+      const item = recentMenu?.submenu.items.find(entry => entry.label === '二.md');
+      if (!item) return false;
+      item.click();
+      return true;
+    });
+    assert.equal(clicked, true, '最近打开菜单必须包含已关闭的文件');
+    await firstPage.waitForFunction(() => document.querySelector('#location').textContent.includes('二.md'), null, { timeout: 15000 });
+    await firstPage.waitForTimeout(1200);
+  } finally {
+    const closed = firstRun.waitForEvent('close').catch(() => {});
+    await firstRun.evaluate(({ app }) => app.exit(0)).catch(() => {});
+    await closed;
+    await firstRun.close().catch(() => {});
+  }
+  const secondRun = await electron.launch({ args: [project, '--no-sandbox', '--disable-gpu'], env: sessionEnv });
+  try {
+    const secondPage = await secondRun.firstWindow();
+    secondPage.setDefaultTimeout(25000);
+    await secondPage.locator('.cm-content').waitFor();
+    await secondPage.waitForFunction(() => document.querySelector('#location').textContent === '二.md', null, { timeout: 25000 });
+    const restored = await secondPage.evaluate(() => ({
+      documents: [...document.querySelectorAll('#open-documents .open-document-name span')].map(node => node.textContent),
+      folder: document.querySelector('#location').title
+    }));
+    assert.deepEqual(restored.documents.sort(), ['一.md', '二.md'], `重启后应恢复两个文档，实际 ${JSON.stringify(restored.documents)}`);
+    assert.ok(!restored.documents.includes('欢迎使用.md'), '恢复了文档就不应再显示欢迎页');
+    // DOM clicks keep the assertion independent of the window-button overlay,
+    // which can cover the topbar buttons in a freshly restored window.
+    await secondPage.evaluate(() => {
+      if (document.body.classList.contains('sidebar-hidden')) document.querySelector('.topbar [data-command="sidebar"]').click();
+      document.querySelector('[data-side="files"]').click();
+    });
+    await secondPage.waitForFunction(() => [...document.querySelectorAll('.file-item span')].some(node => node.textContent === '一.md'), null, { timeout: 20000 });
+    console.log('STEP session restore reopens the folder, its documents and the active one');
+  } finally {
+    const closed = secondRun.waitForEvent('close').catch(() => {});
+    await secondRun.evaluate(({ app }) => app.exit(0)).catch(() => {});
+    await closed;
+    await secondRun.close().catch(() => {});
+    await fs.rm(sessionRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
   assert.deepEqual(errors, []);
-  console.log('PASS: native startup, editing, undo/redo, character-level click positioning, source mode, save, math, Mermaid labels, task toggle, external conflict + live notification, self-contained fonts in HTML, PDF, version history, preferences, custom CSS theme + themed HTML export, typewriter, dark mode, cross-block rendering parity, graphical table editing, clipboard HTML/Markdown, command palette, persisted zoom, cross-block drag selection, typeset live preview + syntax reveal, grouped undo, frameless chrome, code copy, article panel, resizable sidebar, heading numbering, version diff, outline drag reorder, window bounds, table Tab navigation, 200k+ source fallback, toolbar-free layout, typing in typeset mode, in-place table cells, Enter rows, draggable columns, emoji autocomplete + picker, Pandoc gating, image context menu, independent new window, narrow desktop viewport, immediate typeset on closing delimiter, immediate heading/bullet/ordered/code typesetting, immediate empty list/task/quote prefixes, rendered empty task checkbox, IME composition keeps whole-document typesetting.');
+  console.log('PASS: native startup, editing, undo/redo, character-level click positioning, source mode, save, math, Mermaid labels, task toggle, external conflict + live notification, self-contained fonts in HTML, PDF, version history, preferences, custom CSS theme + themed HTML export, typewriter, dark mode, cross-block rendering parity, graphical table editing, clipboard HTML/Markdown, command palette, persisted zoom, cross-block drag selection, typeset live preview + syntax reveal, grouped undo, frameless chrome, code copy, article panel, resizable sidebar, heading numbering, version diff, outline drag reorder, window bounds, table Tab navigation, 200k+ source fallback, toolbar-free layout, typing in typeset mode, in-place table cells, Enter rows, draggable columns, emoji autocomplete + picker, Pandoc gating, image context menu, independent new window, narrow desktop viewport, immediate typeset on closing delimiter, immediate heading/bullet/ordered/code typesetting, immediate empty list/task/quote prefixes, rendered empty task checkbox, IME composition keeps whole-document typesetting, CRLF blocks stay CRLF, CRLF column widths, incremental block rendering keeps widget DOM and click positions, mixed newline round-trip, cell click without edit, bold cell edit, rendered cell Tab/Enter, quoted table editing, reload keeps a discarded copy, keep-local unblocks saving with a history backup, queued external prompts for two files, silent reload of a clean document, external deletion prompt with Save As / unsaved document, one-at-a-time reopen, cold start with an argv document, renderer crash prompts and still closes, Save As keeps rewritten asset references, local image paths (percent-encoded / angle brackets / ../ / absolute / http) and their HTML inlining, document-injected data-* attributes staying inert, chrome-free export and copy-as-HTML, unsaved-document image insert + Save As migration + temp cleanup, startup pruning of stale unsaved image folders, UNC / network image references never contacted, case-variant and SVG/MathML reserved attributes stripped by DOMPurify alone, crash recovery keeping pasted images, quit save prompt may outlive the 5s fallback, a pristine welcome page that the first opened file replaces, the file menu and command palette exposing rename / reveal / trash / diagram, readable version-history names, the sidebar open-document list with keyboard switching and close prompts, palette switching between open documents without a folder, the Chinese find / replace panel, the Windows / Linux single-row title bar with a native menu popup and a theme-aware window-button overlay, folder-wide search (grouped results, unsaved content, caret placement), the recent-files menu, file-tree create / rename / trash / external refresh, local .md links with cross-document anchors and network-link refusal, active code block syntax tokens with an on-demand haskell grammar, formula + diagram live previews with Chinese syntax errors, folder rename / trash keeping open documents in sync, the workspace root refusing rename and trash, network paths refused by openPath / openLocalFile / openFolderPath, executable links refused before the shell, and session restore across two launches.');
   if (process.env.INKSTONE_SCREENSHOT) await page.screenshot({ path: process.env.INKSTONE_SCREENSHOT });
 } finally {
   const closed = app.waitForEvent('close');

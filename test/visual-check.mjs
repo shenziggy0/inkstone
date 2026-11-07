@@ -4,6 +4,11 @@ import os from 'node:os';
 import path from 'node:path';
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'inkstone-visual-'));
+// Screenshots go to the platform temp folder (or INKSTONE_SHOT_DIR): a POSIX
+// `/tmp` path resolves to `<drive>:	mp` on Windows, which usually does not exist.
+const shots = process.env.INKSTONE_SHOT_DIR || path.join(os.tmpdir(), 'inkstone-shots');
+await fs.mkdir(shots, { recursive: true });
+const shot = name => path.join(shots, `inkstone-live-${name}.png`);
 const project = path.resolve(import.meta.dirname, '..');
 const env = { ...process.env, INKSTONE_TEST_USER_DATA: path.join(root, 'profile') };
 delete env.ELECTRON_RUN_AS_NODE;
@@ -14,10 +19,10 @@ try {
   await page.locator('.cm-content').waitFor();
   // The very first window is the deliverable: a clean Typora-like page.
   await page.waitForTimeout(250);
-  await page.screenshot({ path: '/tmp/inkstone-live-initial.png' });
+  await page.screenshot({ path: shot('initial') });
   await page.locator('.topbar [data-command="sidebar"]').click();
   await page.waitForTimeout(200);
-  await page.screenshot({ path: '/tmp/inkstone-live-sidebar.png' });
+  await page.screenshot({ path: shot('sidebar') });
   await page.locator('.topbar [data-command="sidebar"]').click();
   await page.locator('.topbar [data-command="new"]').click();
   await page.locator('.cm-content').click();
@@ -45,8 +50,8 @@ try {
   // Click the paragraph in the middle so it becomes the typeset active block.
   await page.locator('.md-widget p').first().click();
   await page.waitForTimeout(400);
-  const light = process.env.INKSTONE_LIGHT_SHOT || '/tmp/inkstone-live-light.png';
-  const dark = process.env.INKSTONE_DARK_SHOT || '/tmp/inkstone-live-dark.png';
+  const light = process.env.INKSTONE_LIGHT_SHOT || shot('light');
+  const dark = process.env.INKSTONE_DARK_SHOT || shot('dark');
   await page.screenshot({ path: light });
   // A second shot shows the exact state the user complained about: syntax was
   // just typed, the caret is still at the end, and everything must be typeset.
@@ -56,7 +61,7 @@ try {
   // otherwise duplicate the `- ` markers in this fixed visual fixture.
   await page.keyboard.insertText('# 即时排版验收\n\n普通段落含 **加粗**、`代码`、~~删除线~~、==高亮== 与 [链接](https://example.com)。\n\n- 第一项\n- 第二项\n\n1. 有序项\n2. 另一个有序项');
   await page.waitForTimeout(500);
-  await page.screenshot({ path: '/tmp/inkstone-live-typing.png' });
+  await page.screenshot({ path: shot('typing') });
   // Another shot: an IME composition in flight. The whole document must stay
   // typeset while pinyin is being composed — the old implementation cleared
   // every decoration and exposed raw Markdown as soon as composition started.
@@ -67,7 +72,7 @@ try {
   const ime = await page.context().newCDPSession(page);
   await ime.send('Input.imeSetComposition', { text: 'zhongwen', selectionStart: 8, selectionEnd: 8 });
   await page.waitForTimeout(350);
-  await page.screenshot({ path: '/tmp/inkstone-live-ime.png' });
+  await page.screenshot({ path: shot('ime') });
   await ime.send('Input.insertText', { text: '中文' });
   // Next shot: type the three content-free prefixes character by character.
   // insertText supplies line breaks so CodeMirror's newline continuation does
@@ -83,7 +88,7 @@ try {
   await page.keyboard.type('>', { delay: 25 });
   await page.keyboard.insertText('\n> 引用文字，用于对照上方的空引用行。');
   await page.waitForTimeout(500);
-  await page.screenshot({ path: '/tmp/inkstone-live-prefixes.png' });
+  await page.screenshot({ path: shot('prefixes') });
   await page.locator('[data-command="theme"]').click();
   await page.waitForTimeout(400);
   await page.screenshot({ path: dark });
@@ -94,8 +99,8 @@ try {
   await page.locator('#preferences button[type="submit"]').click();
   await page.waitForFunction(() => document.documentElement.dataset.ui === 'workbench');
   await page.waitForTimeout(300);
-  await page.screenshot({ path: '/tmp/inkstone-live-workbench.png' });
-  console.log('screenshots written: initial, sidebar, light, typing, ime-composition, prefixes, dark, workbench');
+  await page.screenshot({ path: shot('workbench') });
+  console.log(`screenshots written to ${shots}: initial, sidebar, light, typing, ime-composition, prefixes, dark, workbench`);
 } finally {
   const closed = app.waitForEvent('close');
   await app.evaluate(({ app }) => app.exit(0));

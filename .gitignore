@@ -4,3 +4,5 @@ release/
 .workbuddy/
 .DS_Store
 test-results/
+ik.md
+.omc/

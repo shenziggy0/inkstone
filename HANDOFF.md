@@ -2,11 +2,11 @@
 
 2026-11-07 · 开发版 0.1.0
 
-墨页是面向程序员的本地 Markdown 桌面编辑器，目标是在 macOS 和 Windows 上达到并超越 Typora 的功能与操作体验，优先保证技术文档、代码、公式和图表的编辑体验。截至本次交接已按 `docs/parity-baseline.md` 完成**十轮收敛**：双平台命令/快捷键矩阵、整篇共享解析上下文带来的跨块语法、自定义 CSS 主题与版本历史、图形化表格编辑、剪贴板与快速打开（第 1–3 轮）；渲染态跨块拖选、活跃块标记淡化、连续撤销、沉浸式标题栏、命令面板、文章列表、状态栏与代码块交互（第 4 轮）；资源同步、窗口状态持久化、字数口径、版本 diff、大纲拖拽重排、单次解析缓存与 20 万字回退（第 5 轮）；**活跃块排版态就地编辑、表格就地输入与列宽拖动、表情补全、独立新窗口、Pandoc 能力降级、HTML 导入、图片右键复制、桌面窄屏与真实截图验收**（第 6 轮）；**语法「输入即排版」规则对齐 Typora**（第 7 轮）；**无正文块前缀 `-` / `- [ ]` / `>` 的即时排版、渲染态一致性及深色复选框可见性**（第 8 轮，用户第二次反馈项）；**IME 组合输入期间保持整篇排版、候选确认不丢字不重复**（第 9 轮，用户第三次反馈项）；**界面外观与默认主题排版完全向 Typora 对齐**（第 10 轮，用户第四次反馈项）。**完整 Typora 对等仍未达到**：活跃块用行内装饰模拟排版而非可编辑渲染 DOM，嵌套强调与跨块拖选高亮仍有差距；原生系统菜单栏/窗口装饰仍是 Electron 实现；Windows 实机、真实中文 IME、签名公证与发行包未闭环。兼容性验收从 [Typora 功能页](https://typora.io/) 和 [Markdown 语法参考](https://support.typora.io/Markdown-Reference/) 开始。
+墨页是面向程序员的本地 Markdown 桌面编辑器，目标是在 macOS 和 Windows 上达到并超越 Typora 的功能与操作体验，优先保证技术文档、代码、公式和图表的编辑体验。截至本次交接已按 `docs/parity-baseline.md` 完成**十轮收敛**，随后在 2026-11 的审计中补齐**第十一轮（审查问题闭环）与「第 1～6A 批」审计修复**：双平台命令/快捷键矩阵、整篇共享解析上下文带来的跨块语法、自定义 CSS 主题与版本历史、图形化表格编辑、剪贴板与快速打开（第 1–3 轮）；渲染态跨块拖选、活跃块标记淡化、连续撤销、沉浸式标题栏、命令面板、文章列表、状态栏与代码块交互（第 4 轮）；资源同步、窗口状态持久化、字数口径、版本 diff、大纲拖拽重排、单次解析缓存与 20 万字回退（第 5 轮）；**活跃块排版态就地编辑、表格就地输入与列宽拖动、表情补全、独立新窗口、Pandoc 能力降级、HTML 导入、图片右键复制、桌面窄屏与真实截图验收**（第 6 轮）；**语法「输入即排版」规则对齐 Typora**（第 7 轮）；**无正文块前缀 `-` / `- [ ]` / `>` 的即时排版、渲染态一致性及深色复选框可见性**（第 8 轮，用户第二次反馈项）；**IME 组合输入期间保持整篇排版、候选确认不丢字不重复**（第 9 轮，用户第三次反馈项）；**界面外观与默认主题排版完全向 Typora 对齐**（第 10 轮，用户第四次反馈项）。**完整 Typora 对等仍未达到**：活跃块用行内装饰模拟排版而非可编辑渲染 DOM，嵌套强调与跨块拖选高亮仍有差距；原生系统菜单栏/窗口装饰仍是 Electron 实现；真实中文 IME 实机、签名公证与发行包未闭环。**Windows 11 实机上的自动化验收已在本轮完成**（`npm test` / `npm run build` / `node test/desktop.mjs` / `node test/perf.mjs`），macOS 本轮未复测。兼容性验收从 [Typora 功能页](https://typora.io/) 和 [Markdown 语法参考](https://support.typora.io/Markdown-Reference/) 开始。
 
 ## 启动与复测
 
-在项目根目录执行。已验证环境为 Apple Silicon、Node.js 22.23.2、npm 10.9.8、Electron 45.2.3。
+在项目根目录执行。**本轮验证环境为 Windows 11 x64、Node.js 26.13.0、npm 11.20.0、Electron 45.2.3**；macOS 本轮未复测（上一轮环境为 Apple Silicon、Node.js 22.23.2、npm 10.9.8，同一 Electron 版本）。仓库没有 `engines` 字段也没有 `.nvmrc`，CI 因此显式锁定 `26.x`。
 
 ```bash
 npm ci
@@ -21,7 +21,7 @@ npm run build
 node test/desktop.mjs
 ```
 
-`npm test` 包含文件存储、源码映射、Markdown 渲染、表格、行内标记、排版态编辑组、版本 diff 与大纲重排八类单元测试（共 **64 项**）。`test/desktop.mjs` 通过 Playwright 启动 Electron，使用独立的临时用户目录并模拟保存对话框，覆盖编辑/撤销、字符级定位、跨块拖选、连续撤销、外部变更、导出、历史与逐行 diff、主题、跨块语法、表格就地输入与列宽、剪贴板、命令面板、文章列表、大纲重排、缩放与窗口状态、表情、Pandoc 降级、独立新窗口、窄屏、20 万字回退、**逐字符输入即排版（含 `-` / `- [ ]` / `>` 与空任务项渲染一致性）**、**CDP 模拟 IME 组合输入**、**默认 Typora 极简外观与工作台切换**等 **43 步骤**。`test/visual-check.mjs` 额外生成初始界面、侧栏、浅色、深色、「刚输入完」与「三类空前缀」、IME 组合中、工作台对照八张真实桌面截图供人工视觉验收。若宿主环境注入了 `ELECTRON_RUN_AS_NODE=1`，测试会在派生应用进程时剔除它，并加 `--no-sandbox --disable-gpu` 以免渲染进程在托管 shell 中崩溃；`npm start` 不受影响。像素拖动用例必须先复位缩放、关闭打字机模式并等待布局稳定，否则 CDP 坐标与页面 CSS 坐标不一致。浏览器界面调试可运行 `npm run dev`，用 ego-lite 查看终端输出的地址。浏览器预览使用简化的文件桥接，不具备桌面文件系统能力。
+`npm test` 覆盖存储与恢复、行尾（BOM/CRLF/混排）、命令行路径、资源路径安全、Markdown 渲染、表格、行内标记、排版态纯函数、按块渲染缓存、文件夹搜索、会话与最近文件、链接分类、按需代码高亮、源码映射、版本 diff 与大纲重排，共 **16 个测试文件 / 140 项**（`node --test test/*.test.js`）。`test/desktop.mjs` 通过 Playwright 启动 Electron，使用独立的临时用户目录并模拟保存对话框，覆盖编辑/撤销、字符级定位、跨块拖选、连续撤销、外部变更、导出、历史与逐行 diff、主题、跨块语法、表格就地输入与列宽、剪贴板、命令面板、文章列表、大纲重排、缩放与窗口状态、表情、Pandoc 降级、独立新窗口、窄屏、20 万字回退、逐字符输入即排版（含 `-` / `- [ ]` / `>` 与空任务项渲染一致性）、CDP 模拟 IME 组合输入、默认 Typora 极简外观与工作台切换、Windows 单行标题栏、欢迎页状态、CRLF 与混排换行、按块增量渲染、未保存文档图片迁移与崩溃恢复、外部变更与退出流程、文件树新建/重命名/回收站/刷新、文件夹搜索、最近文件、会话恢复、本地链接与锚点、按需代码高亮、公式与图表实时预览，共 **103 个 STEP**（Windows 11 实测约 2 分钟，含真实剪贴板断言与像素拖动）。`test/perf.mjs` 是排版态输入延迟基准（5k / 30k / 100k 字符；目标值只报告，平均延迟超过目标 3 倍或图表被输入重建时退出码为 1）。`test/visual-check.mjs` 额外生成初始界面、侧栏、浅色、深色、「刚输入完」与「三类空前缀」、IME 组合中、工作台对照八张真实桌面截图供人工视觉验收。若宿主环境注入了 `ELECTRON_RUN_AS_NODE=1`，测试会在派生应用进程时剔除它，并加 `--no-sandbox --disable-gpu` 以免渲染进程在托管 shell 中崩溃；`npm start` 不受影响。像素拖动用例必须先复位缩放、关闭打字机模式并等待布局稳定，否则 CDP 坐标与页面 CSS 坐标不一致。浏览器界面调试可运行 `npm run dev`，用 ego-lite 查看终端输出的地址。浏览器预览使用简化的文件桥接，不具备桌面文件系统能力。桌面用例需要真实显示环境与剪贴板，因此**不在 CI 的必过流程里**：CI 只跑 `npm test` + `npm run build`，桌面用例是手动触发的独立 job（见 `.github/workflows/ci.yml`）。
 
 ## 目录与构建产物
 
@@ -36,18 +36,30 @@ node test/desktop.mjs
 | `src/emoji.js` | `:shortcode` 自动补全词表与选择器数据 |
 | `src/diff.js` | 版本历史逐行 LCS 差异与安全 HTML 渲染 |
 | `src/outline.js` | 顶层章节切分与整章重排（大纲拖拽的数据层） |
+| `src/md-syntax.js` | 用 Lezer CommonMark（与 markdown-it 同一扩展集）解析出「哪些字符是语法」，供活跃块排版使用 |
+| `src/links.js` | 链接目标分类（锚点 / 外链 / 本地文件）与跨文档锚点匹配（按渲染层 slug） |
+| `src/eol.js` | BOM 与 LF/CRLF（含逐行混排）保真：进入编辑器前归一为 LF，保存时按行还原 |
+| `src/highlight.js` | highlight.js 核心 18 种语言内置，其余按需动态加载；导出前预取文档用到的语言包 |
+| `src/welcome.js` | 欢迎页 Markdown 内容（以「欢迎使用.md」的形式作为未修改文档打开） |
 | `src/main.js` | 沉浸式工作台、命令面板、文章列表、可拖拽侧边栏、状态栏面包屑/编码/选区字数、大纲拖拽、版本 diff、图片放大与右键复制、表格/历史对话框、表情选择器、**界面外观（Typora 极简 / 工作台）切换**、偏好与主题、保存与导出 |
 | `tokens.css`、`src/styles.css` | Typora 默认主题色板与排版（纯白纸面、16px/1.6、860px 列宽、标题下细线、浅灰代码块、蓝色链接）、深色 Night 风格、极简 chrome 与工作台两套外观 |
 | `src/browser.js` | 浏览器开发预览用的桌面接口替身 |
 | `electron/main.cjs`、`electron/preload.cjs` | 原生菜单与快捷键矩阵、沉浸式标题栏、对话框、**按窗口路由的 IPC**、每窗口独立文档存储、文件工作区、主题目录、版本历史、外部变更轮询、原生剪贴板、缩放/窗口状态持久化、Pandoc 能力探测与导入导出 |
 | `electron/store.cjs` | 原文读取、文件身份识别、原子写入、磁盘版本检查、保存历史、恢复副本及 `syncAssets()` 资源同步 |
-| `test/*.test.js` | 存储、字符映射、语法渲染、表格、行内标记、排版态编辑组、版本 diff 与大纲重排八类单元测试（64 项） |
-| `test/desktop.mjs`、`test/visual-check.mjs`、`docs/evidence/` | 桌面端端到端回归（43 步骤）、真实界面截图脚本、构建日志与视觉证据 |
+| `electron/assets.cjs` | 图片与链接路径统一解析：UNC/设备路径/带 host 的 `file://` 拒绝、图片扩展名白名单（realpath 后复查）、可执行文件与 `PATHEXT` 拒绝、未保存文档临时图片目录 |
+| `electron/search.cjs` | 文件夹全文搜索（逐行匹配、片段窗口、单文件/总量上限、跳过 `node_modules` 等目录、可取消）与文件名/工作区边界校验 |
+| `electron/session.cjs` | 最近文件/文件夹与会话状态（去重、上限、缺失剔除、网络位置直接丢弃） |
+| `electron/argv.cjs` | 命令行文档路径解析（冷启动「打开方式」，忽略 Electron 开关与应用目录） |
+| `test/*.test.js` | 16 个测试文件、140 项单元测试：存储与恢复、行尾、命令行路径、资源路径安全、Markdown 渲染、表格、行内标记、排版态、渲染缓存、搜索、会话、链接、按需高亮、字符映射、版本 diff 与大纲重排 |
+| `test/desktop.mjs`、`test/perf.mjs`、`test/visual-check.mjs`、`docs/evidence/` | 桌面端到端回归（103 步骤）、输入延迟基准、真实界面截图脚本、构建日志与视觉证据 |
 | `docs/parity-baseline.md` | 固定 Typora 1.14.15 的双平台对等基准与逐项用例矩阵 |
 | `docs/parity/fixtures/parity-sample.md` | 两平台共用的冻结 Markdown 回归语料 |
+| `docs/regression-map.md` | 第 1～6A 批修复项 → 单测 / 桌面 STEP 的映射表与无覆盖清单 |
+| `README.md` | 中文说明：环境要求、安装运行、四类测试、打包、目录结构、安全说明与已知限制 |
+| `.github/workflows/ci.yml` | CI：push/PR 在 Windows 与 macOS 上跑 `npm test` + `npm run build`；桌面用例手动触发且不阻塞 |
 | `dist/` | 目前通过桌面测试的前端构建 |
 | `release/mac-arm64/Inkstone.app` | Apple Silicon 开发包，未做发行签名和公证。包内 `app.asar` 仍是十轮改动之前的旧构建，**按用户要求暂不重新打包**；本地验收请用 `npm start`（加载当前 `dist/`） |
-| `release/win-unpacked/` | Windows x64 解包目录，同为旧构建。需把整个目录带到 Windows，再运行 `Inkstone.exe`；未在 Windows 实机启动，也未生成 NSIS 安装器 |
+| `release/win-unpacked/` | Windows x64 解包目录，同为旧构建。本轮在 Windows 11 上用 `npm start`（当前源码 + 当前 `dist/`）完成验收，**没有使用这个解包目录**；NSIS 安装器仍未生成 |
 
 用户 2026-11-07 明确要求「**先不打包了，我本地测完再打包**」，因此本次收尾不执行 `package:mac` / `package:win`；本地验收通过后再在联网环境重建。macOS 用 `npm run package:mac`，Windows 主机上用 `npm run package:win` 构建 NSIS。仓库已完成**本地首次提交**（未推送到 `origin`）。`node_modules/`、`dist/` 和 `release/` 由 `.gitignore` 排除。
 
@@ -60,7 +72,7 @@ node test/desktop.mjs
 | 技术语法 | 整篇一次解析、共享 `env` 逐块渲染：重复标题锚点、脚注、引用式链接、`[TOC]` 文内目录、YAML 属性卡片、GitHub 五类警示块、`\(…\)` / `\[…\]` 公式分隔符、公式与标题自动编号、Mermaid 错误可见与主题重绘。表格**单击单元格就地输入**、Enter 追加行、Tab/Shift+Tab 走单元格、拖动表头右边缘调整列宽（写文档末尾不可见注释，重开与导出保持），Alt+单击/右键仍开图形化编辑器（改值、增删行列、逐列对齐） |
 | 图片与导出 | 文件选择、粘贴、拖放插图，本地图片写入 `assets/`，双击渲染图片可放大、右键可复制 Markdown/HTML/图片路径。HTML/PDF 直接导出；HTML 内嵌公式字体、本地图片与全部样式（含自定义主题），PDF 生成文档大纲；复制为 Markdown / HTML、粘贴纯文本、代码块一键复制（Electron 45 W3C 剪贴板 API）；**HTML 无依赖导入**、Pandoc 能力探测（未安装时导出按钮禁用并明确提示）。窗口尺寸/位置/最大化状态与缩放级别持久化。导出分页视觉与 PDF 书签、Pandoc 全格式未验收 |
 | 界面 | **默认 Typora 极简外观**：38px 单一标题栏（居中文件名 + 未保存圆点、淡图标）、无品牌栏/标签栏/排版工具栏、侧栏默认隐藏可一键开合、24px 右下字数状态栏、macOS 红绿灯跟随标题栏高度；默认主题为纯白纸面 + 16px/1.6 正文 + 860px 列宽 + 标题细线 + 浅灰代码块，深色为 Night 风格；**工作台外观**可在偏好设置或命令面板一键切回，保留全部标签/工具/状态栏。另有命令面板（`⌘/Ctrl+P` 搜命令与文件）、大纲/文件/文章三面板、可拖拽侧栏宽度、浅色/深色/纸张 + 自定义 CSS 主题、专注与打字机模式、表情短代码补全与选择器、独立新窗口 |
-| 双平台 | `npm test` **64 项通过**；`npm run build` 通过；`node test/desktop.mjs` 在 macOS **43 步骤全部通过**；`node test/visual-check.mjs` 八张真实桌面截图经人工检查无裸露语法/重叠/裁切。Windows 实机、Ctrl 矩阵、真实中文输入法、签名与安装仍待验收 |
+| 双平台 | **Windows 11 x64 实测**：`npm test` **140 项通过**；`npm run build` 通过（主包 952.98 kB / gzip 308.02 kB）；`node test/desktop.mjs` **103 步骤全部通过**（含真实剪贴板断言与像素拖动）；`node test/perf.mjs` 通过（100k 字符平均 81.7 ms/键，目标 150 ms）；`node test/visual-check.mjs` 可生成八张真实桌面截图，视觉结论仍靠人工检查。**macOS 本轮未复测**；真实中文输入法实机、签名与安装仍待验收 |
 
 ## 接手顺序（原始顺序，供追溯；当前完成度见文末推进记录与 `docs/parity-baseline.md`）
 
@@ -156,9 +168,29 @@ node test/desktop.mjs
 3. **初始整篇渲染**：`src/editor.js` 的 `modeField` 增加 `pristine`，文档刚打开且用户未点击/输入时 `liveDecorations()` 不把光标所在的第一个块展开为源码行，消除欢迎文档首行裸露的 `# 标题`，与 Typora「打开即阅读视图、点哪块才编辑」一致；第一次交互后恢复既有活跃块排版态。
 4. **回归**：`test/desktop.mjs` 新增「默认 Typora 外观（38px 标题栏、16px/1.6、860px、纯白、侧栏隐藏、整篇渲染、侧栏开合）」与「切回工作台」两步，随后原有 41 步在工作台模式下全量执行，共 **43 步**；`test/visual-check.mjs` 新增初始界面、侧栏打开、工作台对照三张截图，共八张真实 Electron 截图逐张人工检查，确认无裸露语法、重叠、裁切与对比度问题。
 
+### 2026-11 审计修复（第 1～6A 批，Windows 11 实机验证）
+
+审计基线提交 `e548e99`，分支 `fix/audit-2026-11`。逐项映射与无覆盖清单见 `docs/regression-map.md`；本节按批次记录改动与对应测试。
+
+1. **第 1 批：保存 / 恢复 / 冲突等数据安全。** `electron/store.cjs` 的原子写入改为临时文件 + `rename`，同一文档的读写串行化；文件身份统一走 `realpath`（`/tmp` ↔ `/private/tmp`、大小写、符号链接）；保存前比对磁盘版本，拒绝覆盖外部改动、拒绝静默重建被删文件，保存失败仍保留脏文档与原文；恢复副本改为一次性认领，新增 `discarded/`（被放弃的本地文本）、`detach()`（被删文件转未保存文档）、`rekey()` / `moveHistory()`（文件夹重命名时迁移文档路径与历史），保存历史上限 50 并兼容旧格式目录。新增 `electron/argv.cjs` 解析冷启动命令行文档路径；新增 `src/eol.js`，让 BOM 与 LF/CRLF（含逐行混排）保存后逐字节保真。回归：`test/store.test.js`（23 项）、`test/eol.test.js`（4 项）、`test/argv.test.js`（4 项），桌面 STEP 8 / 10 / 51–54 / 68–69 / 72–73 / 78 / 82–84。
+2. **第 2 批：按块渲染缓存与 widget 增量更新。** 整篇只解析一次，按「全局签名 + 块内容」缓存每个块的 HTML，段落编辑只重渲该块、其余块复用；签名覆盖跨块依赖（标题、引用定义、脚注、`[TOC]`），并忽略任何块都看不见的编辑。回归：`test/render-cache.test.js`（7 项，含「逐块渲染 = 整篇渲染」「CRLF/BOM 与 LF 同构」），桌面 STEP 59。
+3. **第 3 批：活跃块排版重写。** 新增 `src/md-syntax.js`（用 Lezer 解析出真正的语法区间，和 markdown-it 共用同一套扩展：GFM、上下标、表情、`==高亮==`、texmath 分隔符），重写 `src/live-preview.js`（mark / style / prefix / group 四类区间），确立一致性不变量「活跃块可见文本 = 渲染层纯文本」，并让闭合标记后立即排版、光标进入元素才显现源码。回归：`test/parity.test.js`（10 项，含冻结语料逐块比对）、`test/live-preview.test.js`（16 项），桌面 STEP 21 / 34–41 / 47。
+4. **第 4 批：图片与资源路径统一解析。** 新增 `electron/assets.cjs`：协议、剪贴板、HTML 导出共用一套解析；UNC、`\?\UNC\` 与 `\.\` 设备路径、带 host 的 `file://` 在第一次文件系统调用前拒绝（避免 Windows 上仅 `realpath` 就泄露 NTLM 哈希），`realpath` 之后再查一次；图片只接受白名单扩展名且必须是真实文件；文档链接允许任意类型，但可执行/脚本扩展名（含 Windows `PATHEXT` 声明的全部类型）一律拒绝。DOMPurify 的保留属性改为 `FORBID_ATTR` 配置而不是字符串二次遍历；未保存文档的图片进入按文档 id 派生的临时目录，首次保存时迁移，崩溃恢复沿用原 id 的目录，关闭与启动时清理过期目录。回归：`test/assets.test.js`（12 项）+ 相关 `test/store.test.js` 用例，桌面 STEP 60–66 / 79–80 / 101–102。
+5. **第 5 批：欢迎页、默认外观、侧栏与 Windows 标题栏、中文化。** 欢迎页改为「未修改」的命名文档（`欢迎使用.md`），首个打开的文件替换它、编辑后成为普通未保存文档；默认极简外观下保留侧栏开关、新建、主题、设置与菜单按钮；侧栏列出全部已打开文档（切换、未保存标记、键盘操作、关闭提示）；Windows / Linux 使用单条 38px 标题栏（`titleBarOverlay` 随主题换色、原生菜单按钮、全屏时释放右侧留白）；查找替换面板、菜单、回收站/废纸篓提示中文化。回归：桌面 STEP 1–4 / 33 / 75–77 / 85–86；macOS 红绿灯位置联动无自动覆盖（需 macOS）。
+6. **第 6A 批：搜索、会话、文件树、链接、高亮与实时预览。** 新增 `electron/search.cjs`（文件夹全文搜索：逐行匹配、片段窗口、单文件/总量上限、跳过构建目录、可取消、未保存内容覆盖磁盘字节、文件名校验、工作区边界）与 `electron/session.cjs`（最近文件/文件夹、会话恢复、缺失与网络位置剔除）；文件树支持新建、重命名、移到回收站、刷新；新增 `src/links.js` 处理本地 `.md` 链接与跨文档锚点（可执行文件与网络路径仍拒绝）；活跃代码块用 `@codemirror/language-data` 高亮，`src/highlight.js` 改为「核心 18 种内置 + 其余按需动态加载」，导出前预取；公式块与 Mermaid 图表支持输入时实时预览并显示语法错误。回归：`test/search.test.js`（9 项）、`test/session.test.js`（5 项）、`test/links.test.js`（6 项）、新增 `test/highlight.test.js`（4 项），桌面 STEP 87–103。
+
+**本轮新增单测**：`test/highlight.test.js`（4 项，只 import `src/highlight.js`，不启动 Electron）——覆盖「文档请求了哪些语言」「未知语言如何回退」「语言包到达后是否注册别名」。因此 `npm test` 由 136 项变为 **140 项**；桌面用例仍为 **103 步**。
+
 ### 验证结果
 
-`npm test` **64/64 通过**；`npm run build` 通过；`node test/desktop.mjs` 全部 **43 步骤**通过，包括原有外部修改冲突、HTML 内嵌字体、PDF、打字机、深色切换、任务勾选、Mermaid SVG 文字、六个回归点，以及第 6/7/8/9 轮新增的排版态、表格就地输入、列宽、表情、多窗口、输入即排版、三类空前缀与空任务项渲染一致性、IME 组合输入期间全文排版与中文源码完整性，和第 10 轮新增的默认极简外观/工作台切换；`node test/visual-check.mjs` 生成八张真实桌面截图并逐张人工检查。每轮开发后都跑过一遍单测 + 构建 + 桌面回归。
+以下为 2026-11 审计修复后的实测结果（Windows 11 x64、Node.js 26.13.0、Electron 45.2.3）：
+
+- `npm test`：**140/140 通过**（16 个测试文件，约 3～5 秒）。
+- `npm run build`：通过，主包 `dist/assets/index-*.js` 952.98 kB（gzip 308.02 kB）；本轮审计前为 2,278.32 kB（gzip 759.72 kB）。
+- `node test/desktop.mjs`：**103 个 STEP 全部通过**（约 1 分 54 秒），含真实剪贴板断言与像素拖动，覆盖六个回归点与第 6～10 轮、第 1～6A 批新增用例。
+- `node test/perf.mjs`：通过（5k 平均 21.8 ms/键、30k 37.9 ms、100k 81.7 ms；目标 50 / 50 / 150 ms 只报告；超过目标 3 倍或图表被重建时退出码为 1）。
+- `node test/visual-check.mjs`：生成八张真实桌面截图，视觉结论仍需人工检查。
+- **macOS 本轮未复测**；真实系统中文 IME 实机、签名公证与 NSIS/DMG 发行包仍未验收。CI（`.github/workflows/ci.yml`）尚未在 GitHub 上实际运行过。
 
 ### 已知边界（十轮后仍未根治）
 
@@ -171,6 +203,6 @@ node test/desktop.mjs
 
 - **接手顺序 2 剩余**：排版态升级为可编辑渲染 DOM；两平台系统中文拼音的**真实 IME 实机**（尤其退格、候选窗口、快速连打）验收——CDP 模拟已覆盖组合开始/更新/候选确认与源码完整性；大文档滚动输入性能实测。
 - **接手顺序 3/4 剩余**：安装 Pandoc 后逐格式验证导入导出、PDF 书签与分页打印、HTML/PDF 视觉结果；跨进程多窗口并发写语义。
-- **接手顺序 5**：真实 Windows 实机跑桌面用例、冷启动文件关联、Ctrl 快捷键矩阵、原生菜单、中文 IME、中文与空格路径、保存冲突、NSIS 安装与卸载；macOS 的 Finder 关联、Cmd 矩阵、签名与公证。
+- **接手顺序 5**：Windows 11 实机自动化已通过（`npm test` / `npm run build` / `node test/desktop.mjs` / `node test/perf.mjs`）。仍未覆盖：冷启动文件关联双击（STEP 78 只覆盖命令行传参）、真实中文 IME、非 100% 系统缩放下的像素拖动、NSIS 安装与卸载。macOS 本轮未复测，Finder 关联、Cmd 矩阵、签名与公证待办。
 - **发布产物（用户要求暂缓）**：用户 2026-11-07 明确「先不打包了，我本地测完再打包」。`release/mac-arm64/Inkstone.app` 与 `release/win-unpacked/` 内的 `app.asar` 仍是十轮改动之前的构建；`electron-builder` 此前因附加资源网络超时未完成，本次也未重试。**最新版本请用 `npm start` 验收**，本地确认后再联网执行 `npm run package:mac` / `package:win`。仓库已完成本地首次提交，未推送 `origin`。
-- 基准文档中所有 ⧗ 项均非「已完成」，只是当前环境缺少 Windows 实机 / Pandoc / 系统 IME / 签名证书。
+- 基准文档中所有 ⧗ 项均非「已完成」，只是当前环境缺少 macOS 实机 / Pandoc / 真实系统中文 IME / 签名证书（Windows 实机项已在本轮补齐一部分）。

@@ -1,10 +1,11 @@
 // Development preview only. Native filesystem features are implemented in Electron.
 export function browserBridge() {
   const docs = new Map();
-  const create = content => {
-    const doc = { id: crypto.randomUUID(), content, name: '未命名.md', path: null, dirty: !!content };
+  const create = (content, name = '未命名.md', dirty = !!content) => {
+    const doc = { id: crypto.randomUUID(), content, name, path: null, dirty };
     docs.set(doc.id, doc); return { ...doc };
   };
+  const mac = navigator.platform.includes('Mac');
   const unavailable = () => { throw new Error('此功能需要桌面版。请运行 npm start。'); };
   const download = (content, name, type) => {
     const url = URL.createObjectURL(new Blob([content], { type }));
@@ -12,8 +13,8 @@ export function browserBridge() {
     setTimeout(() => URL.revokeObjectURL(url), 10000);
   };
   const actions = {
-    bootstrap: () => ({ documents: [], preferences: { theme: 'light', fontSize: 16, lineWidth: 860, autoSave: false, focus: false, typewriter: false, spellcheck: true, mathNumbering: false, headingNumbering: false, sidebarWidth: 240, zoomLevel: 0, windowBounds: null, windowMaximized: false, showFormatbar: true, uiMode: 'typora', sidebarVisible: false }, platform: navigator.platform.includes('Mac') ? 'darwin' : 'win32' }),
-    newDocument: create,
+    bootstrap: () => ({ documents: [], preferences: { theme: 'light', fontSize: 16, lineWidth: 860, autoSave: false, focus: false, typewriter: false, spellcheck: true, mathNumbering: false, headingNumbering: false, sidebarWidth: 240, zoomLevel: 0, windowBounds: null, windowMaximized: false, showFormatbar: true, uiMode: 'typora', sidebarVisible: false }, platform: mac ? 'darwin' : 'win32', titleBar: { overlay: false, height: 38, controlsWidth: 0, trashName: mac ? '废纸篓' : '回收站' } }),
+    newDocument: (content, name) => create(content, name || '未命名.md', name ? false : !!content),
     updateDocument(id, content) { const doc = docs.get(id); doc.content = content; doc.dirty = true; return { ...doc }; },
     async openDocument() {
       return new Promise(resolve => {
@@ -36,11 +37,16 @@ export function browserBridge() {
       if (format === 'pdf') { window.print(); return '打印对话框'; }
       const name = docs.get(id).name.replace(/\.[^.]+$/, '') + '.html'; download(html, name, 'text/html'); return name;
     },
-    openFolder: unavailable, refreshFolder: () => null, insertImage: unavailable, importDocument: unavailable,
+    openFolder: unavailable, openFolderPath: unavailable, refreshFolder: () => null,
+    searchFolder: async () => ({ query: '', files: [], total: 0, truncated: false, cancelled: false }),
+    cancelSearch: () => true, recentFiles: () => [], clearRecent: () => [], saveSession: () => true,
+    createEntry: unavailable, renameEntry: unavailable, trashEntry: unavailable, revealPath: unavailable,
+    fileMenu: () => null, resolveLink: unavailable, openLocalFile: unavailable, openPath: unavailable, insertImage: unavailable, importDocument: unavailable,
     revealDocument: unavailable, renameDocument: unavailable, trashDocument: unavailable, history: unavailable,
     drainPending: () => [], finishQuit: () => {},
     listThemes: () => [], readTheme: () => '', openThemesFolder: unavailable,
     listHistory: () => [], readHistory: unavailable, reloadDocument: unavailable,
+    acceptExternalChange: () => {}, detachDocument: id => ({ ...docs.get(id), path: null }), cancelQuit: () => {}, quitAck: () => {},
     zoom: () => {}, fullscreen: () => {}, reopenClosed: () => [],
     writeClipboard: ({ text, html }) => {
       if (html && navigator.clipboard?.write) return navigator.clipboard.write([new ClipboardItem({ 'text/plain': new Blob([text], { type: 'text/plain' }), 'text/html': new Blob([html], { type: 'text/html' }) })]);
@@ -48,12 +54,14 @@ export function browserBridge() {
     },
     readClipboardText: () => navigator.clipboard?.readText() ?? Promise.resolve(''),
     capabilities: () => ({ installed: false, version: null, platform: navigator.platform }),
-    copyImage: unavailable, copyImagePath: unavailable, newWindow: () => { window.open(location.href, '_blank'); return true; },
+    copyImage: unavailable, copyImagePath: unavailable, newWindow: () => { window.open(location.href, '_blank'); return true; }, appMenu: () => false,
   };
   const bridge = Object.fromEntries(Object.entries(actions).map(([key, fn]) => [key, async (...args) => {
     try { return { ok: true, value: await fn(...args) }; } catch (error) { return { ok: false, error: error.message }; }
   }]));
   bridge.onCommand = () => {};
+  bridge.onFullScreen = () => {};
   bridge.onExternalChange = () => {};
+  bridge.onFolderChanged = () => {};
   return bridge;
 }

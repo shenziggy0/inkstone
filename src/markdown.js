@@ -6,23 +6,117 @@ import mark from 'markdown-it-mark';
 import sub from 'markdown-it-sub';
 import sup from 'markdown-it-sup';
 import { full as emoji } from 'markdown-it-emoji';
-import hljs from 'highlight.js';
+import { highlightCode } from './highlight.js';
 import katex from 'katex';
 import DOMPurify from 'dompurify';
 import { readColumnWidths, injectColumnWidths } from './table.js';
 
 export const escapeHTML = value => String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+
+/**
+ * Every attribute the renderer delegates application behaviour through. A
+ * document may contain raw HTML, so without this list `data-command` inside a
+ * paragraph would run real commands (`toggle-ui`, `save-as`, `trash`). The
+ * rendered document keeps only `data-line`, which is used for source navigation
+ * by the outline and [TOC] and can never do more than move the caret.
+ */
+export const RESERVED_ATTRIBUTES = [
+  'data-command', 'data-menu-command', 'data-quick-command', 'data-quick-path',
+  'data-path', 'data-table-op', 'data-index', 'data-cell', 'data-align',
+  'data-copy-code', 'data-image-action', 'data-external-action', 'data-dismiss',
+  'data-history', 'data-history-dir', 'data-history-name', 'data-export',
+  'data-side', 'data-close', 'data-document', 'data-section', 'data-emoji',
+  // App chrome markers and attributes the renderer/editor writes itself: a
+  // document must not be able to hide itself from exports or redirect the
+  // image and table plumbing.
+  'data-md-skip', 'data-md-src', 'data-from', 'data-to', 'data-inkstone-index'
+];
+
+/**
+ * DOMPurify's default URI allow-list reads `C:/…` as an unknown scheme and
+ * rejects `file:` destinations, which would silently drop the src of a local
+ * image. This extends that list by exactly those two shapes; javascript:,
+ * vbscript: and the tag-scoped data: rules keep their default behaviour.
+ * A surviving `file:` link is inert: opening one goes through the main process
+ * `openExternal` allow-list (https / http / mailto only).
+ */
+export const ALLOWED_URI = /^(?:(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp|matrix|file):|[a-z]:[\\/]|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i;
+
+/**
+ * The one sanitizer configuration used for rendered documents. DOMPurify checks
+ * FORBID_ATTR before ALLOW_DATA_ATTR, so listing the delegated attributes there
+ * is enough; a second, hand-written pass over the HTML string would only add
+ * risk on edge inputs (unclosed quotes, `<` inside values, comments). Attribute
+ * names are lower-cased before the lookup, and the HTML/SVG/MathML profiles all
+ * go through the same check — the desktop test asserts this on the live DOM.
+ */
+export const SANITIZE_CONFIG = {
+  USE_PROFILES: { html: true, svg: true, mathMl: true },
+  ADD_ATTR: ['data-line'],
+  FORBID_TAGS: ['iframe', 'object', 'embed', 'style', 'form'],
+  FORBID_ATTR: ['srcdoc', ...RESERVED_ATTRIBUTES],
+  ALLOW_DATA_ATTR: true,
+  ALLOWED_URI_REGEXP: ALLOWED_URI
+};
+
+/**
+ * True when an image reference points at another machine: UNC / device paths
+ * (`\\host\share`, `//host/share`, `\\?\UNC\…`, `\\.\…`) or a `file://` URL whose
+ * host is neither empty nor localhost. The main process refuses these before it
+ * touches the filesystem; the renderer drops them too, so no asset URL is ever
+ * built for them.
+ */
+export function isNetworkReference(src) {
+  const text = decodeAssetReference(src);
+  if (/^[\\/]{2}/.test(text)) return true;
+  if (!/^file:/i.test(text)) return false;
+  try {
+    const host = new URL(text).hostname.toLowerCase();
+    return host !== '' && host !== 'localhost';
+  } catch { return true; }
+}
+
+/**
+ * The reference an author typed, recovered from markdown-it's percent-encoding.
+ * A malformed escape keeps the value as-is instead of dropping the image.
+ */
+export function decodeAssetReference(src) {
+  const text = String(src ?? '');
+  try { return decodeURI(text); } catch { return text; }
+}
+
+/**
+ * The `inkstone-asset:` URL of one image. The whole reference is encoded as a
+ * single opaque path segment because WHATWG URL parsing collapses `..`
+ * segments, which would silently drop the `../` in `../shared/a.png`. Keep the
+ * round trip in sync with electron/assets.cjs (asserted in test/assets.test.js).
+ */
+export function assetURL(documentId, src) {
+  return `inkstone-asset://${documentId}/${encodeURIComponent(decodeAssetReference(src))}`;
+}
 export const parser = new MarkdownIt({
   html: true, linkify: true, breaks: false,
   highlight(code, language) {
     if (language === 'mermaid') return `<pre class="mermaid">${escapeHTML(code)}</pre>`;
-    const content = language && hljs.getLanguage(language) ? hljs.highlight(code, { language, ignoreIllegals: true }).value : escapeHTML(code);
+    // A language that is not registered yet lands on the escaped fallback; the
+    // loader reports back through onLanguageLoaded() so only the blocks that
+    // use it are re-rendered. The output is byte-identical to the previous
+    // whole-package `hljs.highlight()` call for every registered language.
+    const highlighted = highlightCode(code, language);
+    const content = highlighted.html ?? escapeHTML(code);
     return `<pre class="code-block"><span class="code-language">${escapeHTML(language || 'text')}</span><code class="hljs">${content}</code></pre>`;
   }
 }).use(footnote).use(taskLists, { enabled: true })
   // Typora 1.11+ accepts both $…$ / $$…$$ and \(…\) / \[…\].
   .use(texmath, { engine: katex, delimiters: ['dollars', 'brackets'], katexOptions: { throwOnError: false, trust: false } })
   .use(mark).use(sub).use(sup).use(emoji);
+
+// Typora renders local images referenced as `file:///…` URLs. markdown-it drops
+// any `file:` destination before it becomes an image token, so allow that one
+// scheme here; opening such a link still goes through the `openExternal`
+// allow-list (https/http/mailto only), so this only affects image rendering.
+const defaultValidateLink = parser.validateLink.bind(parser);
+parser.validateLink = url => /^file:/i.test(url) || defaultValidateLink(url);
 
 // ── YAML Front Matter ──────────────────────────────────────────────────────
 // Registered before `hr` so a leading `---` block is metadata, not a rule.
@@ -86,8 +180,14 @@ parser.renderer.rules.heading_open = (tokens, index, options, env, self) => {
   return headingRule(tokens, index, options, env, self);
 };
 
-export function headings(source) {
-  const tokens = parser.parse(source, {}), result = [], slugs = {};
+/**
+ * Outline entries for an already parsed token stream. This reproduces the
+ * document-wide slug counter of the `heading_open` rule above, so the sidebar,
+ * the breadcrumb and [TOC] can share the parse that rendered the document
+ * instead of running the whole file through markdown-it a second time.
+ */
+export function headingsFromTokens(tokens) {
+  const result = [], slugs = {};
   for (let i = 0; i < tokens.length; i++) {
     if (tokens[i].type !== 'heading_open' || !tokens[i].map) continue;
     const title = tokens[i + 1]?.content || '';
@@ -99,7 +199,25 @@ export function headings(source) {
   return result;
 }
 
-const tocItems = source => headings(source).map(h => `<li style="margin-left:${(h.level - 1) * 12}px"><a href="#${escapeHTML(h.id)}" data-line="${h.line}">${escapeHTML(h.title)}</a></li>`).join('');
+/** The text markdown-it parses: no BOM, LF line breaks. */
+function normalized(source) {
+  const text = String(source ?? '').replace(/^\uFEFF/, '');
+  return text.includes('\r') ? text.replace(/\r\n?/g, '\n') : text;
+}
+
+// The document render already walked every token, so its outline is kept for
+// the callers that ask for it right afterwards (sidebar, breadcrumb, [TOC]).
+let outlineCache = { key: null, items: [] };
+
+export function headings(source) {
+  const key = normalized(source);
+  if (outlineCache.key !== key) outlineCache = { key, items: headingsFromTokens(parser.parse(key, {})) };
+  return outlineCache.items;
+}
+
+export const tocItemsFromHeadings = items => items.map(h => `<li style="margin-left:${(h.level - 1) * 12}px"><a href="#${escapeHTML(h.id)}" data-line="${h.line}">${escapeHTML(h.title)}</a></li>`).join('');
+
+const tocItems = source => tocItemsFromHeadings(headings(source));
 
 function footnoteTitles(source, env) {
   const definitions = new Map();
@@ -107,18 +225,31 @@ function footnoteTitles(source, env) {
   return (env.footnotes?.list || []).map(note => definitions.get(note.label) || '');
 }
 
-function finalizeHTML(html, documentId, toc, footnotes = []) {
+/**
+ * Serialise-ready HTML for the Markdown body. `options.chrome` is false for the
+ * export / clipboard payloads, which must not carry the copy buttons and other
+ * UI the application itself adds to the editor.
+ */
+function finalizeHTML(html, documentId, toc, footnotes = [], options = {}) {
+  const chrome = options.chrome !== false;
   const withToc = html.replace(/<p>\[toc\]<\/p>/gi, `<nav class="toc" aria-label="文内目录"><ul>${toc}</ul></nav>`);
-  const clean = DOMPurify.sanitize(withToc, { USE_PROFILES: { html: true, svg: true, mathMl: true }, ADD_ATTR: ['data-line'], FORBID_TAGS: ['iframe', 'object', 'embed', 'style', 'form'], FORBID_ATTR: ['srcdoc'], ALLOW_DATA_ATTR: true });
+  const clean = DOMPurify.sanitize(withToc, { ...SANITIZE_CONFIG });
   const template = document.createElement('template');
   template.innerHTML = clean;
   for (const img of template.content.querySelectorAll('img')) {
     const src = img.getAttribute('src') || '';
-    if (!/^(https:|data:|blob:)/i.test(src)) {
-      img.dataset.mdSrc = src;
-      if (documentId && !/^[a-z]+:/i.test(src) && !src.startsWith('//')) img.src = `inkstone-asset://${documentId}/${encodeURIComponent(src)}`;
-      else img.removeAttribute('src');
-    }
+    // Remote and embedded images already name their own bytes; http: is kept
+    // for Typora parity (the CSP allows it) and the export keeps the URL.
+    if (/^(https?:|data:|blob:)/i.test(src)) { img.loading = 'lazy'; continue; }
+    if (!src) { img.removeAttribute('src'); continue; }
+    // data-md-src keeps the Markdown spelling for the copy-image actions and
+    // the source map; the rendered src is the decoded reference re-encoded for
+    // the asset protocol, so `![](assets/图片.png)` reaches a real file again.
+    img.dataset.mdSrc = src;
+    // A reference to another machine would make the asset protocol contact it;
+    // no URL is generated for these (the main process rejects them as well).
+    if (documentId && !isNetworkReference(src)) img.src = assetURL(documentId, src);
+    else img.removeAttribute('src');
     img.loading = 'lazy';
   }
   for (const link of template.content.querySelectorAll('a')) link.rel = 'noopener noreferrer';
@@ -150,26 +281,164 @@ function finalizeHTML(html, documentId, toc, footnotes = []) {
     item.parentElement?.classList.add('contains-task-list');
     item.replaceChildren(input);
   }
-  // A copy affordance on every fenced code block. Inserted after sanitising,
-  // so no untrusted markup is reintroduced into the document.
-  for (const pre of template.content.querySelectorAll('pre.code-block')) {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'code-copy';
-    button.dataset.copyCode = '';
-    button.dataset.mdSkip = '';
-    button.setAttribute('aria-label', '复制代码');
-    button.textContent = '复制';
-    pre.prepend(button);
+  // Editor-only chrome: decorations the renderer adds on top of the document
+  // (front-matter card, alert labels, copy buttons) never belong in an export
+  // or in the clipboard payload.
+  if (!chrome) {
+    for (const node of template.content.querySelectorAll('[data-md-skip], .code-copy')) node.remove();
+  } else {
+    // A copy affordance on every fenced code block. Inserted after sanitising,
+    // and only after the document's own data-copy-code attributes were stripped
+    // above, so the button cannot be forged by the document.
+    for (const pre of template.content.querySelectorAll('pre.code-block')) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'code-copy';
+      button.dataset.copyCode = '';
+      button.dataset.mdSkip = '';
+      button.setAttribute('aria-label', '复制代码');
+      button.textContent = '复制';
+      pre.prepend(button);
+    }
   }
   return template.innerHTML;
 }
 
-export function renderMarkdown(source, documentId) {
+export function renderMarkdown(source, documentId, options = {}) {
   const text = source.replace(/^\uFEFF/, '');
   const env = {};
   const html = parser.render(text, env);
-  return injectColumnWidths(finalizeHTML(html, documentId, tocItems(text), footnoteTitles(text, env)), readColumnWidths(text));
+  return injectColumnWidths(finalizeHTML(html, documentId, tocItems(text), footnoteTitles(text, env), options), readColumnWidths(text));
+}
+
+/**
+ * Top-level blocks (one entry per `token.map` range) of one parse. Keeping the
+ * tokens of each block lets it be rendered on its own while still seeing the
+ * document-wide `env`.
+ */
+export function groupTokens(tokens) {
+  const groups = [];
+  let current = null;
+  for (const token of tokens) {
+    if (token.level === 0 && token.map && token.nesting !== -1) {
+      if (current) groups.push(current);
+      current = { start: token.map[0], end: token.map[1], tokens: [token] };
+    } else if (current) current.tokens.push(token);
+  }
+  if (current) groups.push(current);
+  return groups;
+}
+
+/**
+ * Everything that reaches a block's HTML from outside the block's own source:
+ * footnote numbering and bodies, reference-link definitions, stored column
+ * widths and the document id used for asset URLs. When this string is
+ * unchanged, a block that did not change renders to identical HTML.
+ *
+ * Heading ids are deliberately not in here: a heading id only depends on its
+ * own title plus how many earlier headings share its slug, and [TOC] is the
+ * only block that needs the whole list. Both are handled per block, so typing
+ * a new heading refreshes that heading and the table of contents instead of
+ * the entire document.
+ */
+export function globalSignature({ tokens = [], env = {}, documentId = '', widths = [] } = {}) {
+  const references = env.references || {};
+  const notes = env.footnotes?.list || [];
+  const bodies = [];
+  // Footnote definitions are pulled out of the block stream and glued on after
+  // the last block, so they belong to no block's own source.
+  let inFootnotes = false;
+  for (const token of tokens) {
+    if (token.type === 'footnote_block_open') inFootnotes = true;
+    if (inFootnotes) bodies.push(token.type, token.content || '');
+    if (token.type === 'footnote_block_close') inFootnotes = false;
+  }
+  return [
+    `doc\u0000${documentId}`,
+    `widths\u0000${widths.map(group => group.join(',')).join(';')}`,
+    `references\u0000${Object.keys(references).map(key => `${key}\u0002${references[key].href || ''}\u0002${references[key].title || ''}`).join('\u0001')}`,
+    `notes\u0000${notes.map(note => note.label ?? `inline:${note.content ?? ''}`).join('\u0001')}`,
+    `bodies\u0000${bodies.join('\u0001')}`
+  ].join('\u0003');
+}
+
+// Rendered block HTML is remembered per document-wide signature, so typing in
+// one paragraph only re-renders that paragraph. Each signature keeps the last
+// two document versions: the one being rendered and the one before it, which is
+// exactly enough to reuse every block an edit did not touch without holding on
+// to every intermediate version of every block.
+const SIGNATURE_LIMIT = 8;
+const htmlCache = new Map();
+
+function cacheFor(signature) {
+  let record = htmlCache.get(signature);
+  if (record) {
+    // Refresh the recency order so the document being edited is evicted last.
+    htmlCache.delete(signature);
+    htmlCache.set(signature, record);
+  } else {
+    record = { previous: new Map(), current: new Map() };
+    htmlCache.set(signature, record);
+    while (htmlCache.size > SIGNATURE_LIMIT) htmlCache.delete(htmlCache.keys().next().value);
+  }
+  record.previous = record.current;
+  record.current = new Map();
+  return record;
+}
+
+/** Drop every cached render. The render-cache tests use it to start clean. */
+export function resetRenderCache() {
+  htmlCache.clear();
+  outlineCache = { key: null, items: [] };
+}
+
+/**
+ * Forget the cached HTML of every block that fences one of `languages`.
+ * A lazily loaded grammar changes only those blocks, so an on-demand language
+ * load re-renders just its own code fences instead of the whole document.
+ */
+export function invalidateFenceLanguages(languages) {
+  const names = new Set([...languages].map(name => String(name).toLowerCase()));
+  if (!names.size) return 0;
+  const uses = key => {
+    for (const match of String(key).matchAll(/^[ \t]*(?:`{3,}|~{3,})[ \t]*([^\s`~]+)/gm)) if (names.has(match[1].toLowerCase())) return true;
+    return false;
+  };
+  let dropped = 0;
+  for (const record of htmlCache.values()) {
+    for (const map of [record.current, record.previous]) {
+      for (const key of [...map.keys()]) if (uses(key)) { map.delete(key); dropped++; }
+    }
+  }
+  return dropped;
+}
+
+/**
+ * Render each block once per (signature, block source, block context) triple.
+ * `render` is only called for a block whose HTML is not cached yet; the stats
+ * expose which path was taken so it can be asserted without a DOM.
+ */
+export function renderGroups(groups, signature, render) {
+  const cache = cacheFor(signature);
+  const seen = new Map();
+  let rendered = 0, reused = 0;
+  const entries = groups.map(group => {
+    const source = group.source ?? '';
+    // Two blocks can share the exact same source yet render differently: a
+    // duplicate heading gets a numbered anchor and a repeated footnote
+    // reference gets the next id. Both are covered by the occurrence index and
+    // the block context; blocks that need neither are keyed by their source
+    // alone, so the common case allocates nothing.
+    const occurrence = seen.get(source) || 0;
+    seen.set(source, occurrence + 1);
+    const key = occurrence || group.context ? `${occurrence}\u0000${group.context || ''}\u0000${source}` : source;
+    let entry = cache.previous.get(key);
+    if (entry) reused++;
+    else { entry = render(group); rendered++; }
+    cache.current.set(key, entry);
+    return entry;
+  });
+  return { entries, stats: { rendered, reused } };
 }
 
 /**
@@ -180,36 +449,91 @@ export function renderMarkdown(source, documentId) {
  * Returns [{ start (0-based line), end, html }] keyed to editor block maps.
  */
 export function renderDocument(source, documentId) {
-  const text = source.replace(/^\uFEFF/, '');
-  const env = {};
-  const tokens = parser.parse(text, env);
-  const groups = [];
-  let current = null;
-  for (const token of tokens) {
-    if (token.level === 0 && token.map && token.nesting !== -1) {
-      if (current) groups.push(current);
-      current = { start: token.map[0], end: token.map[1], tokens: [token] };
-    } else if (current) current.tokens.push(token);
-  }
-  if (current) groups.push(current);
-  const toc = tocItems(text);
-  const footnotes = footnoteTitles(text, env);
-  const widths = readColumnWidths(text);
+  const plan = prepareDocument(source, documentId);
+  // One parse feeds the block HTML, the outline and [TOC].
+  outlineCache = { key: plan.text, items: plan.items };
+  const { entries, stats } = renderGroups(plan.groups, plan.signature, group => {
+    const html = finalizeHTML(parser.renderer.render(group.tokens, parser.options, plan.env), documentId, plan.toc, plan.footnotes);
+    return { html, tables: (html.match(/<table\b/g) || []).length };
+  });
   let tableOffset = 0;
-  const blocks = groups.map(group => {
-    const html = finalizeHTML(parser.renderer.render(group.tokens, parser.options, env), documentId, toc, footnotes);
-    const withWidths = injectColumnWidths(html, widths, tableOffset);
-    tableOffset += (html.match(/<table\b/g) || []).length;
-    return { start: group.start, end: group.end, html: withWidths };
+  const blocks = plan.groups.map((group, index) => {
+    const entry = entries[index];
+    const html = injectColumnWidths(entry.html, plan.widths, tableOffset);
+    tableOffset += entry.tables;
+    return { start: group.start, end: group.end, html };
   });
   // Returning the tokens lets the editor reuse this single parse for its
   // decoration ranges instead of parsing the whole file on every caret move.
-  return { tokens, blocks };
+  return { tokens: plan.tokens, blocks, stats };
+}
+
+/**
+ * Parse and plan one document version: the token stream, the block groups with
+ * their own source and heading context, the outline, and the document-wide
+ * signature that decides whether a block may be reused. No DOM is touched, so
+ * the caching behaviour can be asserted directly in unit tests.
+ */
+export function prepareDocument(source, documentId) {
+  const text = normalized(source);
+  const env = {};
+  const tokens = parser.parse(text, env);
+  const items = headingsFromTokens(tokens);
+  const widths = readColumnWidths(text);
+  const groups = groupTokens(tokens);
+  const lines = text.split('\n');
+  // Per-block inputs that come from the heading sequence: a heading's anchor
+  // depends on how many earlier headings share its slug, and a [TOC] block
+  // lists all of them. Nothing else in a block's HTML depends on the outline.
+  // Tokens are walked in the same order the renderer assigns ids, including
+  // headings that live inside a footnote body.
+  const slugs = {};
+  let tocContext = null;
+  for (const group of groups) {
+    group.source = lines.slice(group.start, group.end).join('\n');
+    const anchors = [];
+    for (let index = 0; index < group.tokens.length; index++) {
+      const token = group.tokens[index];
+      if (token.type !== 'heading_open') continue;
+      const slug = slugify(group.tokens[index + 1]?.content || '');
+      const count = slugs[slug] || 0;
+      slugs[slug] = count + 1;
+      anchors.push(`${slug}:${count}`);
+    }
+    if (anchors.length) group.context = `a\u0000${anchors.join('\u0001')}`;
+    else if (/\[toc\]/i.test(group.source)) {
+      tocContext ??= items.map(item => `${item.id}\u0002${item.title}\u0002${item.line}`).join('\u0001');
+      group.context = `toc\u0000${tocContext}`;
+    } else group.context = '';
+  }
+  return {
+    text, env, tokens, items, groups, widths,
+    toc: tocItemsFromHeadings(items),
+    footnotes: footnoteTitles(text, env),
+    signature: globalSignature({ tokens, env, documentId, widths })
+  };
 }
 
 /** Backwards-compatible helper for callers that only need the HTML blocks. */
 export function renderBlocks(source, documentId) {
   return renderDocument(source, documentId).blocks;
+}
+
+/**
+ * Render one display formula with the same engine and options the document
+ * uses, for the live preview under a `$$…$$` block being edited. A syntax error
+ * comes back as a short Chinese message instead of throwing, so the preview can
+ * say what is wrong instead of staying blank.
+ */
+export function renderMath(source) {
+  const text = String(source ?? '').trim();
+  if (!text) return { html: '', error: '公式为空。' };
+  try {
+    return { html: katex.renderToString(text, { displayMode: true, throwOnError: true, trust: false, strict: false }), error: null };
+  } catch (error) {
+    const message = String(error?.message || error).replace(/^KaTeX parse error:\s*/i, '');
+    return { html: '', error: `公式语法错误：${message}` };
+  }
 }
 
 let mermaidModule;

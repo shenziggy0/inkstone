@@ -1,0 +1,78 @@
+name: CI
+
+# 每次 push 与 pull_request 都在 Windows 和 macOS 上跑单元测试与前端构建。
+# 桌面端到端用例 test/desktop.mjs 需要真实显示环境、真实剪贴板和对时序敏感的
+# 像素拖动，因此不放进必过流程：它只在手动触发（workflow_dispatch）时运行，
+# 并且 continue-on-error，失败不会阻塞任何合并。
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: unit tests + build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          # 仓库既没有 package.json 的 engines 字段，也没有 .nvmrc，
+          # 所以这里显式锁定与本地验证环境一致的版本线：Windows 11 上的
+          # Node v26.13.0（26 线自 2026-10 起进入 LTS）。setup-node 会从
+          # nodejs.org 下载该版本，不依赖 runner 镜像预装的内容。
+          # Electron 45 自带的应用运行时是另一回事，构建与测试工具链只需要
+          # Node >= 20，26.x 完全在其支持范围内。
+          node-version: '26.x'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+  # 手动触发的桌面用例。不设置 required check，也不在 push / PR 上运行：
+  # GitHub 托管的 Windows runner 能启动 Electron，但窗口合成与输入时序和真实
+  # 桌面并不完全一致，把它设为必过会让红叉与真实缺陷混在一起。
+  desktop-windows:
+    name: desktop e2e (manual, Windows, non-blocking)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    continue-on-error: true
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '26.x'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Desktop end-to-end (103 steps)
+        run: node test/desktop.mjs

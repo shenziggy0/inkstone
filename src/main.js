@@ -6,6 +6,8 @@ import { parseTables, serializeTable, setCell, insertRow, removeRow, insertColum
 import { diffHTML } from './diff.js';
 import { parseSections, moveSection } from './outline.js';
 import { welcome } from './welcome.js';
+import { ensureLanguages } from './highlight.js';
+import { splitLinkTarget, headingForAnchor, safeDecode } from './links.js';
 import { browserBridge } from './browser.js';
 import { EMOJI } from './emoji.js';
 
@@ -13,9 +15,23 @@ const native = !!window.desktop;
 const bridge = window.desktop || browserBridge();
 const documents = new Map();
 let activeId, folder, prefs, sideMode = 'outline', sourceMode = false, busy = false;
-let customThemes = [], selectedHistory = null, externalId = null, lastThemeKey = null, lastUiMode = null;
+let customThemes = [], selectedHistory = null, lastThemeKey = null, lastUiMode = null;
 let capabilities = { installed: false, version: null, platform: '' }, imageContext = null;
 let pendingTable = null, quickFiles = [];
+// Folder-wide search state. The query survives a sidebar redraw so results can
+// be updated without the input losing focus mid-typing.
+let searchState = { query: '', caseSensitive: false, regex: false, results: null, busy: false, seq: 0, error: '' };
+let searchTimer = 0;
+// Recent documents (menu + palette) and the debounced session snapshot.
+let recentFiles = [], sessionTimer = 0, lastSessionKey = '';
+// The welcome page is an unmodified document: it never prompts to save, and the
+// first file opened in its place replaces it instead of adding a second tab.
+let welcomeId = null;
+// Filled from bootstrap: which title bar the main process draws, and the
+// platform-specific name of the deleted-files location.
+let titleBarInfo = { overlay: false, height: 38, controlsWidth: 0, trashName: '废纸篓' };
+let appPlatform = '';
+const trashName = () => titleBarInfo.trashName || '废纸篓';
 const $ = selector => document.querySelector(selector);
 const icons = {
   panel: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/>',
@@ -31,13 +47,17 @@ const icons = {
   focus: '<path d="M3 8V3h5m8 0h5v5m0 8v5h-5m-8 0H3v-5"/><circle cx="12" cy="12" r="3"/>',
   close: '<path d="m6 6 12 12M6 18 18 6"/>',
   more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
-  image: '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8" cy="8" r="1.5"/><path d="m21 15-5-5L5 21"/>'
+  image: '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8" cy="8" r="1.5"/><path d="m21 15-5-5L5 21"/>',
+  filePlus: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M9 15h6m-3-3v6"/>',
+  folderPlus: '<path d="M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 11v6m-3-3h6"/>',
+  refresh: '<path d="M21 12a9 9 0 1 1-3-6.7M21 4v5h-5"/>'
 };
 const icon = name => `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name] || icons.file}</svg>`;
 const button = (command, label, glyph) => `<button class="icon-button" data-command="${command}" aria-label="${label}" title="${label}">${icon(glyph)}</button>`;
 
 $('#app').innerHTML = `
   <header class="topbar">
+    <button class="app-menu-button" data-command="app-menu" aria-label="菜单" title="菜单">菜单</button>
     <div class="brand"><span class="brand-mark">墨</span><span>墨页 <small>INKSTONE</small></span></div>
     <div class="top-actions">${button('sidebar', '切换侧边栏', 'panel')}${button('new', '新建文档', 'plus')}${button('open', '打开文档', 'folder')}</div>
     <div class="document-location" id="location">未命名.md</div>
@@ -45,9 +65,13 @@ $('#app').innerHTML = `
   </header>
   <div class="workspace">
     <aside class="sidebar" aria-label="文件与大纲">
-      <div class="sidebar-tabs" role="tablist"><button role="tab" data-side="outline" aria-selected="true">大纲</button><button role="tab" data-side="files" aria-selected="false">文件</button><button role="tab" data-side="articles" aria-selected="false">文章</button></div>
+      <div class="sidebar-tabs" role="tablist"><button role="tab" data-side="outline" aria-selected="true">大纲</button><button role="tab" data-side="files" aria-selected="false">文件</button><button role="tab" data-side="articles" aria-selected="false">文章</button><button role="tab" data-side="search" aria-selected="false">搜索</button></div>
       <div class="sidebar-context"><span id="side-title">文档结构</span>${button('folder', '打开文件夹', 'folder')}</div>
       <label class="filter-label" hidden><span class="sr-only">筛选文件</span><input id="file-filter" placeholder="筛选文件…" type="search"></label>
+      <section class="open-documents" aria-label="已打开文档">
+        <div class="open-documents-heading">已打开文档</div>
+        <div id="open-documents" role="list" aria-label="已打开文档列表"></div>
+      </section>
       <nav id="side-content" aria-label="文档大纲"></nav>
       <div class="sidebar-footer"><button data-command="help">使用说明 <span>↗</span></button><span>${native ? '本地工作空间' : '浏览器开发预览'}</span></div>
     </aside>
@@ -90,6 +114,7 @@ function updateChrome() {
   $('#location').title = doc.path || doc.name;
   $('#save-status').textContent = doc.error ? doc.error : doc.dirty ? '有未保存的更改' : doc.path ? '已保存' : '未保存到文件';
   $('#save-status').classList.toggle('status-error', !!doc.error);
+  drawOpenDocuments();
   $('#document-tabs').innerHTML = [...documents.values()].map(d => `<div class="document-tab ${d.id === activeId ? 'active' : ''}"><button role="tab" aria-selected="${d.id === activeId}" data-document="${d.id}" title="${escapeHTML(d.path || d.name)}">${icon('file')}<span>${escapeHTML(d.name)}</span>${d.dirty ? '<span class="dirty-mark" aria-label="未保存">●</span>' : ''}</button><button class="close-tab" data-close="${d.id}" aria-label="关闭 ${escapeHTML(d.name)}">${icon('close')}</button></div>`).join('');
 }
 function updateStats() {
@@ -98,6 +123,19 @@ function updateStats() {
   $('#statistics').textContent = `${stats.words} 字词 · ${stats.characters} 字符`;
   $('#statistics').title = `${stats.lines} 行 · 不含空格 ${stats.nonWhitespace} 字符 · 约 ${stats.minutes} 分钟阅读`;
   $('#encoding').textContent = `UTF-8${doc.content.startsWith('\uFEFF') ? ' BOM' : ''} · ${doc.content.includes('\r\n') ? 'CRLF' : 'LF'}`;
+}
+/**
+ * The tab strip is hidden in the default appearance, so the sidebar lists every
+ * open document: name, unsaved marker, current item, and a close button that
+ * runs the same save prompt as the tabs.
+ */
+function drawOpenDocuments() {
+  const container = $('#open-documents');
+  if (!container) return;
+  container.innerHTML = [...documents.values()].map(d => `<div class="open-document" role="listitem">
+      <button class="open-document-name" data-document="${d.id}" aria-current="${d.id === activeId}" aria-label="切换到 ${escapeHTML(d.name)}" title="${escapeHTML(d.path || d.name)}">${icon('file')}<span>${escapeHTML(d.name)}</span>${d.dirty ? '<span class="dirty-mark" aria-label="未保存">●</span>' : ''}</button>
+      <button class="open-document-close" data-close="${d.id}" aria-label="关闭 ${escapeHTML(d.name)}">${icon('close')}</button>
+    </div>`).join('');
 }
 function drawSidebar() {
   const container = $('#side-content');
@@ -114,6 +152,24 @@ function drawSidebar() {
     container.innerHTML = matches.length
       ? matches.map(a => `<button class="article-item ${a.recent ? 'unsaved' : ''} ${a.path && a.path === current()?.path ? 'current' : ''}" ${a.path ? `data-path="${escapeHTML(a.path)}"` : 'disabled'}><strong>${escapeHTML(a.name.replace(/\.(md|markdown|mdown|txt)$/i, ''))}</strong><span>${a.recent ? '未保存的文档' : escapeHTML(a.path.replace(/[\\/][^\\/]*$/, ''))}</span></button>`).join('')
       : '<div class="empty-state"><p>还没有文章</p><small>打开一个文件夹，即可在这里浏览全部 Markdown 文档。</small><button class="primary" data-command="folder">打开文件夹</button></div>';
+  } else if (sideMode === 'search') {
+    container.setAttribute('aria-label', '文件夹搜索');
+    // The panel is only built once, so typing in the search box is not
+    // interrupted by the sidebar being redrawn after every result update.
+    if (!container.querySelector('#folder-search-input')) {
+      container.innerHTML = `<div class="folder-search">
+        <label class="filter-label"><span class="sr-only">在文件夹中搜索</span><input id="folder-search-input" type="search" placeholder="在文件夹中搜索…" autocomplete="off"></label>
+        <div class="folder-search-options">
+          <label class="checkbox-label"><input type="checkbox" data-search-option="caseSensitive"><span>区分大小写</span></label>
+          <label class="checkbox-label"><input type="checkbox" data-search-option="regex"><span>正则</span></label>
+        </div>
+        <p class="folder-search-summary" id="folder-search-summary"></p>
+      </div><div class="folder-search-results" id="folder-search-results" role="list"></div>`;
+      container.querySelector('#folder-search-input').value = searchState.query;
+      for (const box of container.querySelectorAll('[data-search-option]')) box.checked = !!searchState[box.dataset.searchOption];
+      container.querySelector('#folder-search-input').focus();
+    }
+    drawSearchResults();
   } else if (sideMode === 'outline') {
     const content = current()?.content || '';
     const outline = headings(content);
@@ -124,21 +180,294 @@ function drawSidebar() {
     const query = $('#file-filter').value.toLowerCase();
     const renderEntries = (entries, depth = 0) => entries.map(entry => {
       if (entry.children) {
-        const children = renderEntries(entry.children, depth + 1);
-        return children ? `<details open><summary style="padding-left:${12 + depth * 12}px">${icon('folder')}${escapeHTML(entry.name)}</summary>${children}</details>` : '';
+        const children = renderEntries(entry.children || [], depth + 1);
+        return `<details open><summary data-tree-path="${escapeHTML(entry.path)}" data-tree-kind="folder" style="padding-left:${12 + depth * 12}px">${icon('folder')}${escapeHTML(entry.name)}</summary>${children}</details>`;
       }
       if (query && !entry.name.toLowerCase().includes(query)) return '';
-      return `<button class="file-item" style="padding-left:${12 + depth * 12}px" data-path="${escapeHTML(entry.path)}">${icon('file')}<span>${escapeHTML(entry.name)}</span></button>`;
+      return `<button class="file-item" style="padding-left:${12 + depth * 12}px" data-path="${escapeHTML(entry.path)}" data-tree-path="${escapeHTML(entry.path)}" data-tree-kind="file">${icon('file')}<span>${escapeHTML(entry.name)}</span></button>`;
     }).join('');
     container.setAttribute('aria-label', '文件列表');
-    container.innerHTML = folder ? renderEntries(folder.entries) || '<div class="empty-state">没有匹配的 Markdown 文件</div>' : '<div class="empty-state"><p>让文件留在自己的位置</p><small>打开一个文件夹，浏览其中的 Markdown 文档。</small><button class="primary" data-command="folder">打开文件夹</button></div>';
+    // The tree owns the create / rename / trash actions: a small toolbar for the
+    // common ones, and a native context menu on every entry.
+    const toolbar = folder ? `<div class="file-tree-toolbar">
+      <button data-file-op="new-file" title="新建文件" aria-label="新建文件">${icon('filePlus')}</button>
+      <button data-file-op="new-folder" title="新建文件夹" aria-label="新建文件夹">${icon('folderPlus')}</button>
+      <button data-file-op="refresh" title="刷新文件树" aria-label="刷新文件树">${icon('refresh')}</button>
+    </div>` : '';
+    container.innerHTML = toolbar + (folder ? renderEntries(folder.entries) || '<div class="empty-state">没有匹配的 Markdown 文件</div>' : '<div class="empty-state"><p>让文件留在自己的位置</p><small>打开一个文件夹，浏览其中的 Markdown 文档。</small><button class="primary" data-command="folder">打开文件夹</button></div>');
   }
 }
-let outlineCache = { key: '', items: [] };
-function outlineFor(content) {
-  if (outlineCache.key !== content) outlineCache = { key: content, items: headings(content) };
-  return outlineCache.items;
+// ── Folder-wide search ─────────────────────────────────────────────────────
+// The main process walks the folder and returns grouped matches; the renderer
+// only draws them. Unsaved documents are searched as the editor shows them.
+function scheduleSearch(delay = 220) {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => { runFolderSearch().catch(error => notify(error.message, true)); }, delay);
 }
+
+async function runFolderSearch() {
+  const query = searchState.query;
+  const seq = ++searchState.seq;
+  if (!folder || !query.trim()) {
+    searchState.results = null; searchState.busy = false; searchState.error = '';
+    drawSearchResults();
+    return;
+  }
+  searchState.busy = true;
+  drawSearchResults();
+  const overrides = {};
+  for (const doc of documents.values()) if (doc.path && doc.dirty) overrides[doc.path] = doc.editor.text();
+  try {
+    const results = await api('searchFolder', query, {
+      caseSensitive: searchState.caseSensitive, regex: searchState.regex, overrides
+    });
+    // A newer query owns the panel; a stale answer is dropped, never merged.
+    if (seq !== searchState.seq) return;
+    searchState.results = results; searchState.error = ''; searchState.busy = false;
+  } catch (error) {
+    if (seq !== searchState.seq) return;
+    searchState.results = null; searchState.error = error.message; searchState.busy = false;
+  }
+  drawSearchResults();
+}
+
+/** One context snippet with the matched ranges marked and everything escaped. */
+function snippetHTML(match) {
+  const text = String(match.text || '');
+  let html = '', cursor = 0;
+  for (const [from, to] of match.ranges || []) {
+    if (from < cursor) continue;
+    html += escapeHTML(text.slice(cursor, from)) + `<mark>${escapeHTML(text.slice(from, to))}</mark>`;
+    cursor = to;
+  }
+  return html + escapeHTML(text.slice(cursor));
+}
+
+function drawSearchResults() {
+  const list = $('#folder-search-results');
+  const summary = $('#folder-search-summary');
+  if (!list || !summary) return;
+  if (!folder) {
+    summary.textContent = '';
+    list.innerHTML = '<div class="empty-state"><p>先打开一个文件夹</p><small>搜索会在当前文件夹的 Markdown 文档中进行。</small><button class="primary" data-command="folder">打开文件夹</button></div>';
+    return;
+  }
+  const { results, busy, error, query } = searchState;
+  summary.textContent = busy ? '正在搜索…'
+    : error ? error
+    : !query.trim() ? '输入关键词开始搜索。'
+    : !results ? ''
+    : results.total ? `在 ${results.files.length} 个文件中找到 ${results.total} 处${results.truncated ? '（结果已截断）' : ''}`
+    : '没有找到匹配的内容。';
+  if (!results || !results.files.length) { list.innerHTML = ''; return; }
+  list.innerHTML = results.files.map(file => `<div class="search-file" role="listitem">
+    <div class="search-file-heading"><strong>${escapeHTML(file.name)}</strong><span>${escapeHTML(file.relative)}</span></div>
+    ${file.matches.map(match => `<button class="search-hit" data-search-hit data-search-path="${escapeHTML(file.path)}" data-search-line="${match.line}" data-search-column="${match.column}" data-search-length="${(match.ranges[0]?.[1] ?? 1) - (match.ranges[0]?.[0] ?? 0)}">
+      <span class="search-line">${match.line}</span><span class="search-text">${snippetHTML(match)}</span>
+    </button>`).join('')}
+  </div>`).join('');
+}
+
+/** Open a search hit and put the caret on the match. */
+async function openSearchHit(element) {
+  const path = element.dataset.searchPath;
+  const line = Number(element.dataset.searchLine) || 1;
+  const column = Number(element.dataset.searchColumn) || 1;
+  const length = Number(element.dataset.searchLength) || 0;
+  let doc = [...documents.values()].find(candidate => candidate.path === path);
+  if (!doc) {
+    try { await openDocuments(await api('openPath', path)); }
+    catch (error) { notify(error.message, true); return; }
+    doc = [...documents.values()].find(candidate => candidate.path === path);
+  }
+  if (!doc) return;
+  activate(doc.id);
+  // Jumping makes the block holding the match the active one, so the hit is
+  // visible even in the typeset view.
+  requestAnimationFrame(() => { if (doc.editor.view.dom.isConnected) doc.editor.jumpTo(line, column, length); });
+}
+
+// ── File-tree operations ───────────────────────────────────────────────────
+const parentFolderOf = file => String(file || '').replace(/[\\/][^\\/]*$/, '') || folder?.path || '';
+
+/** A small modal prompt for the file-tree create / rename actions. */
+function askEntryName(title, initial, hint) {
+  return new Promise(resolve => {
+    showDialog(title, `<label class="quick-filter"><span class="sr-only">名称</span><input id="entry-name" type="text" value="${escapeHTML(initial || '')}" autocomplete="off"></label><p class="dialog-description">${escapeHTML(hint || '文件名会自动补上 .md 扩展名。')}</p><div class="dialog-actions"><button data-dismiss>取消</button><button class="primary" id="entry-name-confirm">确定</button></div>`);
+    const input = $('#entry-name');
+    input.focus();
+    input.select();
+    let settled = false;
+    const finish = value => { if (settled) return; settled = true; if ($('#dialog').open) $('#dialog').close(); resolve(value); };
+    const confirm = () => {
+      const value = input.value.trim();
+      if (!value) { input.focus(); return; }
+      finish(value);
+    };
+    $('#entry-name-confirm').addEventListener('click', confirm);
+    input.addEventListener('keydown', event => {
+      if (event.isComposing || event.keyCode === 229) return;
+      if (event.key === 'Enter') { event.preventDefault(); confirm(); }
+      else if (event.key === 'Escape') { event.preventDefault(); finish(null); }
+    });
+    $('#dialog').addEventListener('close', () => finish(null), { once: true });
+  });
+}
+
+/**
+ * Apply the document identities the main process changed while it touched the
+ * filesystem (a folder rename moved the files, a folder trash removed them).
+ * Only the path and the name come from the main process — the text stays what
+ * the editor shows, so a dirty document keeps its unsaved state.
+ */
+function applyPathUpdates(records) {
+  if (!Array.isArray(records) || !records.length) return false;
+  for (const record of records) {
+    const doc = documents.get(record?.id);
+    if (!doc) continue;
+    doc.path = record.path;
+    doc.name = record.name || doc.name;
+    // A file that went to the trash leaves the document unsaved, so its
+    // baseline becomes empty and the next save asks for a location.
+    if (!record.path) doc.savedContent = '';
+    doc.dirty = doc.content !== doc.savedContent;
+  }
+  updateChrome();
+  saveSession();
+  return true;
+}
+
+/**
+ * Run one file-tree action. Creation and renaming ask for a name here; the main
+ * process validates it and performs the filesystem work inside the folder.
+ */
+async function runFileOperation(action, target, isDirectory) {
+  if (!folder) { notify('请先打开文件夹。', true); return; }
+  try {
+    if (action === 'refresh') {
+      folder = (await api('refreshFolder')) || folder;
+      drawSidebar();
+      return;
+    }
+    if (action === 'reveal') { await api('revealPath', target || folder.path); return; }
+    if (action === 'copy-path') { await api('writeClipboard', { text: target || folder.path }); notify('路径已复制到剪贴板'); return; }
+    if (action === 'new-file' || action === 'new-folder') {
+      const parent = target ? (isDirectory ? target : parentFolderOf(target)) : folder.path;
+      const name = await askEntryName(action === 'new-file' ? '新建文件' : '新建文件夹', '', action === 'new-folder' ? '新文件夹会创建在所选位置。' : '文件名会自动补上 .md 扩展名。');
+      if (!name) return;
+      const result = await api('createEntry', parent, name, action === 'new-file' ? 'file' : 'folder');
+      folder = { ...folder, entries: result.entries };
+      drawSidebar();
+      if (action === 'new-file') {
+        await openDocuments(await api('openPath', result.path));
+        notify(`已新建“${result.name}”。`);
+      } else notify(`已新建文件夹“${result.name}”。`);
+      return;
+    }
+    if (action === 'rename') {
+      const before = String(target || '').replace(/^.*[\\/]/, '');
+      const name = await askEntryName('重命名', before, '重命名 *.md 时可以省略扩展名，会自动补上。');
+      if (!name || name === before) return;
+      const result = await api('renameEntry', target, name);
+      if (result.entries) folder = { ...folder, entries: result.entries };
+      // Renaming a folder moves every document opened from inside it.
+      applyPathUpdates(result.documents);
+      if (result.kind === 'document' && result.document) {
+        const doc = documents.get(result.document.id);
+        if (doc) {
+          // The same bookkeeping Save As uses: tab name, path and saved baseline
+          // follow the file, and rewritten asset references reach the live text.
+          applyAssetRewrites(doc, result.document.rewritten);
+          doc.path = result.document.path; doc.name = result.document.name;
+          doc.savedContent = result.document.content; doc.dirty = doc.content !== result.document.content;
+          updateChrome();
+        }
+      }
+      drawSidebar();
+      notify('已重命名。');
+      return;
+    }
+    if (action === 'trash') {
+      const result = await api('trashEntry', target);
+      if (!result) return;
+      if (result.entries) folder = { ...folder, entries: result.entries };
+      // Trashing a folder makes every document opened from inside it unsaved.
+      applyPathUpdates(result.documents);
+      if (result.kind === 'document' && result.document) {
+        const doc = documents.get(result.document.id);
+        if (doc) { Object.assign(doc, { path: null, savedContent: '' }); updateChrome(); }
+      }
+      drawSidebar();
+      notify(`已移到${trashName()}。`);
+    }
+  } catch (error) { notify(error.message, true); }
+}
+
+// ── Local link navigation ──────────────────────────────────────────────────
+/** Jump to a heading (or any rendered element) with the given anchor id. */
+function jumpToAnchor(doc, anchor) {
+  if (!doc) return false;
+  const wanted = safeDecode(anchor);
+  const heading = headingForAnchor(headings(doc.content), wanted);
+  if (heading) { doc.editor.jump(heading.line); return true; }
+  // Footnote references and their back-links are elements, not headings.
+  const element = document.getElementById(wanted) || document.querySelector(`[name="${CSS.escape(wanted)}"]`);
+  if (element) { element.scrollIntoView({ block: 'center' }); return true; }
+  return false;
+}
+
+/**
+ * Follow one link from rendered content or from the active block.
+ * Local Markdown files open in the app (with their anchor), other local files
+ * go to the system after a confirmation, and web links leave through the
+ * main-process allow-list.
+ */
+async function navigateLink(href) {
+  const target = splitLinkTarget(href);
+  if (target.kind === 'empty') return;
+  if (target.kind === 'anchor') {
+    if (!jumpToAnchor(current(), target.anchor)) notify(`找不到锚点“${target.anchor}”。`, true);
+    return;
+  }
+  if (target.kind === 'external') {
+    try { await api('openExternal', target.href); } catch (error) { notify(error.message, true); }
+    return;
+  }
+  let resolved;
+  try { resolved = await api('resolveLink', current().id, target.path); }
+  catch (error) { notify(error.message, true); return; }
+  if (!resolved.markdown) {
+    try { await api('openLocalFile', resolved.path); } catch (error) { notify(error.message, true); }
+    return;
+  }
+  let doc = [...documents.values()].find(candidate => candidate.path === resolved.path);
+  if (doc) activate(doc.id);
+  else {
+    try { await openDocuments(await api('openPath', resolved.path)); }
+    catch (error) { notify(error.message, true); return; }
+    doc = [...documents.values()].find(candidate => candidate.path === resolved.path);
+  }
+  if (doc && target.anchor) {
+    requestAnimationFrame(() => { if (doc.editor.view.dom.isConnected && !jumpToAnchor(doc, target.anchor)) notify(`找不到锚点“${target.anchor}”。`, true); });
+  }
+}
+
+/** Persist the restorable session (folder, saved documents, current document). */
+function saveSession() {
+  const files = [...documents.values()].filter(doc => doc.path).map(doc => doc.path);
+  const key = JSON.stringify([folder?.path || null, files, current()?.path || null]);
+  if (key === lastSessionKey) return;
+  lastSessionKey = key;
+  // Sent right away: the key only changes when the document list does, and the
+  // main process coalesces the writes. A debounce here could lose the session
+  // when the window closes immediately after closing a document.
+  clearTimeout(sessionTimer);
+  api('saveSession', { folder: folder?.path || null, files, active: current()?.path || null }).catch(() => {});
+}
+
+// headings() keeps the outline of the parse that rendered the current version,
+// so the breadcrumb, the sidebar and [TOC] never run markdown-it a second time.
+const outlineFor = content => headings(content);
 function selectionChanged(update) {
   if (update.view !== current()?.editor.view) return;
   const state = update.state, range = state.selection.main;
@@ -176,13 +505,50 @@ async function addDocument(record) {
   doc.editor.setSpellcheck(prefs.spellcheck);
   activate(doc.id);
 }
+/**
+ * Open documents requested from the menu, the palette, the sidebar, a dropped
+ * file or the command line. A pristine welcome page is closed first so the
+ * opened document takes its place instead of leaving an extra tab behind.
+ */
+async function openDocuments(records) {
+  const list = (Array.isArray(records) ? records : [records]).filter(Boolean);
+  if (!list.length) return;
+  const welcome = welcomeId ? documents.get(welcomeId) : null;
+  if (welcome && documents.size === 1 && !welcome.dirty && !welcome.path) {
+    welcomeId = null;
+    await closeDocument(welcome.id, false);
+  }
+  for (const record of list) await addDocument(record);
+}
 function activate(id) {
   activeId = id;
   const doc = current();
   $('#editor-host').replaceChildren(doc.mount);
   doc.editor.setSource(sourceMode);
   doc.editor.view.requestMeasure();
-  updateChrome(); updateStats(); drawSidebar();
+  updateChrome(); updateStats(); drawSidebar(); saveSession();
+}
+/**
+ * Mirror asset-reference rewrites made by the main process (a Save As into a
+ * folder that already owns a different image with the same name) into the live
+ * editor. Starting from the editor's own text keeps anything typed while the
+ * save was in flight, and one minimal replacement stays undoable.
+ */
+function applyAssetRewrites(doc, rewritten) {
+  if (!doc?.editor || !Array.isArray(rewritten) || !rewritten.length) return;
+  const before = doc.editor.text();
+  let after = before;
+  for (const entry of rewritten) {
+    if (!entry || typeof entry.from !== 'string' || typeof entry.to !== 'string' || !entry.from) continue;
+    after = after.split(`](${entry.from})`).join(`](${entry.to})`);
+  }
+  if (after === before) return;
+  // Trim the untouched head and tail so only the reference itself changes.
+  let start = 0;
+  while (start < before.length && start < after.length && before[start] === after[start]) start++;
+  let endBefore = before.length, endAfter = after.length;
+  while (endBefore > start && endAfter > start && before[endBefore - 1] === after[endAfter - 1]) { endBefore--; endAfter--; }
+  doc.editor.applyChange({ from: start, to: endBefore, insert: after.slice(start, endAfter) });
 }
 async function save(doc = current(), saveAs = false) {
   if (!doc || doc.saving) return;
@@ -191,6 +557,10 @@ async function save(doc = current(), saveAs = false) {
     await flush(doc);
     const saved = await api('saveDocument', doc.id, saveAs);
     if (!saved) return;
+    // Clashing images may have been renamed to a free name: apply the rewrite to
+    // the live text before touching savedContent, otherwise the stale reference
+    // would be flushed back into the store on the next save.
+    applyAssetRewrites(doc, saved.rewritten);
     doc.path = saved.path; doc.name = saved.name; doc.savedContent = saved.content;
     doc.dirty = doc.content !== saved.content; doc.error = '';
     if (doc.dirty) await flush(doc);
@@ -202,10 +572,103 @@ async function closeDocument(id, createReplacement = true) {
   const doc = documents.get(id); if (!doc) return true;
   await flush(doc);
   if (!await api('closeDocument', id)) return false;
-  clearTimeout(doc.timer); clearTimeout(doc.statsTimer); doc.editor.view.destroy(); documents.delete(id);
+  clearTimeout(doc.timer); clearTimeout(doc.statsTimer); doc.editor.destroy(); documents.delete(id);
   if (documents.size) activate([...documents.keys()].at(-1));
   else if (createReplacement) await addDocument(await api('newDocument', ''));
   return true;
+}
+// External changes are shown one at a time: the queue keeps a second prompt
+// from silently replacing the first, and waits while another dialog is open.
+const externalQueue = [];
+let externalPrompt = null, dialogPurpose = null, closingForAction = false;
+/** Put the prompt that is currently on screen back in front of the queue. */
+function deferExternalPrompt() {
+  if (!externalPrompt) return;
+  const key = externalPrompt;
+  externalPrompt = null;
+  if (!externalQueue.includes(key)) externalQueue.unshift(key);
+}
+function queueExternalPrompt(id, kind = 'modified') {
+  if (!documents.has(id)) return;
+  const key = `${id}:${kind}`;
+  if (externalPrompt === key || externalQueue.includes(key)) return;
+  externalQueue.push(key);
+  showNextExternalPrompt();
+}
+function showNextExternalPrompt() {
+  if (externalPrompt || !externalQueue.length) return;
+  if ($('#dialog').open) return;
+  const key = externalQueue.shift();
+  const [id, kind] = key.split(':');
+  const doc = documents.get(id);
+  if (!doc) { showNextExternalPrompt(); return; }
+  externalPrompt = key;
+  const safe = escapeHTML(doc.name);
+  if (kind === 'deleted') {
+    showDialog('文件已被删除', `<p class="dialog-description">磁盘上的“${safe}”已被其他程序删除。可以另存为新的文件，或保留为未保存的文档继续编辑。</p><div class="dialog-actions"><button data-external-action="detach">保留为未保存文档</button><button class="primary" data-external-action="save-as">另存为…</button></div>`, 'external');
+    return;
+  }
+  showDialog('文件已在编辑器外修改', `<p class="dialog-description">磁盘上的“${safe}”已发生变化。重新加载会读取磁盘版本，当前的未保存内容会另存为恢复副本（不会自动删除）；保留本地内容后，下一次保存会覆盖磁盘版本，磁盘版本会先写入保存历史。</p><div class="dialog-actions"><button data-external-action="keep-local">保留本地内容</button><button class="primary" data-external-action="reload">重新加载磁盘版本</button></div>`, 'external');
+}
+async function applyDiskVersion(id, record) {
+  const doc = documents.get(id);
+  if (!doc) return;
+  doc.savedContent = record.content;
+  doc.error = '';
+  doc.editor.setContent(record.content);
+  doc.dirty = doc.content !== record.content;
+  updateChrome(); updateStats(); drawSidebar();
+}
+async function handleExternalChange(id, kind = 'modified') {
+  const doc = documents.get(id);
+  if (!doc) return;
+  // A clean document is replaced silently, the way Typora does it; only local
+  // edits need a decision from the user.
+  if (kind !== 'deleted' && !doc.dirty && !doc.saving) {
+    try {
+      await applyDiskVersion(id, await api('reloadDocument', id));
+      notify(`“${doc.name}”已在磁盘上更新，已自动重新加载。`);
+    } catch (error) { notify(error.message, true); }
+    return;
+  }
+  queueExternalPrompt(id, kind);
+}
+async function resolveExternalPrompt(action) {
+  const key = externalPrompt;
+  if (!key) return;
+  const [id] = key.split(':');
+  // Cleared before closing so the dialog's own close handler only advances the
+  // queue and never treats this as a dismissal.
+  externalPrompt = null;
+  const doc = documents.get(id);
+  try {
+    if (!doc) {
+      // The document was closed while the prompt was on screen.
+    } else if (action === 'keep-local') {
+      await api('acceptExternalChange', id);
+      notify(`已保留本地内容。下一次保存“${doc.name}”会覆盖磁盘版本，被覆盖的磁盘版本已写入保存历史。`);
+    } else if (action === 'reload') {
+      const record = await api('reloadDocument', id);
+      await applyDiskVersion(id, record);
+      notify(record.discarded ? `已重新加载磁盘版本。本地内容已另存为：${record.discarded}` : '已重新加载磁盘版本。');
+    } else if (action === 'save-as') {
+      await save(doc, true);
+    } else if (action === 'detach') {
+      const record = await api('detachDocument', id);
+      Object.assign(doc, { path: null, name: record.name, savedContent: '' });
+      doc.error = '';
+      updateChrome(); drawSidebar();
+      notify('该文档已保留为未保存文档，请选择位置另存为。');
+    }
+  } catch (error) { notify(error.message, true); }
+  const node = $('#dialog');
+  if (node.open) {
+    // The dialog's `close` event arrives asynchronously; remember that this
+    // close belongs to the action so it cannot dismiss the next prompt.
+    closingForAction = true;
+    node.close();
+  }
+  showNextExternalPrompt();
 }
 async function applyCustomTheme(value) {
   const custom = String(value).startsWith('custom:') ? value.slice(7) : '';
@@ -246,25 +709,37 @@ function setSidebarVisible(visible) {
   setPreferences({ sidebarVisible: visible }).catch(error => notify(error.message, true));
 }
 function dialogContent(title, body) {
+  // Any dialog that is not an external-change prompt takes over the screen.
+  dialogPurpose = 'other';
   $('#dialog-content').innerHTML = `<div class="dialog-heading"><h2 id="dialog-title">${title}</h2><button class="icon-button" data-dismiss aria-label="关闭对话框">${icon('close')}</button></div>${body}`;
 }
-function showDialog(title, body) {
+function showDialog(title, body, purpose = 'other') {
+  if (purpose !== 'external') deferExternalPrompt();
   dialogContent(title, body);
-  $('#dialog').showModal();
+  dialogPurpose = purpose;
+  const node = $('#dialog');
+  // Never throw when a queued prompt still owns the dialog: the newest content
+  // wins and the prompt is put back in the queue instead of being lost.
+  if (!node.open) node.showModal();
 }
 const flattenFiles = entries => entries.flatMap(entry => entry.children ? flattenFiles(entry.children) : [entry]);
 const modKey = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl+';
 // One palette for both files and actions: quicker than hunting through menus,
 // and it doubles as a discoverable shortcut reference.
-const PALETTE_COMMANDS = [
+const paletteCommands = () => [
   ['新建文档', 'new', '文件', `${modKey}N`],
   ['新建窗口', 'new-window', '文件', `${modKey}⇧N`],
   ['打开文档…', 'open', '文件', `${modKey}O`],
   ['打开文件夹…', 'folder', '文件', `${modKey}⇧O`],
+  ['在文件夹中搜索…', 'folder-search', '文件', `${modKey}⇧F`],
+  ['最近打开的文件…', 'recent-files', '文件', ''],
   ['保存', 'save', '文件', `${modKey}S`],
   ['另存为…', 'save-as', '文件', `${modKey}⇧S`],
   ['导出…', 'export', '文件', `${modKey}⇧E`],
-  ['查看保存历史', 'history', '文件', ''],
+  ['重命名 / 移动…', 'rename', '文件', `${modKey}⇧R`],
+  ['在文件夹中显示', 'reveal', '文件', ''],
+  [`移到${trashName()}`, 'trash', '文件', ''],
+  ['查看保存历史…', 'history', '文件', ''],
   ['重新打开已关闭文件', 'reopen-closed', '文件', `${modKey}⇧T`],
   ['查找与替换', 'find', '编辑', `${modKey}F`],
   ['复制为 Markdown', 'copy-markdown', '编辑', `${modKey}⇧C`],
@@ -276,6 +751,7 @@ const PALETTE_COMMANDS = [
   ['插入表情…', 'emoji', '编辑', ''],
   ['插入代码块', 'code', '段落', `${modKey}⇧K`],
   ['插入公式块', 'math', '段落', `${modKey}⇧M`],
+  ['插入图表', 'diagram', '段落', `${modKey}Alt+D`],
   ['插入文内目录', 'toc', '段落', ''],
   ['插入图片…', 'image', '段落', ''],
   ['源码模式', 'source', '视图', `${modKey}/`],
@@ -301,11 +777,14 @@ function highlightQuick() {
 function quickOpenResults(query = '') {
   const node = $('#quick-results'); if (!node) return;
   const needle = query.trim().toLowerCase();
-  const commands = PALETTE_COMMANDS.filter(c => !needle || c.label.toLowerCase().includes(needle) || c.group.includes(needle)).slice(0, 14);
+  const commands = paletteCommands().filter(c => !needle || c.label.toLowerCase().includes(needle) || c.group.includes(needle)).slice(0, 14);
   const files = quickFiles.filter(file => !needle || file.name.toLowerCase().includes(needle) || file.path.toLowerCase().includes(needle)).slice(0, 20);
   const rows = [
     ...commands.map(c => `<button class="quick-item" data-quick-command="${c.command}"><strong>${escapeHTML(c.label)}</strong><span>${escapeHTML(c.group)}${c.keys ? ` · ${escapeHTML(c.keys)}` : ''}</span></button>`),
-    ...files.map(file => `<button class="quick-item" data-quick-path="${escapeHTML(file.path)}"><strong>${escapeHTML(file.name)}</strong><span>${escapeHTML(file.path)}</span></button>`)
+    // An already-open document switches tabs; it must work with no folder open.
+    ...files.map(file => file.id
+      ? `<button class="quick-item" data-quick-document="${escapeHTML(file.id)}"><strong>${escapeHTML(file.name)}</strong><span>已打开${file.path ? ` · ${escapeHTML(file.path)}` : ' · 未保存'}</span></button>`
+      : `<button class="quick-item" data-quick-path="${escapeHTML(file.path)}"><strong>${escapeHTML(file.name)}</strong><span>${file.recent ? '最近打开 · ' : ''}${escapeHTML(file.path)}</span></button>`)
   ];
   node.innerHTML = rows.length ? rows.join('') : '<div class="empty-state"><p>没有匹配项</p><small>输入命令名或文件名；打开文件夹后可以搜索全部 Markdown 文档。</small></div>';
   quickIndex = 0;
@@ -313,7 +792,8 @@ function quickOpenResults(query = '') {
 }
 async function runQuickItem(element) {
   try {
-    if (element.dataset.quickPath) for (const doc of await api('openDocument', element.dataset.quickPath)) await addDocument(doc);
+    if (element.dataset.quickDocument) activate(element.dataset.quickDocument);
+    else if (element.dataset.quickPath) await openDocuments(await api('openDocument', element.dataset.quickPath));
     else if (element.dataset.quickCommand) await runCommand(element.dataset.quickCommand);
   } catch (error) { notify(error.message, true); }
 }
@@ -327,6 +807,7 @@ function collectTableCells() {
 }
 function renderTableDialog() {
   if (!pendingTable) return;
+  deferExternalPrompt();
   const table = pendingTable.table;
   const alignLabels = [['', '默认'], ['left', '左对齐'], ['center', '居中'], ['right', '右对齐']];
   const header = table.rows[0].map((cell, column) => `<th><input data-cell="0-${column}" value="${escapeHTML(cell)}" aria-label="表头第 ${column + 1} 列"><button class="table-cell-action" data-table-op="remove-column" data-index="${column}" ${table.aligns.length <= 1 ? 'disabled' : ''} aria-label="删除第 ${column + 1} 列">×</button></th>`).join('');
@@ -370,11 +851,21 @@ async function insertImage(file) {
 }
 async function exportDocument(format) {
   const doc = current(); await flush(doc);
-  const target = $('#print-document'); target.innerHTML = renderMarkdown(doc.content, doc.id);
+  // `chrome: false` drops the editor-only affordances (code copy buttons,
+  // front-matter / alert decorations) so the serialized HTML and the printed
+  // PDF carry the document body only.
+  // Every language the document fences must be registered before the export is
+  // serialised, otherwise a lazily loaded language would export unstyled.
+  await ensureLanguages(doc.content);
+  const target = $('#print-document'); target.innerHTML = renderMarkdown(doc.content, doc.id, { chrome: false });
   await renderDiagrams(target);
   await document.fonts.ready;
   await Promise.all([...target.querySelectorAll('img')].map(img => { img.loading = 'eager'; return img.decode().catch(() => {}); }));
-  const css = [...document.styleSheets].flatMap(sheet => { try { return [...sheet.cssRules].map(rule => rule.cssText); } catch { return []; } }).join('\n');
+  // Editor-only affordances have no meaning in a shared file: drop the copy
+  // button and column-resize rules from the inlined stylesheet, so an export
+  // carries neither the button nor a trace of it.
+  const chromeRule = /\.(?:code-copy|table-column-resizer)\b/;
+  const css = [...document.styleSheets].flatMap(sheet => { try { return [...sheet.cssRules].filter(rule => !chromeRule.test(rule.selectorText || '')).map(rule => rule.cssText); } catch { return []; } }).join('\n');
   const html = `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${escapeHTML(doc.name)}</title><style>${css}\nbody{overflow:auto!important;display:block!important;height:auto!important;padding:48px!important}.prose{max-width:800px;margin:auto}</style><body><article class="prose">${target.innerHTML}</article></body></html>`;
   const result = await api('exportDocument', doc.id, format, html);
   if (result) notify(`已导出：${result}`);
@@ -406,7 +897,13 @@ async function runCommand(command, detail) {
       'clear-format': () => editor?.clearFormat(),
       underline: () => editor?.wrap('<u>', '</u>', '文字'),
       'copy-markdown': () => api('writeClipboard', { text: selectedSource() }),
-      'copy-html': () => api('writeClipboard', { text: selectedSource(), html: renderMarkdown(selectedSource(), activeId) }),
+      'copy-html': async () => {
+        const source = selectedSource();
+        // The export path waits for on-demand languages too, so the clipboard
+        // copy matches what the editor shows.
+        await ensureLanguages(source);
+        await api('writeClipboard', { text: source, html: renderMarkdown(source, activeId, { chrome: false }) });
+      },
       'paste-plain': async () => { const text = await api('readClipboardText'); editor?.insert(String(text).replace(/\r\n/g, '\n')); },
       'panel-outline': () => { sideMode = 'outline'; setSidebarVisible(true); drawSidebar(); },
       'panel-files': () => { sideMode = 'files'; setSidebarVisible(true); drawSidebar(); },
@@ -417,10 +914,18 @@ async function runCommand(command, detail) {
       fullscreen: () => api('fullscreen'),
       'themes-folder': () => api('openThemesFolder'),
       'history-folder': () => api('history'),
-      'keep-local': () => { externalId = null; },
       'next-document': () => {
         const ids = [...documents.keys()];
         if (ids.length > 1) activate(ids[(ids.indexOf(activeId) + 1) % ids.length]);
+      },
+      'previous-document': () => {
+        const ids = [...documents.keys()];
+        if (ids.length > 1) activate(ids[(ids.indexOf(activeId) - 1 + ids.length) % ids.length]);
+      },
+      'app-menu': async () => {
+        // Windows / Linux: pop the full native menu from the topbar button.
+        const rect = $('.app-menu-button')?.getBoundingClientRect();
+        await api('appMenu', { x: Math.round(rect?.left || 0), y: Math.round(rect?.bottom || 38) });
       }
     };
     if (simple[command]) { await simple[command](); return; }
@@ -429,8 +934,35 @@ async function runCommand(command, detail) {
       case 'redo': editor?.redo(); break;
       case 'new': await addDocument(await api('newDocument', '')); break;
       case 'new-window': await api('newWindow'); break;
-      case 'open': for (const doc of await api('openDocument')) await addDocument(doc); break;
-      case 'folder': { const selected = await api('openFolder'); if (selected) { folder = selected; sideMode = 'files'; drawSidebar(); } break; }
+      case 'open': await openDocuments(await api('openDocument')); break;
+      case 'folder': { const selected = await api('openFolder'); if (selected) { folder = selected; sideMode = 'files'; setSidebarVisible(true); drawSidebar(); } saveSession(); break; }
+      case 'open-recent': {
+        if (!detail?.path) break;
+        await openDocuments(await api('openPath', detail.path));
+        break;
+      }
+      case 'open-recent-folder': {
+        if (!detail?.path) break;
+        const info = await api('openFolderPath', detail.path);
+        if (info) { folder = info; sideMode = 'files'; setSidebarVisible(true); drawSidebar(); saveSession(); }
+        break;
+      }
+      case 'refresh-recent': recentFiles = await api('recentFiles'); break;
+      case 'folder-search': {
+        sideMode = 'search';
+        setSidebarVisible(true);
+        drawSidebar();
+        $('#folder-search-input')?.focus();
+        break;
+      }
+      case 'recent-files': {
+        recentFiles = await api('recentFiles');
+        const rows = recentFiles.length
+          ? recentFiles.map(file => `<button class="quick-item" data-quick-path="${escapeHTML(file.path)}"><strong>${escapeHTML(file.name)}</strong><span>${escapeHTML(file.path)}</span></button>`).join('')
+          : '<div class="empty-state"><p>还没有最近打开的文件</p><small>打开或保存文档后，它会出现在这里和“文件 → 最近打开”菜单中。</small></div>';
+        showDialog('最近打开', `<p class="dialog-description">最多保留 20 个文件；已删除的文件会自动移除。</p><div class="menu-list">${rows}</div>`);
+        break;
+      }
       case 'save': await save(); break;
       case 'save-as': await save(current(), true); break;
       case 'close': await closeDocument(activeId); break;
@@ -444,7 +976,7 @@ async function runCommand(command, detail) {
       case 'quote': editor?.prefix('> '); break;
       case 'task': editor?.prefix('- [ ] '); break;
       case 'image': await insertImage(); break;
-      case 'import': { const doc = await api('importDocument'); if (doc) await addDocument(doc); break; }
+      case 'import': { const doc = await api('importDocument'); if (doc) await openDocuments(doc); break; }
       case 'export': {
         const external = ['docx', 'odt', 'epub', 'tex', 'rst'];
         const options = ['pdf', 'html', ...external].map(format => {
@@ -461,15 +993,18 @@ async function runCommand(command, detail) {
       case 'settings': {
         customThemes = await api('listThemes');
         const options = [['light', '浅色'], ['dark', '深色'], ['sepia', '纸张'], ...customThemes.map(name => [`custom:${name}`, `自定义 · ${name.replace(/\.css$/i, '')}`])];
-        showDialog('偏好设置', `<form id="preferences"><label>主题<select name="theme">${options.map(([value, label]) => `<option value="${escapeHTML(value)}" ${prefs.theme === value ? 'selected' : ''}>${escapeHTML(label)}</option>`).join('')}</select></label><label>界面外观<select name="uiMode"><option value="typora" ${prefs.uiMode !== 'workbench' ? 'selected' : ''}>Typora 极简（默认）</option><option value="workbench" ${prefs.uiMode === 'workbench' ? 'selected' : ''}>工作台（标签 / 工具栏 / 状态栏）</option></select></label><label>正文字号<input name="fontSize" type="number" min="12" max="30" value="${prefs.fontSize}"></label><label>正文宽度<input name="lineWidth" type="number" min="560" max="1100" step="20" value="${prefs.lineWidth}"></label>${[['autoSave', '自动保存已命名的文件'], ['spellcheck', '拼写检查'], ['focus', '专注模式'], ['typewriter', '打字机模式'], ['mathNumbering', '公式自动编号'], ['headingNumbering', '标题自动编号'], ['showFormatbar', '显示排版工具栏']].map(([key, label]) => `<label class="checkbox-label"><span>${label}</span><input type="checkbox" name="${key}" ${prefs[key] ? 'checked' : ''}></label>`).join('')}<div class="dialog-actions"><button type="button" data-menu-command="themes-folder">打开主题文件夹</button><button class="primary" type="submit">保存设置</button></div></form>`);
+        showDialog('偏好设置', `<form id="preferences"><label>主题<select name="theme">${options.map(([value, label]) => `<option value="${escapeHTML(value)}" ${prefs.theme === value ? 'selected' : ''}>${escapeHTML(label)}</option>`).join('')}</select></label><label>界面外观<select name="uiMode"><option value="typora" ${prefs.uiMode !== 'workbench' ? 'selected' : ''}>Typora 极简（默认）</option><option value="workbench" ${prefs.uiMode === 'workbench' ? 'selected' : ''}>工作台（标签 / 工具栏 / 状态栏）</option></select></label><label>正文字号<input name="fontSize" type="number" min="12" max="30" value="${prefs.fontSize}"></label><label>正文宽度<input name="lineWidth" type="number" min="560" max="1100" step="20" value="${prefs.lineWidth}"></label>${[['autoSave', '自动保存已命名的文件'], ['restoreSession', '启动时恢复上次的文件夹与已打开文档'], ['spellcheck', '拼写检查'], ['focus', '专注模式'], ['typewriter', '打字机模式'], ['mathNumbering', '公式自动编号'], ['headingNumbering', '标题自动编号'], ['showFormatbar', '显示排版工具栏']].map(([key, label]) => `<label class="checkbox-label"><span>${label}</span><input type="checkbox" name="${key}" ${prefs[key] ? 'checked' : ''}></label>`).join('')}<div class="dialog-actions"><button type="button" data-menu-command="themes-folder">打开主题文件夹</button><button class="primary" type="submit">保存设置</button></div></form>`);
         break;
       }
-      case 'document-menu': showDialog('文档操作', `<div class="menu-list">${[['save-as', '另存为…'], ['rename', '重命名 / 移动…'], ['reveal', '在系统文件管理器中显示'], ['history', '查看保存历史'], ['toc', '插入文内目录'], ['task', '插入任务项'], ['quote', '插入引用'], ['trash', '移到废纸篓']].map(([key, label]) => `<button data-menu-command="${key}">${label}</button>`).join('')}</div>`); break;
+      case 'document-menu': showDialog('文档操作', `<div class="menu-list">${[['save-as', '另存为…'], ['rename', '重命名 / 移动…'], ['reveal', '在文件夹中显示'], ['history', '查看保存历史…'], ['toc', '插入文内目录'], ['task', '插入任务项'], ['quote', '插入引用'], ['trash', `移到${trashName()}`]].map(([key, label]) => `<button data-menu-command="${key}">${label}</button>`).join('')}</div>`); break;
       case 'edit-table': {
         if (!detail?.source) {
           // Invoked from the palette / menu: operate on the table at the caret.
           const head = editor?.caretOffset() ?? 0;
-          const tables = parseTables(current()?.content || '');
+          // Table offsets come from the editor's LF text, which shares its
+          // coordinate system with CodeMirror positions (doc.content is the
+          // on-disk form and may use CRLF).
+          const tables = parseTables(editor?.text() || '');
           const found = tables.find(table => table.start <= head && head <= table.end);
           if (!found) { notify('请先把光标放到表格中，或右键点击表格。', true); break; }
           pendingTable = { from: found.start, to: found.end, table: found };
@@ -494,68 +1029,85 @@ async function runCommand(command, detail) {
       }
       case 'quick-open': {
         const info = folder ? await api('refreshFolder') : null;
+        if (info) { folder = info; }
+        recentFiles = await api('recentFiles');
         const files = info ? flattenFiles(info.entries) : [];
-        const opened = [...documents.values()].filter(doc => doc.path).map(doc => ({ name: doc.name, path: doc.path }));
-        quickFiles = [...new Map([...opened, ...files].map(file => [file.path, file])).values()];
+        // Every open document is listed, saved or not, and wins over the copy
+        // of the same file the folder tree would offer.
+        const opened = [...documents.values()].map(doc => ({ name: doc.name, path: doc.path || '', id: doc.id }));
+        const openedPaths = new Set(opened.map(doc => doc.path).filter(Boolean));
+        // Recent files are searchable too, including ones outside the folder.
+        const recent = recentFiles.filter(file => !openedPaths.has(file.path) && !files.some(entry => entry.path === file.path));
+        quickFiles = [...opened, ...recent.map(file => ({ ...file, recent: true })), ...files.filter(file => !openedPaths.has(file.path))];
         showDialog('命令面板', '<label class="quick-filter"><span class="sr-only">搜索命令或文件</span><input id="quick-filter" type="search" placeholder="搜索命令或文件…" autocomplete="off"></label><div class="menu-list quick-list" id="quick-results"></div><p class="palette-hint">↑ ↓ 选择 · Enter 执行 · Esc 关闭</p>');
         quickOpenResults();
         $('#quick-filter').focus();
         break;
       }
-      case 'rename': { await flush(); const result = await api('renameDocument', activeId); if (result) { const doc = current(); doc.path = result.path; doc.name = result.name; doc.savedContent = result.content; doc.dirty = doc.content !== result.content; updateChrome(); } break; }
+      case 'rename': {
+        await flush();
+        const result = await api('renameDocument', activeId);
+        if (result) {
+          const doc = current();
+          applyAssetRewrites(doc, result.rewritten);
+          doc.path = result.path; doc.name = result.name; doc.savedContent = result.content;
+          doc.dirty = doc.content !== result.content;
+          updateChrome();
+        }
+        break;
+      }
       case 'reveal': await api('revealDocument', activeId); break;
       case 'history': {
         const entries = await api('listHistory', activeId);
         selectedHistory = null;
         const list = entries.length
-          ? entries.map(entry => `<button class="history-item" data-history="${escapeHTML(entry.name)}"><strong>${escapeHTML(entry.label)}</strong><span>${escapeHTML(entry.name.split('-').slice(2).join('-'))}</span></button>`).join('')
+          ? entries.map(entry => `<button class="history-item" data-history="${escapeHTML(entry.name)}" data-history-dir="${escapeHTML(entry.dir)}"><strong>${escapeHTML(entry.label)}</strong><span>${escapeHTML(entry.hint || (entry.legacy ? '旧版历史记录' : '当前文件'))}</span></button>`).join('')
           : '<div class="empty-state"><p>暂无历史版本</p><small>对已保存文档做修改并再次保存时，会自动保留上一版本。</small></div>';
         showDialog('保存历史', `<p class="dialog-description">选择版本可预览内容；恢复会替换当前文档并标记为未保存，确认后请自行保存。</p><div class="history-list">${list}</div><pre class="history-preview" id="history-preview" hidden></pre><div class="dialog-actions"><button data-menu-command="history-folder">在文件管理器中查看</button><button id="compare-history" data-menu-command="compare-history" disabled>与当前版本对比</button><button class="primary" id="restore-history" data-menu-command="restore-history" disabled>恢复此版本</button></div>`);
         break;
       }
       case 'restore-history': {
         if (!selectedHistory) break;
-        const content = await api('readHistory', selectedHistory);
+        const content = await api('readHistory', selectedHistory.dir, selectedHistory.name);
         current()?.editor.setContent(content);
         selectedHistory = null;
         break;
       }
       case 'compare-history': {
         if (!selectedHistory) break;
-        const previous = await api('readHistory', selectedHistory);
+        const previous = await api('readHistory', selectedHistory.dir, selectedHistory.name);
         const now = current()?.content || '';
         showDialog('版本对比', `<p class="dialog-description">− 表示历史版本独有，+ 表示当前版本新增。差异按行计算，可直接看到改动位置。</p>${diffHTML(previous, now)}<div class="dialog-actions"><button data-menu-command="history">返回历史列表</button><button class="primary" data-dismiss>关闭</button></div>`);
         break;
       }
-      case 'reload-external': {
-        if (!externalId) break;
-        const record = await api('reloadDocument', externalId);
-        const doc = documents.get(externalId);
-        if (doc && record) {
-          doc.savedContent = record.content;
-          doc.editor.setContent(record.content);
-          updateChrome(); updateStats(); drawSidebar();
-        }
-        externalId = null;
-        break;
-      }
-      case 'reopen-closed': for (const doc of await api('reopenClosed')) await addDocument(doc); break;
+      case 'reopen-closed': await openDocuments(await api('reopenClosed')); break;
       case 'trash': { await flush(); const result = await api('trashDocument', activeId); if (result) { Object.assign(current(), result, { savedContent: '' }); updateChrome(); } break; }
       case 'help': showDialog('写作从这里开始', '<div class="help-text"><p>输入 Markdown。离开当前段落后，文字会显示排版；点击排版内容可以继续编辑。正在编辑的段落也保持排版外观，只有把光标移到 <code>#</code>、<code>**</code> 等语法字符旁边时，它们才会显现以便修改。</p><p><kbd>⌘ / Ctrl + S</kbd> 保存 · <kbd>⌘ / Ctrl + F</kbd> 查找与替换 · <kbd>⌘ / Ctrl + /</kbd> 源码模式。</p><p>单击表格单元格即可直接输入，<kbd>Tab</kbd> / <kbd>Shift+Tab</kbd> 在单元格间跳转，<kbd>Enter</kbd> 新增一行；拖动表头右边缘可调整列宽并随文档保存。右键或 <kbd>Alt</kbd> + 单击表格可打开图形化编辑器，命令面板中也能搜索「表格图形化编辑」。</p><p>图片会复制到文档旁的 assets 文件夹。文件保存时会检查磁盘版本，避免覆盖其他程序的修改。</p><p>HTML、PDF 可直接导出，其他格式需要系统中安装 Pandoc。</p><p>已支持整篇上下文渲染（脚注、引用式链接、文内目录、YAML 属性、警示块）、点击排版内容定位到源码字符、跨块拖选、复制为 Markdown / HTML、命令面板、文章列表、自定义 CSS 主题、公式与标题编号、保存历史与外部修改提示。按 ⌘/Ctrl+P 打开命令面板，可搜索命令与文件；双击图片可放大查看；代码块右上角可一键复制。Windows 实机、真实中文输入法和发行签名仍需专项验收。</p></div>'); break;
-      case 'system-open': for (const doc of await api('drainPending')) await addDocument(doc); break;
+      case 'system-open': await openDocuments(await api('drainPending')); break;
       case 'quit':
-        for (const id of [...documents.keys()]) if (!await closeDocument(id, false)) return;
+        // Acknowledge first: the main process then stops its five second
+        // fallback, so a native save prompt may wait for the user indefinitely.
+        await api('quitAck').catch(() => {});
+        // Ask for every dirty document; a cancel aborts the whole application quit.
+        for (const id of [...documents.keys()]) {
+          if (!await closeDocument(id, false)) { await api('cancelQuit').catch(() => {}); return; }
+        }
         await api('finishQuit'); break;
     }
   } catch (error) { notify(error.message, true); }
 }
 
+// Rendered Markdown is document content, not application chrome.
 document.addEventListener('click', async event => {
-  const command = event.target.closest('[data-command]'); if (command) { await runCommand(command.dataset.command); return; }
-  const tableOp = event.target.closest('[data-table-op]');
-  if (tableOp) { tableOperation(tableOp.dataset.tableOp, Number(tableOp.dataset.index)); return; }
-  const copy = event.target.closest('[data-copy-code]');
+  const target = event.target;
+  const fromDocument = !!target?.closest?.('.md-widget, .prose');
+  // The code block copy button is the only application control that lives
+  // inside rendered Markdown. Document content cannot forge it: the reserved
+  // attributes are stripped from the sanitized HTML (src/markdown.js) before
+  // this button is inserted, so the check below is a second layer only.
+  const copy = target?.closest?.('[data-copy-code]');
   if (copy) {
+    if (!(copy instanceof HTMLButtonElement) || !copy.classList.contains('code-copy')) return;
     const code = copy.closest('pre')?.querySelector('code')?.textContent || '';
     try {
       await api('writeClipboard', { text: code });
@@ -565,7 +1117,29 @@ document.addEventListener('click', async event => {
     } catch (error) { notify(error.message, true); }
     return;
   }
-  const quick = event.target.closest('[data-quick-path], [data-quick-command]');
+  // A rendered document may only navigate its own source: [TOC] / footnote
+  // links carry data-line, and Cmd/Ctrl+click opens a real link. Everything
+  // else (data-command, data-menu-command, data-path, data-export, …) is
+  // ignored there, so a document can never drive the application.
+  if (fromDocument) {
+    const line = target.closest('[data-line]');
+    if (line) { event.preventDefault(); current()?.editor.jump(Number(line.dataset.line)); return; }
+    const anchor = target.closest('a');
+    if (!anchor) return;
+    event.preventDefault();
+    const href = anchor.getAttribute('href') || '';
+    const parsed = splitLinkTarget(href);
+    // A local document link or a `#anchor` follows the click, the way a link on
+    // a page does; an external URL still needs the modifier so a stray click in
+    // the text cannot launch a browser.
+    if (parsed.kind === 'anchor' || parsed.kind === 'local') await navigateLink(href);
+    else if (event.metaKey || event.ctrlKey) await navigateLink(href);
+    return;
+  }
+  const command = target?.closest?.('[data-command]'); if (command) { await runCommand(command.dataset.command); return; }
+  const tableOp = target?.closest?.('[data-table-op]');
+  if (tableOp) { tableOperation(tableOp.dataset.tableOp, Number(tableOp.dataset.index)); return; }
+  const quick = target?.closest?.('[data-quick-path], [data-quick-command], [data-quick-document]');
   if (quick) { $('#dialog').close(); await runQuickItem(quick); return; }
   const emoji = event.target.closest('[data-emoji]');
   if (emoji) { $('#dialog').close(); current()?.editor.insert(emoji.dataset.emoji); return; }
@@ -585,12 +1159,14 @@ document.addEventListener('click', async event => {
     return;
   }
   const menu = event.target.closest('[data-menu-command]'); if (menu) { $('#dialog').close(); await runCommand(menu.dataset.menuCommand); return; }
+  const externalAction = event.target.closest('[data-external-action]');
+  if (externalAction) { await resolveExternalPrompt(externalAction.dataset.externalAction); return; }
   const dismiss = event.target.closest('[data-dismiss]'); if (dismiss) { $('#dialog').close(); return; }
   const historyItem = event.target.closest('[data-history]');
   if (historyItem) {
     try {
-      selectedHistory = historyItem.dataset.history;
-      const content = await api('readHistory', selectedHistory);
+      selectedHistory = { dir: historyItem.dataset.historyDir, name: historyItem.dataset.history };
+      const content = await api('readHistory', selectedHistory.dir, selectedHistory.name);
       const preview = $('#history-preview');
       preview.hidden = false;
       preview.textContent = content.slice(0, 4000);
@@ -600,37 +1176,35 @@ document.addEventListener('click', async event => {
     } catch (error) { notify(error.message, true); }
     return;
   }
-  const exported = event.target.closest('[data-export]');
+  const exported = target?.closest?.('[data-export]');
   if (exported) {
     if (busy) return; busy = true; exported.disabled = true; exported.setAttribute('aria-busy', 'true');
     try { await exportDocument(exported.dataset.export); $('#dialog').close(); } catch (error) { notify(error.message, true); } finally { busy = false; exported.disabled = false; exported.removeAttribute('aria-busy'); } return;
   }
-  const side = event.target.closest('[data-side]'); if (side) { sideMode = side.dataset.side; drawSidebar(); return; }
-  const close = event.target.closest('[data-close]'); if (close) { try { await closeDocument(close.dataset.close); } catch (error) { notify(error.message, true); } return; }
-  const tab = event.target.closest('[data-document]'); if (tab) { activate(tab.dataset.document); return; }
-  const file = event.target.closest('[data-path]'); if (file) { try { for (const doc of await api('openDocument', file.dataset.path)) await addDocument(doc); } catch (error) { notify(error.message, true); } return; }
-  const line = event.target.closest('[data-line]'); if (line) { event.preventDefault(); current()?.editor.jump(Number(line.dataset.line)); return; }
-  const anchor = event.target.closest('.prose a');
-  if (anchor) {
-    event.preventDefault();
-    if (event.metaKey || event.ctrlKey) {
-      const href = anchor.getAttribute('href');
-      if (href?.startsWith('#')) {
-        const heading = headings(current().content).find(h => h.id === decodeURIComponent(href.slice(1)));
-        if (heading) current().editor.jump(heading.line);
-      } else try { await api('openExternal', anchor.href); } catch (error) { notify(error.message, true); }
-    }
-  }
+  const side = target?.closest?.('[data-side]'); if (side) { sideMode = side.dataset.side; drawSidebar(); return; }
+  const close = target?.closest?.('[data-close]'); if (close) { try { await closeDocument(close.dataset.close); } catch (error) { notify(error.message, true); } return; }
+  const tab = target?.closest?.('[data-document]'); if (tab) { activate(tab.dataset.document); return; }
+  const searchHit = target?.closest?.('[data-search-hit]'); if (searchHit) { await openSearchHit(searchHit); return; }
+  const fileOp = target?.closest?.('[data-file-op]');
+  if (fileOp) { await runFileOperation(fileOp.dataset.fileOp, null, true); return; }
+  const file = target?.closest?.('[data-path]'); if (file) { try { await openDocuments(await api('openDocument', file.dataset.path)); } catch (error) { notify(error.message, true); } return; }
+  const line = target?.closest?.('[data-line]'); if (line) { event.preventDefault(); current()?.editor.jump(Number(line.dataset.line)); return; }
 });
 document.addEventListener('submit', async event => {
-  if (event.target.id !== 'preferences') return;
+  // Document content cannot forge the preferences form and change app settings.
+  if (event.target.id !== 'preferences' || event.target.closest('.prose')) return;
   event.preventDefault(); const data = new FormData(event.target);
   const patch = { theme: data.get('theme'), uiMode: data.get('uiMode'), fontSize: Number(data.get('fontSize')), lineWidth: Number(data.get('lineWidth')) };
-  for (const key of ['autoSave', 'spellcheck', 'focus', 'typewriter', 'mathNumbering', 'headingNumbering', 'showFormatbar']) patch[key] = data.has(key);
+  for (const key of ['autoSave', 'restoreSession', 'spellcheck', 'focus', 'typewriter', 'mathNumbering', 'headingNumbering', 'showFormatbar']) patch[key] = data.has(key);
   try { await setPreferences(patch); $('#dialog').close(); } catch (error) { notify(error.message, true); }
 });
 $('#file-filter').addEventListener('input', drawSidebar);
 document.addEventListener('input', event => {
+  if (event.target.id === 'folder-search-input') {
+    searchState.query = event.target.value;
+    scheduleSearch();
+    return;
+  }
   if (event.target.id === 'quick-filter') quickOpenResults(event.target.value);
   if (event.target.id === 'emoji-filter') {
     const needle = event.target.value.trim().toLowerCase();
@@ -638,25 +1212,38 @@ document.addEventListener('input', event => {
   }
 });
 document.addEventListener('change', event => {
+  const option = event.target.closest?.('[data-search-option]');
+  if (option) {
+    searchState[option.dataset.searchOption] = option.checked;
+    scheduleSearch(0);
+    return;
+  }
   const select = event.target.closest?.('[data-align]');
-  if (!select || !pendingTable) return;
+  if (!select || !pendingTable || !select.closest('#dialog')) return;
   collectTableCells();
   pendingTable.table = setAlignment(pendingTable.table, Number(select.dataset.align), select.value || null);
   renderTableDialog();
 });
 document.addEventListener('inkstone:table-edit', event => runCommand('edit-table', event.detail));
-document.addEventListener('inkstone:table-cell-commit', event => {
-  const { from, to, text } = event.detail || {};
-  if (Number.isInteger(from) && Number.isInteger(to) && from <= to) current()?.editor.applyChange({ from, to, insert: String(text ?? '') });
+// A link inside a rendered block. The widget sends this instead of relying on
+// the `click` event, because clicking it already turned the block into source
+// lines. Web links keep needing Cmd/Ctrl so a stray click cannot open a browser.
+document.addEventListener('inkstone:open-link', event => {
+  const detail = event.detail || {};
+  if (splitLinkTarget(detail.href).kind === 'external' && !detail.modifier) return;
+  navigateLink(detail.href).catch(error => notify(error.message, true));
 });
 document.addEventListener('inkstone:table-width', event => {
   const doc = current();
   const detail = event.detail;
   if (!doc || !detail) return;
-  const tables = parseTables(doc.content);
+  // Same reason as edit-table: widths and the caret share the editor's LF
+  // coordinates, never the CRLF ones of the serialized disk text.
+  const text = doc.editor.text();
+  const tables = parseTables(text);
   const index = tables.findIndex(table => table.start <= detail.absoluteStart && detail.absoluteStart < table.end);
   if (index < 0) return;
-  doc.editor.applyChange(columnWidthEdit(doc.content, index, detail.widths));
+  doc.editor.applyChange(columnWidthEdit(text, index, detail.widths));
 });
 // Command palette keyboard navigation.
 document.addEventListener('keydown', event => {
@@ -689,10 +1276,37 @@ $('#sidebar-resizer').addEventListener('mousedown', event => {
   document.addEventListener('mouseup', onUp, { once: true });
 });
 $('#dialog').addEventListener('click', event => { if (event.target === $('#dialog')) $('#dialog').close(); });
+// Any dialog closing is the moment a queued external-change prompt may appear.
+$('#dialog').addEventListener('close', () => {
+  const purpose = dialogPurpose;
+  dialogPurpose = null;
+  if (closingForAction) { closingForAction = false; showNextExternalPrompt(); return; }
+  if (purpose === 'external' && externalPrompt) {
+    // Dismissed without choosing: keep the local text (the next save overwrites).
+    const [id] = externalPrompt.split(':');
+    externalPrompt = null;
+    api('acceptExternalChange', id).catch(() => {});
+    notify('已保留本地内容。下一次保存会覆盖磁盘版本。');
+  }
+  showNextExternalPrompt();
+});
 // Right-clicking a rendered image exposes Typora-style copy actions.
 document.addEventListener('contextmenu', event => {
   const image = event.target.closest('.md-widget img');
   const menu = $('#context-menu');
+  const tree = event.target.closest('[data-tree-path]');
+  if (!image && tree && !tree.closest('.prose')) {
+    // The file tree owns a native menu; naming and confirmations stay in the
+    // renderer's dialogs because a native menu cannot take text input.
+    event.preventDefault();
+    menu.hidden = true;
+    const target = tree.dataset.treePath;
+    const isDirectory = tree.dataset.treeKind === 'folder';
+    api('fileMenu', target, isDirectory)
+      .then(result => { if (result) return runFileOperation(result.action, result.path, result.isDirectory); return null; })
+      .catch(error => notify(error.message, true));
+    return;
+  }
   if (!image) { menu.hidden = true; return; }
   event.preventDefault();
   imageContext = {
@@ -723,7 +1337,7 @@ let draggedSection = null;
 const clearDragMarks = () => { for (const el of document.querySelectorAll('.outline-item.dragging, .outline-item.drop-target')) el.classList.remove('dragging', 'drop-target'); };
 document.addEventListener('dragstart', event => {
   const item = event.target.closest('[data-section]');
-  if (!item) return;
+  if (!item || item.closest('.prose')) return;
   draggedSection = Number(item.dataset.section);
   item.classList.add('dragging');
   event.dataTransfer.effectAllowed = 'move';
@@ -732,7 +1346,7 @@ document.addEventListener('dragstart', event => {
 document.addEventListener('dragend', () => { draggedSection = null; clearDragMarks(); });
 document.addEventListener('dragover', event => {
   const item = event.target.closest('[data-section]');
-  if (!item || draggedSection === null) return;
+  if (!item || item.closest('.prose') || draggedSection === null) return;
   event.preventDefault();
   event.dataTransfer.dropEffect = 'move';
   for (const el of document.querySelectorAll('.outline-item.drop-target')) el.classList.remove('drop-target');
@@ -740,7 +1354,7 @@ document.addEventListener('dragover', event => {
 });
 document.addEventListener('drop', event => {
   const item = event.target.closest('[data-section]');
-  if (!item || draggedSection === null) return;
+  if (!item || item.closest('.prose') || draggedSection === null) return;
   event.preventDefault();
   const target = Number(item.dataset.section);
   const doc = current();
@@ -757,17 +1371,40 @@ document.addEventListener('keydown', event => {
   if (command) { event.preventDefault(); runCommand(command); }
 });
 bridge.onCommand(runCommand);
-bridge.onExternalChange(id => {
-  if (!documents.has(id)) return;
-  externalId = id;
-  showDialog('文件已在编辑器外修改', `<p class="dialog-description">磁盘上的“${escapeHTML(documents.get(id).name)}”已发生变化。重新加载会读取磁盘版本，当前未保存内容仍保留在恢复副本中；也可以保留本地内容。</p><div class="dialog-actions"><button data-menu-command="keep-local">保留本地内容</button><button class="primary" data-menu-command="reload-external">重新加载磁盘版本</button></div>`);
-});
+bridge.onExternalChange((id, kind) => { handleExternalChange(id, kind).catch(error => notify(error.message, true)); });
 window.addEventListener('beforeunload', event => { if (!native && [...documents.values()].some(d => d.dirty)) { event.preventDefault(); event.returnValue = ''; } });
 try {
   const initial = await api('bootstrap'); prefs = initial.preferences; applyPreferences();
   capabilities = await api('capabilities').catch(() => capabilities);
-  document.body.classList.toggle('frameless', native && initial.platform === 'darwin');
+  appPlatform = initial.platform;
+  if (initial.titleBar) titleBarInfo = { ...titleBarInfo, ...initial.titleBar };
+  document.documentElement.style.setProperty('--titlebar-height', `${titleBarInfo.height}px`);
+  document.documentElement.style.setProperty('--titlebar-controls-width', `${titleBarInfo.controlsWidth || 0}px`);
+  document.body.classList.toggle('frameless', native && appPlatform === 'darwin');
+  // Windows / Linux: the topbar is the title bar, and the menu button replaces
+  // the hidden native menu bar.
+  document.body.classList.toggle('titlebar-overlay', native && !!titleBarInfo.overlay);
+  bridge.onFullScreen?.(active => document.body.classList.toggle('is-fullscreen', !!active));
+  // The session restored by the main process: its folder, the saved documents
+  // it reopened and the document that was active. A restored document means the
+  // welcome page stays away, exactly like opening a file on the command line.
+  if (initial.session?.path) {
+    folder = { path: initial.session.path, name: initial.session.name, entries: initial.session.entries || [] };
+  }
   for (const doc of initial.documents) await addDocument(doc);
-  if (!documents.size) { const doc = await api('newDocument', welcome); doc.name = '欢迎使用.md'; await addDocument(doc); }
+  const sessionActive = initial.session?.activePath
+    ? [...documents.values()].find(doc => doc.path === initial.session.activePath)
+    : null;
+  if (sessionActive) activate(sessionActive.id);
+  if (!documents.size) { const doc = await api('newDocument', welcome, '欢迎使用.md'); await addDocument(doc); welcomeId = doc.id; }
+  drawSidebar();
+  recentFiles = await api('recentFiles').catch(() => []);
+  // Another program creating / renaming / deleting a file refreshes the tree.
+  bridge.onFolderChanged?.(info => {
+    if (!info || !folder || info.path !== folder.path) return;
+    folder = info;
+    if (sideMode === 'files') drawSidebar();
+  });
   if (initial.recoveryCount) notify(`已恢复 ${initial.recoveryCount} 篇未保存文档，请检查并另存为。`);
+  else if (folder) notify(`已恢复上次的文件夹“${folder.name}”。`);
 } catch (error) { notify(`启动失败：${error.message}`, true); }
