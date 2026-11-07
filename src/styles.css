@@ -61,10 +61,11 @@ details[open] > summary::before { content: '⌄'; }
 #mode-label { font-size: 11px; color: var(--color-muted); white-space: nowrap; padding-left: var(--space-md); }
 #editor-host { flex: 1; min-height: 0; overflow: hidden; }
 .editor-mount, .cm-editor { height: 100%; }
-.cm-editor { font-size: var(--editor-size); background: var(--color-paper); }
+.cm-editor { font-size: var(--editor-size); background: var(--color-paper); color: var(--color-ink); }
 .cm-editor.cm-focused { outline: none; }
-.cm-scroller { overflow: auto !important; font-family: var(--font-body) !important; line-height: 1.85 !important; }
-.cm-editor .cm-content { max-width: var(--editor-width); width: calc(100% - 80px); margin: 0 auto; flex: 1 1 auto; padding: 48px 0 160px !important; caret-color: var(--color-ink); }
+.cm-scroller { overflow: auto !important; font-family: var(--font-body) !important; line-height: var(--editor-leading) !important; }
+/* Typora's #write: an 860px column, 30px side padding and a 100px tail. */
+.cm-editor .cm-content { max-width: var(--editor-width); width: calc(100% - 60px); margin: 0 auto; flex: 1 1 auto; padding: 30px 30px 100px !important; caret-color: var(--color-ink); }
 .cm-line { padding: 0 !important; font-family: var(--font-code); font-size: .9em; overflow-wrap: anywhere; }
 .cm-activeLine { background: transparent !important; }
 .cm-cursor { border-left-color: var(--color-ink) !important; }
@@ -74,14 +75,14 @@ details[open] > summary::before { content: '⌄'; }
 .cm-panels input, .cm-panels button { background: var(--color-surface) !important; border: 1px solid var(--color-rule) !important; border-radius: var(--radius-sm); }
 .cm-placeholder { color: var(--color-muted) !important; }
 .md-widget { cursor: text; padding: 2px 0; overflow-wrap: anywhere; white-space: normal; }
-.cm-line.cm-heading-1 { font: 650 2em/1.4 var(--font-display); letter-spacing: -.04em; }
-.cm-line.cm-heading-2 { font: 650 1.45em/1.4 var(--font-display); }
-.cm-line.cm-heading-3 { font: 650 1.15em/1.4 var(--font-display); }
+.cm-line.cm-heading-1 { font: 700 2.25em/1.2 var(--font-display); }
+.cm-line.cm-heading-2 { font: 700 1.75em/1.225 var(--font-display); }
+.cm-line.cm-heading-3 { font: 700 1.5em/1.4 var(--font-display); }
 /* The active block reads like the rendered page; only its syntax is dimmed. */
 .cm-line.cm-live-line { font-family: var(--font-body); font-size: 1em; }
-.cm-line.cm-live-line.cm-heading-1 { font-family: var(--font-display); font-size: 2em; font-weight: 650; letter-spacing: -.04em; }
-.cm-line.cm-live-line.cm-heading-2 { font-family: var(--font-display); font-size: 1.45em; font-weight: 650; }
-.cm-line.cm-live-line.cm-heading-3 { font-family: var(--font-display); font-size: 1.15em; font-weight: 650; }
+.cm-line.cm-live-line.cm-heading-1 { font-family: var(--font-display); font-size: 2.25em; font-weight: 700; line-height: 1.2; }
+.cm-line.cm-live-line.cm-heading-2 { font-family: var(--font-display); font-size: 1.75em; font-weight: 700; line-height: 1.225; }
+.cm-line.cm-live-line.cm-heading-3 { font-family: var(--font-display); font-size: 1.5em; font-weight: 700; line-height: 1.4; }
 .cm-line.cm-live-quote { box-shadow: inset 3px 0 var(--color-rule); padding-left: 1em !important; }
 .cm-editor .cm-md-mark { color: var(--color-muted) !important; opacity: .58; font-family: var(--font-code); font-size: .86em; font-weight: 400; letter-spacing: 0; }
 .cm-editor.cm-focused .cm-md-mark { opacity: .72; }
@@ -92,37 +93,44 @@ details[open] > summary::before { content: '⌄'; }
 .cm-prefix-ordered { width: 2em; text-align: right; padding-right: .7em; margin-right: .1em; font-variant-numeric: tabular-nums; }
 .cm-prefix-task { width: 1.6em; color: var(--color-focus); cursor: pointer; }
 .cm-prefix-hr { display: block; width: 100%; height: 1px; margin: .8em 0; background: var(--color-rule); }
-.cm-line.cm-lv-h1 { font-size: 2em; font-weight: 650; letter-spacing: -.04em; line-height: 1.4; }
-.cm-line.cm-lv-h2 { font-size: 1.45em; font-weight: 650; letter-spacing: -.02em; line-height: 1.4; }
-.cm-line.cm-lv-h3 { font-size: 1.15em; font-weight: 650; line-height: 1.45; }
-.cm-line.cm-lv-h4, .cm-line.cm-lv-h5, .cm-line.cm-lv-h6 { font-size: 1em; font-weight: 650; }
-.cm-line.cm-lv-quote { box-shadow: inset 3px 0 var(--color-rule); padding-left: 1em !important; color: var(--color-muted); min-height: 1.6em; }
+.cm-line.cm-lv-h1 { font-size: 2.25em; font-weight: 700; line-height: 1.2; box-shadow: inset 0 -1px var(--color-rule); }
+.cm-line.cm-lv-h2 { font-size: 1.75em; font-weight: 700; line-height: 1.225; box-shadow: inset 0 -1px var(--color-rule); }
+.cm-line.cm-lv-h3 { font-size: 1.5em; font-weight: 700; line-height: 1.4; }
+.cm-line.cm-lv-h4 { font-size: 1.25em; }
+.cm-line.cm-lv-h5, .cm-line.cm-lv-h6 { font-size: 1em; }
+.cm-line.cm-lv-h4, .cm-line.cm-lv-h5, .cm-line.cm-lv-h6 { font-weight: 700; }
+.cm-line.cm-lv-quote { box-shadow: inset 4px 0 var(--color-rule); padding-left: 1em !important; color: var(--color-muted); min-height: 1.6em; }
 .cm-line.cm-lv-list { padding-left: .15em !important; }
 .cm-line.cm-lv-table, .cm-line.cm-lv-fence { font-family: var(--font-code); font-size: .9em; }
-.cm-editor .cm-lv-strong { font-weight: 650; }
+.cm-editor .cm-lv-strong { font-weight: 700; }
 .cm-editor .cm-lv-em { font-style: italic; }
 .cm-editor .cm-lv-strike { text-decoration: line-through; color: var(--color-muted); }
 .cm-editor .cm-lv-mark { background: var(--color-highlight); border-radius: 2px; }
 .cm-editor .cm-lv-code { font-family: var(--font-code); font-size: .88em; background: var(--color-code); padding: .1em .3em; border-radius: var(--radius-sm); }
-.cm-editor .cm-lv-link { color: var(--color-focus); text-decoration: underline; text-underline-offset: 3px; }
+.cm-editor .cm-lv-link { color: var(--color-focus); text-decoration: none; }
 .cm-editor .cm-lv-image { color: var(--color-focus); }
 .cm-editor .cm-lv-math { font-family: var(--font-code); font-size: .92em; }
-.prose { color: var(--color-ink); font-size: var(--editor-size); font-family: var(--font-body); line-height: 1.85; }
+.prose { color: var(--color-ink); font-size: var(--editor-size); font-family: var(--font-body); line-height: var(--editor-leading); }
 .prose > :first-child { margin-top: 0; }
 .prose > :last-child { margin-bottom: 0; }
-.prose h1, .prose h2, .prose h3, .prose h4, .prose h5, .prose h6 { font-family: var(--font-display); font-weight: 650; line-height: 1.4; overflow-wrap: anywhere; }
-.prose h1 { font-size: 2em; letter-spacing: -.04em; margin: 0 0 .7em; }
-.prose h2 { font-size: 1.45em; margin: 1.6em 0 .65em; letter-spacing: -.02em; }
-.prose h3 { font-size: 1.15em; margin: 1.2em 0 .6em; }
-.prose p { margin: .65em 0; }
-.prose a { color: var(--color-focus); text-decoration-thickness: 1px; text-underline-offset: 3px; }
-.prose code { font: .85em/1.6 var(--font-code); background: var(--color-code); padding: .15em .35em; border-radius: var(--radius-sm); }
-.prose pre { position: relative; margin: .8em 0; padding: 28px 20px 18px; border: 1px solid var(--color-rule); border-radius: var(--radius-md); background: var(--color-code); overflow: auto; white-space: pre; }
-.prose pre code { padding: 0; background: transparent; display: block; line-height: 1.75; font-size: 13px; }
+/* Typora's default theme: bold headings, hairline under h1/h2, no letterspacing. */
+.prose h1, .prose h2, .prose h3, .prose h4, .prose h5, .prose h6 { font-family: var(--font-display); font-weight: 700; line-height: 1.4; overflow-wrap: anywhere; }
+.prose h1 { font-size: 2.25em; line-height: 1.2; margin: 0 0 .8em; padding-bottom: .3em; border-bottom: 1px solid var(--color-rule); }
+.prose h2 { font-size: 1.75em; line-height: 1.225; margin: 1.2em 0 .8em; padding-bottom: .3em; border-bottom: 1px solid var(--color-rule); }
+.prose h3 { font-size: 1.5em; margin: 1em 0 .8em; }
+.prose h4 { font-size: 1.25em; margin: 1em 0 .8em; }
+.prose h5 { font-size: 1em; margin: 1em 0 .8em; }
+.prose h6 { font-size: 1em; margin: 1em 0 .8em; color: var(--color-muted); }
+.prose p, .prose blockquote, .prose ul, .prose ol, .prose dl, .prose table { margin: .8em 0; }
+.prose a { color: var(--color-focus); text-decoration: none; }
+.prose a:hover { text-decoration: underline; text-underline-offset: 2px; }
+.prose code { font: .9em/1.6 var(--font-code); background: var(--color-code); padding: .2em .4em; border-radius: var(--radius-sm); }
+.prose pre { position: relative; margin: .8em 0; padding: 16px 20px; border: 0; border-radius: var(--radius-sm); background: var(--color-code); overflow: auto; white-space: pre; }
+.prose pre code { padding: 0; background: transparent; display: block; line-height: 1.6; font-size: 14px; }
 .code-language { display: block; color: var(--color-muted); position: absolute; top: 6px; right: 12px; font: 10px var(--font-code); }
-.prose blockquote { margin: 1em 0; border-left: 3px solid var(--color-rule); padding: .2em 1em; color: var(--color-muted); }
+.prose blockquote { border-left: 4px solid var(--color-rule); padding: .2em 1em; color: var(--color-muted); }
 .prose blockquote:empty { min-height: 1.6em; }
-.prose ul, .prose ol { padding-left: 1.6em; margin: .7em 0; }
+.prose ul, .prose ol { padding-left: 1.6em; }
 .prose li { padding-left: .2em; }
 /* markdown-it-task-lists tags the whole <ul> when any item is a checkbox.
    Removing the marker there would also strip bullets from ordinary items. */
@@ -133,13 +141,13 @@ details[open] > summary::before { content: '⌄'; }
 .prose .task-list-item-checkbox { appearance: none; -webkit-appearance: none; display: inline-block; position: relative; width: 15px; height: 15px; margin: 0 .6em 0 .15em; border: 1.5px solid var(--color-muted); border-radius: 3px; background: var(--color-surface); vertical-align: middle; cursor: pointer; }
 .prose .task-list-item-checkbox:checked { background: var(--color-focus); border-color: var(--color-focus); }
 .prose .task-list-item-checkbox:checked::after { content: ''; position: absolute; left: 4px; top: 1px; width: 4px; height: 8px; border: solid var(--color-on-accent); border-width: 0 2px 2px 0; transform: rotate(45deg); }
-.prose table { border-collapse: collapse; width: 100%; margin: 1em 0; font-size: .9em; }
-.prose th, .prose td { padding: .5em .85em; border: 1px solid var(--color-rule); text-align: left; }
+.prose table { border-collapse: collapse; width: 100%; margin: .8em 0; font-size: .9em; }
+.prose th, .prose td { padding: 6px 13px; border: 1px solid var(--color-rule); text-align: left; }
 .prose th { background: var(--color-code); font-weight: 600; position: relative; }
 .table-column-resizer { position: absolute; top: 0; right: -4px; width: 9px; height: 100%; cursor: col-resize; z-index: 2; pointer-events: none; }
 .table-column-resizer::after { content: ''; position: absolute; inset: 0 3px; background: var(--color-focus); opacity: 0; transition: opacity var(--dur-micro) var(--ease-out); }
 .md-widget th:hover > .table-column-resizer::after { opacity: .5; }
-.prose hr { border: 0; border-top: 1px solid var(--color-rule); margin: 1.5em 0; }
+.prose hr { border: 0; height: 2px; background: var(--color-rule); margin: 16px 0; }
 .prose img { display: block; max-width: 100%; height: auto; margin: 1em auto; }
 .prose mark { background: var(--color-highlight); color: inherit; }
 .prose .katex-display { overflow-x: auto; overflow-y: hidden; padding: .5em 0; }
@@ -274,9 +282,8 @@ kbd { font: .9em var(--font-code); color: var(--color-ink); }
 .code-copy { position: absolute; top: 5px; right: 12px; z-index: 1; font: 10px var(--font-code); color: var(--color-muted); padding: 2px 8px; border: 1px solid var(--color-rule); border-radius: var(--radius-sm); background: var(--color-surface); opacity: 0; transition: opacity var(--dur-micro) var(--ease-out); }
 .prose pre.code-block:hover .code-copy, .code-copy:focus-visible { opacity: 1; }
 .prose .code-language { right: 76px; }
-.prose :is(h1,h2,h3,h4,h5,h6):hover::after { content: '#'; margin-left: .4em; color: var(--color-muted); font-size: .7em; font-weight: 400; }
+/* Typora keeps the page clean: no anchor glyphs or hover rails on blocks. */
 .md-widget { position: relative; }
-.md-widget:hover::before { content: ''; position: absolute; left: -14px; top: 4px; bottom: 4px; width: 2px; border-radius: 2px; background: var(--color-rule); }
 .heading-numbering .prose { counter-reset: ink-h1 ink-h2 ink-h3 ink-h4 ink-h5 ink-h6; }
 .heading-numbering .prose h1 { counter-reset: ink-h2 ink-h3 ink-h4 ink-h5 ink-h6; counter-increment: ink-h1; }
 .heading-numbering .prose h2 { counter-reset: ink-h3 ink-h4 ink-h5 ink-h6; counter-increment: ink-h2; }
@@ -302,6 +309,62 @@ kbd { font: .9em var(--font-code); color: var(--color-ink); }
 .outline-item.dragging { opacity: .45; }
 .outline-item.drop-target { background: var(--color-selected); box-shadow: inset 0 -2px var(--color-accent); }
 @media (max-width: 1000px) { .sidebar { width: min(var(--sidebar-width), 208px); flex-basis: min(var(--sidebar-width), 208px); } .frameless .brand { width: 140px; } }
+/* ── Default Typora-like chrome ───────────────────────────────────────────
+   One 38px title bar, no brand strip, no tab strip, no formatting toolbar,
+   a 24px word-count footer, and a paper-coloured writing surface. The dense
+   workbench remains available through Preferences → 界面外观 / 命令面板. */
+:root[data-ui="typora"] .topbar {
+  position: relative; height: 38px; padding: 0 10px; gap: 8px;
+  border-bottom: 0; background: var(--color-paper); user-select: none;
+}
+:root[data-ui="typora"] body.frameless .topbar { padding-left: 78px; }
+:root[data-ui="typora"] .brand { display: none; }
+:root[data-ui="typora"] .top-actions { gap: 0; }
+:root[data-ui="typora"] .top-actions:last-child { margin-left: auto; }
+:root[data-ui="typora"] .document-location {
+  position: absolute; left: 50%; transform: translateX(-50%); flex: none;
+  max-width: 42vw; font-size: 12px; font-weight: 500; color: var(--color-muted);
+}
+:root[data-ui="typora"] .topbar .icon-button,
+:root[data-ui="typora"] .topbar .export-button {
+  width: 28px; height: 28px; padding: 0; margin: 0; border: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--color-muted); opacity: .72; border-radius: var(--radius-sm);
+}
+:root[data-ui="typora"] .topbar .icon-button:hover,
+:root[data-ui="typora"] .topbar .export-button:hover { opacity: 1; background: var(--color-hover); }
+:root[data-ui="typora"] .topbar .icon-button svg,
+:root[data-ui="typora"] .topbar .export-button svg { width: 16px; height: 16px; }
+:root[data-ui="typora"] .export-button span { display: none; }
+:root[data-ui="typora"] .tabbar,
+:root[data-ui="typora"] .formatbar { display: none; }
+:root[data-ui="typora"] .statusbar {
+  min-height: 24px; height: 24px; padding: 0 10px; gap: 10px;
+  border-top: 0; background: var(--color-paper); font-size: 11px;
+}
+:root[data-ui="typora"] .statusbar > #save-status,
+:root[data-ui="typora"] .statusbar > #breadcrumb,
+:root[data-ui="typora"] .statusbar > #position,
+:root[data-ui="typora"] .statusbar > #encoding { display: none; }
+:root[data-ui="typora"] .statusbar button { width: 22px; height: 22px; opacity: .4; }
+:root[data-ui="typora"] .statusbar button:hover { opacity: 1; background: var(--color-hover); }
+:root[data-ui="typora"] .statusbar svg { width: 13px; height: 13px; }
+:root[data-ui="typora"] .sidebar { background: var(--color-sidebar); border-right-color: var(--color-rule); }
+:root[data-ui="typora"] .sidebar-tabs { height: 34px; border-bottom: 0; padding: 0 16px; gap: 18px; }
+:root[data-ui="typora"] .sidebar-tabs button { font-size: 12px; }
+:root[data-ui="typora"] .sidebar-tabs button[aria-selected="true"] { border-bottom: 0; font-weight: 600; }
+:root[data-ui="typora"] .sidebar-context,
+:root[data-ui="typora"] .sidebar-footer { display: none; }
+:root[data-ui="typora"] .outline-item,
+:root[data-ui="typora"] .file-item { min-height: 28px; font-size: 12px; border-radius: var(--radius-sm); }
+:root[data-ui="typora"] .cm-editor .cm-content { width: calc(100% - 60px); max-width: var(--editor-width); padding: 30px 30px 100px !important; }
+:root[data-ui="typora"] .typewriter-mode .cm-content { padding-top: 35vh !important; padding-bottom: 45vh !important; }
+:root[data-ui="typora"] #notification { bottom: 32px; }
+@media (max-width: 768px) {
+  :root[data-ui="typora"] .sidebar { position: absolute; top: 38px; bottom: 24px; left: 0; z-index: 10; box-shadow: 8px 0 20px var(--color-shadow); }
+  :root[data-ui="typora"] .sidebar-hidden .sidebar { display: none; }
+  :root[data-ui="typora"] .sidebar-hidden .sidebar-resizer { display: none; }
+}
 @media print {
   @page { size: A4; margin: 20mm 18mm; }
   html, body, #app { height: auto !important; overflow: visible !important; background: var(--color-surface); }

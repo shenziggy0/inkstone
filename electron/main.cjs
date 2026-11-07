@@ -12,7 +12,7 @@ const digest = data => crypto.createHash('sha256').update(data).digest('hex');
 if (process.env.INKSTONE_TEST_USER_DATA) app.setPath('userData', process.env.INKSTONE_TEST_USER_DATA);
 protocol.registerSchemesAsPrivileged([{ scheme: 'inkstone-asset', privileges: { standard: true, secure: true, supportFetchAPI: true } }]);
 
-let preferences = { theme: 'light', fontSize: 17, lineWidth: 760, autoSave: false, focus: false, typewriter: false, spellcheck: true, mathNumbering: false, headingNumbering: false, sidebarWidth: 240, zoomLevel: 0, windowBounds: null, windowMaximized: false, showFormatbar: true };
+let preferences = { theme: 'light', fontSize: 16, lineWidth: 860, autoSave: false, focus: false, typewriter: false, spellcheck: true, mathNumbering: false, headingNumbering: false, sidebarWidth: 240, zoomLevel: 0, windowBounds: null, windowMaximized: false, showFormatbar: true, uiMode: 'typora', sidebarVisible: false, uiDefaultsMigrated: false };
 const pendingFiles = [];
 const recentlyClosed = [];
 const suppressed = new Set(), notified = new Set();
@@ -117,8 +117,8 @@ function createWindow() {
   const restored = visibleBounds(preferences.windowBounds) || {};
   const window = new BrowserWindow({
     width: 1240, height: 840, ...restored, minWidth: 720, minHeight: 480, title: 'Inkstone',
-    backgroundColor: '#fafafa',
-    ...(frameless ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 14, y: 22 } } : {}),
+    backgroundColor: preferences.theme === 'dark' ? '#282c34' : preferences.theme === 'sepia' ? '#fbf7ef' : '#ffffff',
+    ...(frameless ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 18, y: preferences.uiMode === 'workbench' ? 22 : 12 } } : {}),
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, spellcheck: true }
   });
   context.win = window;
@@ -314,6 +314,7 @@ function registerHandlers() {
     for (const [key, value] of Object.entries(patch)) {
       if (!(key in preferences) || typeof value !== typeof preferences[key]) continue;
       if (key === 'theme' && !['light', 'dark', 'sepia'].includes(value) && !(typeof value === 'string' && value.startsWith('custom:') && safeName(value.slice(7)) && value.endsWith('.css'))) continue;
+      if (key === 'uiMode' && !['typora', 'workbench'].includes(value)) continue;
       if (key === 'fontSize' && (!Number.isFinite(value) || value < 12 || value > 30)) continue;
       if (key === 'lineWidth' && (!Number.isFinite(value) || value < 560 || value > 1100)) continue;
       if (key === 'sidebarWidth' && (!Number.isFinite(value) || value < 180 || value > 480)) continue;
@@ -326,6 +327,11 @@ function registerHandlers() {
         continue;
       }
       preferences[key] = value;
+    }
+    // The macOS traffic lights follow the height of the active title bar.
+    if (patch.uiMode && process.platform === 'darwin') {
+      const position = { x: 18, y: preferences.uiMode === 'workbench' ? 22 : 12 };
+      for (const { win } of contexts.values()) if (win && !win.isDestroyed() && typeof win.setTrafficLightPosition === 'function') win.setTrafficLightPosition(position);
     }
     await atomicWrite(settingsPath(), JSON.stringify(preferences, null, 2));
     return preferences;
@@ -562,6 +568,11 @@ else {
   });
   app.whenReady().then(async () => {
     try { preferences = { ...preferences, ...JSON.parse(await fs.readFile(settingsPath(), 'utf8')) }; } catch {}
+    // One-time migration: the old 17px / 760px defaults predate Typora parity.
+    if (!preferences.uiDefaultsMigrated && preferences.fontSize === 17 && preferences.lineWidth === 760) {
+      preferences = { ...preferences, fontSize: 16, lineWidth: 860, uiDefaultsMigrated: true };
+      await atomicWrite(settingsPath(), JSON.stringify(preferences, null, 2)).catch(() => {});
+    }
     protocol.handle('inkstone-asset', async request => {
       try {
         const url = new URL(request.url);

@@ -1,50 +1,56 @@
 /* Hallmark · macrostructure: Workbench · tone: technical · theme: Quiet · anchor hue: neutral
  * Audience: programmers · Use: local Markdown writing · P4 H4 E3 S4 R5 V3 (pre-runtime assessment)
  * Native desktop workbench: application sidebar and status bar replace marketing navigation/footer.
+ *
+ * The light palette mirrors Typora's default theme: pure white paper, #fafafa
+ * side bar, #333 body text, #4183C4 links and #f6f8fa code surfaces.
  */
 :root {
-  --color-paper: oklch(99% 0 0);
-  --color-sidebar: oklch(97% 0 0);
-  --color-surface: oklch(100% 0 0);
-  --color-hover: oklch(94% 0 0);
-  --color-selected: oklch(92% 0 0);
-  --color-ink: oklch(25% 0 0);
-  --color-muted: oklch(49% 0 0);
-  --color-rule: oklch(89% 0 0);
-  --color-accent: oklch(35% 0 0);
-  --color-on-accent: oklch(99% 0 0);
-  --color-focus: oklch(48% 0.12 250);
-  --color-error: oklch(48% 0.17 25);
-  --color-code: oklch(96% 0 0);
-  --color-highlight: oklch(92% 0.1 90);
-  --color-backdrop: oklch(20% 0 0 / 0.28);
-  --color-shadow: oklch(0% 0 0 / 0.12);
-  --color-syntax-keyword: oklch(49% 0.16 310);
-  --color-syntax-string: oklch(43% 0.1 160);
-  --color-syntax-number: oklch(46% 0.13 250);
-  --color-syntax-function: oklch(45% 0.12 40);
+  --color-paper: #ffffff;
+  --color-sidebar: #fafafa;
+  --color-surface: #ffffff;
+  --color-hover: #f2f2f2;
+  --color-selected: #ebebeb;
+  --color-ink: #333333;
+  --color-muted: #777777;
+  --color-rule: #e7e7e7;
+  --color-accent: #3f3f3f;
+  --color-on-accent: #ffffff;
+  --color-focus: #4183c4;
+  --color-error: #c0392b;
+  --color-code: #f6f8fa;
+  --color-highlight: #fff2a8;
+  --color-backdrop: rgba(0, 0, 0, .28);
+  --color-shadow: rgba(0, 0, 0, .12);
+  --color-syntax-keyword: #d73a49;
+  --color-syntax-string: #032f62;
+  --color-syntax-number: #005cc5;
+  --color-syntax-function: #6f42c1;
   --font-body: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
   --font-display: var(--font-body);
   --font-code: 'SFMono-Regular', 'Cascadia Code', 'Menlo', 'Consolas', monospace;
   --space-xs: 4px; --space-sm: 8px; --space-md: 12px; --space-lg: 16px; --space-xl: 24px; --space-2xl: 32px; --space-3xl: 48px;
   --text-xs: 12px; --text-sm: 13px; --text-base: 14px; --text-md: 16px; --text-lg: 20px; --text-xl: 24px;
-  --radius-sm: 4px; --radius-md: 8px; --radius-lg: 12px;
+  --radius-sm: 3px; --radius-md: 6px; --radius-lg: 10px;
   --ease-out: cubic-bezier(0.16,1,0.3,1); --ease-in: cubic-bezier(0.7,0,0.84,0); --ease-in-out: cubic-bezier(0.65,0,0.35,1);
   --dur-micro: 120ms; --dur-short: 220ms;
-  --editor-size: 17px; --editor-width: 760px;
+  /* Typora's default #write is 16px / 1.6 inside an 860px column. */
+  --editor-size: 16px; --editor-width: 860px; --editor-leading: 1.6;
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --color-paper: oklch(20% 0 0); --color-sidebar: oklch(17% 0 0); --color-surface: oklch(23% 0 0);
-  --color-hover: oklch(28% 0 0); --color-selected: oklch(32% 0 0); --color-ink: oklch(90% 0 0);
-  --color-muted: oklch(70% 0 0); --color-rule: oklch(32% 0 0); --color-accent: oklch(89% 0 0);
-  --color-on-accent: oklch(18% 0 0); --color-focus: oklch(75% 0.1 250); --color-error: oklch(76% 0.14 25);
-  --color-code: oklch(24% 0 0); --color-highlight: oklch(40% 0.07 90);
-  --color-syntax-keyword: oklch(76% 0.13 310); --color-syntax-string: oklch(75% 0.1 160);
-  --color-syntax-number: oklch(75% 0.1 250); --color-syntax-function: oklch(77% 0.1 50);
+  --color-paper: #282c34; --color-sidebar: #21252b; --color-surface: #2c313a;
+  --color-hover: #343a45; --color-selected: #3e4451; --color-ink: #abb2bf;
+  --color-muted: #7f848e; --color-rule: #3b4048; --color-accent: #c8ccd4;
+  --color-on-accent: #282c34; --color-focus: #61afef; --color-error: #e06c75;
+  --color-code: #21252b; --color-highlight: #4b4428;
+  --color-backdrop: rgba(0, 0, 0, .48); --color-shadow: rgba(0, 0, 0, .38);
+  --color-syntax-keyword: #c678dd; --color-syntax-string: #98c379;
+  --color-syntax-number: #d19a66; --color-syntax-function: #61afef;
 }
 :root[data-theme="sepia"] {
-  --color-paper: oklch(97% 0.018 85); --color-sidebar: oklch(94% 0.022 85); --color-surface: oklch(98% 0.013 85);
-  --color-hover: oklch(91% 0.025 85); --color-selected: oklch(88% 0.03 85); --color-rule: oklch(85% 0.025 85);
-  --color-code: oklch(93% 0.02 85); --color-ink: oklch(29% 0.02 65); --color-muted: oklch(48% 0.02 65);
+  --color-paper: #fbf7ef; --color-sidebar: #f5f0e6; --color-surface: #fffdf8;
+  --color-hover: #f0e9db; --color-selected: #e9dfcc; --color-rule: #e6ddcc;
+  --color-code: #f2ece0; --color-ink: #3b3327; --color-muted: #7a6f60;
+  --color-focus: #8a6d3b;
 }

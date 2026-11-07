@@ -12,6 +12,13 @@ try {
   const page = await app.firstWindow();
   page.setDefaultTimeout(15000);
   await page.locator('.cm-content').waitFor();
+  // The very first window is the deliverable: a clean Typora-like page.
+  await page.waitForTimeout(250);
+  await page.screenshot({ path: '/tmp/inkstone-live-initial.png' });
+  await page.locator('.topbar [data-command="sidebar"]').click();
+  await page.waitForTimeout(200);
+  await page.screenshot({ path: '/tmp/inkstone-live-sidebar.png' });
+  await page.locator('.topbar [data-command="sidebar"]').click();
   await page.locator('.topbar [data-command="new"]').click();
   await page.locator('.cm-content').click();
   const sample = `# 墨页 · 排版态演示
@@ -80,7 +87,15 @@ try {
   await page.locator('[data-command="theme"]').click();
   await page.waitForTimeout(400);
   await page.screenshot({ path: dark });
-  console.log('screenshots written: light, typing, ime-composition, prefixes, dark (prefixes in dark theme)');
+  // A control shot proves the dense workbench is still one preference away.
+  await page.locator('[data-command="settings"]').click();
+  await page.locator('#preferences [name="uiMode"]').selectOption('workbench');
+  await page.locator('#preferences [name="theme"]').selectOption('light');
+  await page.locator('#preferences button[type="submit"]').click();
+  await page.waitForFunction(() => document.documentElement.dataset.ui === 'workbench');
+  await page.waitForTimeout(300);
+  await page.screenshot({ path: '/tmp/inkstone-live-workbench.png' });
+  console.log('screenshots written: initial, sidebar, light, typing, ime-composition, prefixes, dark, workbench');
 } finally {
   const closed = app.waitForEvent('close');
   await app.evaluate(({ app }) => app.exit(0));

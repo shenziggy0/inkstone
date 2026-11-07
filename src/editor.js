@@ -37,11 +37,14 @@ function resolveDocPosition(view, x, y) {
 
 const modeEffect = StateEffect.define();
 const compositionEffect = StateEffect.define();
-const modeField = StateField.define({ create: () => ({ source: false, composing: false }), update(value, tr) {
+const modeField = StateField.define({ create: () => ({ source: false, composing: false, pristine: true }), update(value, tr) {
   for (const effect of tr.effects) {
     if (effect.is(modeEffect)) value = { ...value, source: effect.value };
     if (effect.is(compositionEffect)) value = { ...value, composing: effect.value };
   }
+  // Typora shows a newly opened file fully typeset. Only the first real
+  // interaction (a click, caret move or keystroke) reveals the active block.
+  if (tr.docChanged || tr.selection) value = { ...value, pristine: false };
   return value;
 } });
 
@@ -283,6 +286,9 @@ function liveDecorations(state, id) {
   const { tokens, blocks } = parsedFor(source, id);
   const htmlByStart = new Map(blocks.map(block => [block.start, block.html]));
   const ranges = [], occupied = new Set();
+  // Before any interaction, the caret at offset 0 must not turn the first
+  // heading into an editable source line; the whole document is a reading view.
+  const selection = mode.pristine ? [] : state.selection.ranges;
   for (const token of tokens) {
     if (!token.map || token.level !== 0 || token.nesting === -1) continue;
     const [start, end] = token.map;
@@ -294,7 +300,7 @@ function liveDecorations(state, id) {
     // The active block stays editable, but reads as typeset prose: syntax
     // characters are removed from the layout until the caret comes near them,
     // and the content itself receives real typography (bold, italic, code…).
-    if (state.selection.ranges.some(range => range.from <= to && range.to >= from)) {
+    if (selection.some(range => range.from <= to && range.to >= from)) {
       // Code, tables, raw HTML and front matter must stay literal source.
       const literalBlock = /^(fence|code_block|table_open|front_matter|hr|html_block)$/.test(token.type);
       for (let number = start + 1; number <= end; number++) {
@@ -303,7 +309,7 @@ function liveDecorations(state, id) {
         // Typora renders a completed syntax at once, even with the caret right
         // after the closing marker. Only a caret *inside* the element (or a
         // selection overlapping it) brings the source characters back.
-        const reveal = literalBlock ? { groups: new Set(), prefix: false } : revealFor(info, state.selection.ranges.map(range => ({
+        const reveal = literalBlock ? { groups: new Set(), prefix: false } : revealFor(info, selection.map(range => ({
           from: range.from - line.from, to: range.to - line.from
         })));
         const classes = ['cm-live-line', ...info.classes];

@@ -19,6 +19,48 @@ try {
   page.setDefaultTimeout(15000);
   page.on('pageerror', error => errors.push(error.message));
   await page.locator('.cm-content').waitFor();
+  // ── Iteration 10: the default shell must look like Typora, not an IDE ──
+  assert.equal(await page.evaluate(() => document.documentElement.dataset.ui), 'typora', '默认应为 Typora 极简外观');
+  assert.equal(await page.locator('.brand').isVisible(), false, '品牌栏不应占据标题栏');
+  assert.equal(await page.locator('.tabbar').isVisible(), false, '默认不应有标签栏');
+  assert.equal(await page.locator('.formatbar').isVisible(), false, '默认不应有排版工具栏');
+  assert.equal(await page.locator('.sidebar').isVisible(), false, '侧栏默认隐藏，像 Typora 首次打开');
+  assert.ok(await page.locator('#statistics').isVisible(), '右下角字数仍应可见');
+  const shell = await page.evaluate(() => {
+    const root = getComputedStyle(document.documentElement);
+    return {
+      topbar: document.querySelector('.topbar').getBoundingClientRect().height,
+      contentWidth: document.querySelector('.cm-content').getBoundingClientRect().width,
+      fontSize: getComputedStyle(document.querySelector('.cm-editor')).fontSize,
+      leading: getComputedStyle(document.querySelector('.cm-scroller')).lineHeight,
+      paper: getComputedStyle(document.querySelector('.cm-editor')).backgroundColor,
+      editorSize: root.getPropertyValue('--editor-size').trim(),
+      editorWidth: root.getPropertyValue('--editor-width').trim()
+    };
+  });
+  assert.equal(shell.topbar, 38, '极简标题栏应为 38px');
+  assert.equal(shell.fontSize, '16px', '正文默认字号应为 16px');
+  assert.ok(Math.abs(parseFloat(shell.leading) - 25.6) < 0.6, `正文行高应为 1.6，实际 ${shell.leading}`);
+  assert.equal(shell.paper, 'rgb(255, 255, 255)', '浅色主题应为纯白纸面');
+  assert.equal(shell.editorSize, '16px');
+  assert.equal(shell.editorWidth, '860px');
+  assert.ok(shell.contentWidth <= 860 && shell.contentWidth >= 800, `正文列宽应约 860px，实际 ${shell.contentWidth}`);
+  await page.waitForFunction(() => document.querySelectorAll('.md-widget').length >= 3);
+  assert.equal(await page.locator('.cm-live-line').count(), 0, '刚打开且未交互的文档应整篇渲染，不展开活跃块源码');
+  await page.locator('.topbar [data-command="sidebar"]').click();
+  assert.ok(await page.locator('.sidebar').isVisible(), '侧栏仍应能一键打开');
+  await page.locator('.topbar [data-command="sidebar"]').click();
+  assert.equal(await page.locator('.sidebar').isVisible(), false, '侧栏仍应能一键收起');
+  console.log('STEP default Typora-like chrome (title bar, typography, paper, sidebar toggle)');
+  // The dense workbench stays available for users who want tabs / toolbar.
+  await page.locator('[data-command="settings"]').click();
+  await page.locator('#preferences [name="uiMode"]').selectOption('workbench');
+  await page.locator('#preferences button[type="submit"]').click();
+  await page.waitForFunction(() => document.documentElement.dataset.ui === 'workbench');
+  assert.ok(await page.locator('.tabbar').isVisible(), '工作台应恢复标签栏');
+  assert.ok(await page.locator('.formatbar').isVisible(), '工作台应恢复排版工具栏');
+  assert.ok(await page.locator('.sidebar').isVisible(), '工作台应恢复侧栏');
+  console.log('STEP switch back to the full workbench');
   await page.locator('.topbar [data-command="new"]').click();
   await page.locator('.cm-content').click();
   const sample = '# Desktop verification\n\n中文与 **Markdown**。\n\n$$\nE=mc^2\n$$\n\n```mermaid\nflowchart LR\n A[Input] --> B[Output]\n```\n\n- [ ] pending\n';

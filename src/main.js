@@ -13,7 +13,7 @@ const native = !!window.desktop;
 const bridge = window.desktop || browserBridge();
 const documents = new Map();
 let activeId, folder, prefs, sideMode = 'outline', sourceMode = false, busy = false;
-let customThemes = [], selectedHistory = null, externalId = null, lastThemeKey = null;
+let customThemes = [], selectedHistory = null, externalId = null, lastThemeKey = null, lastUiMode = null;
 let capabilities = { installed: false, version: null, platform: '' }, imageContext = null;
 let pendingTable = null, quickFiles = [];
 const $ = selector => document.querySelector(selector);
@@ -85,7 +85,8 @@ async function flush(doc = current()) {
 function updateChrome() {
   const doc = current(); if (!doc) return;
   document.title = `${doc.dirty ? '• ' : ''}${doc.name} — 墨页`;
-  $('#location').textContent = doc.path || doc.name;
+  // Typora shows just the filename in the title bar, with a bullet while dirty.
+  $('#location').textContent = `${doc.dirty ? '• ' : ''}${doc.name}`;
   $('#location').title = doc.path || doc.name;
   $('#save-status').textContent = doc.error ? doc.error : doc.dirty ? '有未保存的更改' : doc.path ? '已保存' : '未保存到文件';
   $('#save-status').classList.toggle('status-error', !!doc.error);
@@ -220,6 +221,14 @@ function applyPreferences() {
   document.documentElement.style.setProperty('--editor-size', `${prefs.fontSize}px`);
   document.documentElement.style.setProperty('--editor-width', `${prefs.lineWidth}px`);
   document.documentElement.style.setProperty('--sidebar-width', `${Number(prefs.sidebarWidth) || 240}px`);
+  // Two visual shells: the default is Typora's chrome-free writing surface;
+  // the workbench keeps every tab / toolbar / status readout available.
+  const ui = prefs.uiMode === 'workbench' ? 'workbench' : 'typora';
+  document.documentElement.dataset.ui = ui;
+  if (ui !== lastUiMode) {
+    document.body.classList.toggle('sidebar-hidden', ui === 'typora' && prefs.sidebarVisible === false);
+    lastUiMode = ui;
+  }
   document.body.classList.toggle('focus-mode', prefs.focus);
   document.body.classList.toggle('typewriter-mode', prefs.typewriter);
   document.body.classList.toggle('math-numbering', !!prefs.mathNumbering);
@@ -232,6 +241,10 @@ function applyPreferences() {
   for (const doc of documents.values()) doc.editor.setSpellcheck(prefs.spellcheck);
 }
 async function setPreferences(patch) { prefs = { ...prefs, ...patch }; applyPreferences(); await api('settings', patch); }
+function setSidebarVisible(visible) {
+  document.body.classList.toggle('sidebar-hidden', !visible);
+  setPreferences({ sidebarVisible: visible }).catch(error => notify(error.message, true));
+}
 function dialogContent(title, body) {
   $('#dialog-content').innerHTML = `<div class="dialog-heading"><h2 id="dialog-title">${title}</h2><button class="icon-button" data-dismiss aria-label="关闭对话框">${icon('close')}</button></div>${body}`;
 }
@@ -267,6 +280,7 @@ const PALETTE_COMMANDS = [
   ['插入图片…', 'image', '段落', ''],
   ['源码模式', 'source', '视图', `${modKey}/`],
   ['切换侧边栏', 'sidebar', '视图', `${modKey}⇧L`],
+  ['切换界面外观（Typora / 工作台）', 'toggle-ui', '视图', ''],
   ['大纲面板', 'panel-outline', '视图', ''],
   ['文件树面板', 'panel-files', '视图', ''],
   ['文章列表面板', 'panel-articles', '视图', ''],
@@ -394,9 +408,9 @@ async function runCommand(command, detail) {
       'copy-markdown': () => api('writeClipboard', { text: selectedSource() }),
       'copy-html': () => api('writeClipboard', { text: selectedSource(), html: renderMarkdown(selectedSource(), activeId) }),
       'paste-plain': async () => { const text = await api('readClipboardText'); editor?.insert(String(text).replace(/\r\n/g, '\n')); },
-      'panel-outline': () => { sideMode = 'outline'; document.body.classList.remove('sidebar-hidden'); drawSidebar(); },
-      'panel-files': () => { sideMode = 'files'; document.body.classList.remove('sidebar-hidden'); drawSidebar(); },
-      'panel-articles': () => { sideMode = 'articles'; document.body.classList.remove('sidebar-hidden'); drawSidebar(); },
+      'panel-outline': () => { sideMode = 'outline'; setSidebarVisible(true); drawSidebar(); },
+      'panel-files': () => { sideMode = 'files'; setSidebarVisible(true); drawSidebar(); },
+      'panel-articles': () => { sideMode = 'articles'; setSidebarVisible(true); drawSidebar(); },
       'zoom-in': () => api('zoom', 1),
       'zoom-out': () => api('zoom', -1),
       'zoom-reset': () => api('zoom', 0),
@@ -422,10 +436,11 @@ async function runCommand(command, detail) {
       case 'close': await closeDocument(activeId); break;
       case 'find': editor?.find(); break;
       case 'source': sourceMode = !sourceMode; editor?.setSource(sourceMode); editor?.view.focus(); $('#mode-label').textContent = sourceMode ? 'Markdown 源码' : '即时渲染'; $('[data-command="source"]').setAttribute('aria-pressed', String(sourceMode)); break;
-      case 'sidebar': document.body.classList.toggle('sidebar-hidden'); break;
+      case 'sidebar': setSidebarVisible(document.body.classList.contains('sidebar-hidden')); break;
       case 'focus': await setPreferences({ focus: !prefs.focus }); break;
       case 'typewriter': await setPreferences({ typewriter: !prefs.typewriter }); break;
       case 'theme': await setPreferences({ theme: ['light', 'dark', 'sepia'][(['light', 'dark', 'sepia'].indexOf(prefs.theme) + 1) % 3] }); break;
+      case 'toggle-ui': await setPreferences({ uiMode: prefs.uiMode === 'workbench' ? 'typora' : 'workbench' }); break;
       case 'quote': editor?.prefix('> '); break;
       case 'task': editor?.prefix('- [ ] '); break;
       case 'image': await insertImage(); break;
@@ -446,7 +461,7 @@ async function runCommand(command, detail) {
       case 'settings': {
         customThemes = await api('listThemes');
         const options = [['light', '浅色'], ['dark', '深色'], ['sepia', '纸张'], ...customThemes.map(name => [`custom:${name}`, `自定义 · ${name.replace(/\.css$/i, '')}`])];
-        showDialog('偏好设置', `<form id="preferences"><label>外观<select name="theme">${options.map(([value, label]) => `<option value="${escapeHTML(value)}" ${prefs.theme === value ? 'selected' : ''}>${escapeHTML(label)}</option>`).join('')}</select></label><label>正文字号<input name="fontSize" type="number" min="12" max="30" value="${prefs.fontSize}"></label><label>正文宽度<input name="lineWidth" type="number" min="560" max="1100" step="20" value="${prefs.lineWidth}"></label>${[['autoSave', '自动保存已命名的文件'], ['spellcheck', '拼写检查'], ['focus', '专注模式'], ['typewriter', '打字机模式'], ['mathNumbering', '公式自动编号'], ['headingNumbering', '标题自动编号'], ['showFormatbar', '显示排版工具栏']].map(([key, label]) => `<label class="checkbox-label"><span>${label}</span><input type="checkbox" name="${key}" ${prefs[key] ? 'checked' : ''}></label>`).join('')}<div class="dialog-actions"><button type="button" data-menu-command="themes-folder">打开主题文件夹</button><button class="primary" type="submit">保存设置</button></div></form>`);
+        showDialog('偏好设置', `<form id="preferences"><label>主题<select name="theme">${options.map(([value, label]) => `<option value="${escapeHTML(value)}" ${prefs.theme === value ? 'selected' : ''}>${escapeHTML(label)}</option>`).join('')}</select></label><label>界面外观<select name="uiMode"><option value="typora" ${prefs.uiMode !== 'workbench' ? 'selected' : ''}>Typora 极简（默认）</option><option value="workbench" ${prefs.uiMode === 'workbench' ? 'selected' : ''}>工作台（标签 / 工具栏 / 状态栏）</option></select></label><label>正文字号<input name="fontSize" type="number" min="12" max="30" value="${prefs.fontSize}"></label><label>正文宽度<input name="lineWidth" type="number" min="560" max="1100" step="20" value="${prefs.lineWidth}"></label>${[['autoSave', '自动保存已命名的文件'], ['spellcheck', '拼写检查'], ['focus', '专注模式'], ['typewriter', '打字机模式'], ['mathNumbering', '公式自动编号'], ['headingNumbering', '标题自动编号'], ['showFormatbar', '显示排版工具栏']].map(([key, label]) => `<label class="checkbox-label"><span>${label}</span><input type="checkbox" name="${key}" ${prefs[key] ? 'checked' : ''}></label>`).join('')}<div class="dialog-actions"><button type="button" data-menu-command="themes-folder">打开主题文件夹</button><button class="primary" type="submit">保存设置</button></div></form>`);
         break;
       }
       case 'document-menu': showDialog('文档操作', `<div class="menu-list">${[['save-as', '另存为…'], ['rename', '重命名 / 移动…'], ['reveal', '在系统文件管理器中显示'], ['history', '查看保存历史'], ['toc', '插入文内目录'], ['task', '插入任务项'], ['quote', '插入引用'], ['trash', '移到废纸篓']].map(([key, label]) => `<button data-menu-command="${key}">${label}</button>`).join('')}</div>`); break;
@@ -611,7 +626,7 @@ document.addEventListener('click', async event => {
 document.addEventListener('submit', async event => {
   if (event.target.id !== 'preferences') return;
   event.preventDefault(); const data = new FormData(event.target);
-  const patch = { theme: data.get('theme'), fontSize: Number(data.get('fontSize')), lineWidth: Number(data.get('lineWidth')) };
+  const patch = { theme: data.get('theme'), uiMode: data.get('uiMode'), fontSize: Number(data.get('fontSize')), lineWidth: Number(data.get('lineWidth')) };
   for (const key of ['autoSave', 'spellcheck', 'focus', 'typewriter', 'mathNumbering', 'headingNumbering', 'showFormatbar']) patch[key] = data.has(key);
   try { await setPreferences(patch); $('#dialog').close(); } catch (error) { notify(error.message, true); }
 });
