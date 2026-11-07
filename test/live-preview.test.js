@@ -75,6 +75,43 @@ test('an incomplete list item is a bullet, never a table delimiter row', () => {
   assert.equal(liveLine('---').prefix.kind, 'hr');
 });
 
+test('content-free block prefixes typeset the instant they are complete', () => {
+  // A lone bullet marker is a valid empty list item in CommonMark, so it must
+  // not stay as a bare `-` until the user types item text.
+  for (const line of ['-', '*', '+', '- ', '  - ']) {
+    const info = liveLine(line);
+    assert.equal(info.prefix?.kind, 'bullet', `${JSON.stringify(line)} 应即时显示项目符号`);
+    assert.equal(info.plain, false);
+    assert.equal(revealFor(info, [{ from: line.length, to: line.length }]).prefix, false,
+      `${JSON.stringify(line)} 行尾光标不应让语法裸露`);
+  }
+  assert.deepEqual(liveLine('-').prefix, { from: 0, to: 1, kind: 'bullet' });
+
+  // `- [ ]` / `- [x]` are complete task items even with no text after them.
+  // `[]` is the intermediate state created by bracket autoclosing.
+  for (const [line, checked] of [['- [ ]', false], ['- [x]', true], ['- [X]', true], ['- []', false], ['- [ ] ', false], ['1. [x]', true], ['* [ ] 待办', false]]) {
+    const info = liveLine(line);
+    assert.equal(info.prefix?.kind, 'task', `${JSON.stringify(line)} 应即时显示复选框`);
+    assert.equal(info.prefix.checked, checked, `${JSON.stringify(line)} 勾选状态`);
+    assert.deepEqual(info.marks, [], `${JSON.stringify(line)} 的 [ ] 必须整体属于前缀，不能留下裸语法`);
+    assert.equal(revealFor(info, [{ from: info.prefix.to, to: info.prefix.to }]).prefix, false,
+      `${JSON.stringify(line)} 前缀闭合后应立即排版`);
+    assert.equal(revealFor(info, [{ from: 0, to: 0 }]).prefix, true,
+      `${JSON.stringify(line)} 光标回到行首应显现源码`);
+    assert.ok(info.classes.includes('cm-lv-task'));
+  }
+  assert.equal(liveLine('- [ ]').prefix.checkOffset, 3);
+  assert.equal('- [ ]'[liveLine('- [ ]').prefix.checkOffset], ' ');
+  assert.equal(liveLine('- [x]').prefix.checkOffset, 3);
+
+  // A bare quote marker and a bare ordered marker are complete blocks too.
+  for (const [line, kind] of [['>', 'quote'], ['> ', 'quote'], ['>>', 'quote'], ['1.', 'ordered'], ['1. ', 'ordered']]) {
+    assert.equal(liveLine(line).prefix?.kind, kind, `${JSON.stringify(line)} 应即时排版`);
+    assert.equal(revealFor(liveLine(line), [{ from: line.length, to: line.length }]).prefix, false);
+  }
+  assert.equal(liveLine('- [ ] 任务').prefix.kind, 'task', '有正文的任务项不能被破坏');
+});
+
 test('stray delimiters are dim, underscores inside words are content', () => {
   assert.deepEqual(bare(liveLine('一段 * 文字').marks), [{ from: 3, to: 4, kind: 'soft' }]);
   assert.deepEqual(liveLine('变量 snake_case 结束').marks, []);

@@ -24,11 +24,16 @@
  * behaviour can be locked down by unit tests.
  */
 
-const TASK_PREFIX = /^(\s{0,3})([-*+]|\d+[.)])\s+\[([ xX])\]\s+/;
+// A block prefix is complete even when the line has no content after it.
+// `-`, `- [ ]`, `- [x]`, `1.` and `>` are all valid (and parsed as lists /
+// quotes by CommonMark on their own), so they must typeset the moment the
+// last character is typed. `[]` also counts: CodeMirror's bracket autoclosing
+// produces it while `- [ ]` is being typed.
+const TASK_PREFIX = /^(\s{0,3})([-*+]|\d+[.)])[ \t]+\[([ xX]?)\](?:[ \t]+|$)/;
 const HEADING_PREFIX = /^(\s{0,3})(#{1,6})[ \t]+/;
 const QUOTE_PREFIX = /^(\s{0,3}>+)[ \t]?/;
-const BULLET_PREFIX = /^(\s{0,3})([-*+])[ \t]+/;
-const ORDERED_PREFIX = /^(\s{0,3})(\d+[.)])[ \t]+/;
+const BULLET_PREFIX = /^(\s{0,3})([-*+])(?:[ \t]+|$)/;
+const ORDERED_PREFIX = /^(\s{0,3})(\d+[.)])(?:[ \t]+|$)/;
 const FENCE_PREFIX = /^\s{0,3}(?:```|~~~)/;
 const HR_LINE = /^\s{0,3}(?:-{3,}|\*{3,}|_{3,})[ \t]*$/;
 // A GFM delimiter row always contains a pipe. Without this check a lone `-`
@@ -206,7 +211,7 @@ export function liveLine(line) {
   const bullet = BULLET_PREFIX.exec(line);
   const ordered = ORDERED_PREFIX.exec(line);
   if (task) {
-    const checked = task[3] !== ' ';
+    const checked = /[xX]/.test(task[3]);
     out.prefix = {
       from: task[1].length, to: task[0].length, kind: 'task', checked,
       checkOffset: task[0].lastIndexOf('[') + 1

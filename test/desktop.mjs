@@ -461,6 +461,40 @@ try {
   assert.ok(await page.locator('.cm-lv-code').count() >= 1, '闭合反引号后应立即显示行内代码样式');
   assert.ok(!(await page.locator('.cm-content').textContent()).includes('`'), '闭合反引号后不应裸露反引号');
   console.log('STEP immediate heading, bullet, ordered list and code span typesetting');
+  // Content-free block prefixes used to stay raw until item text was typed:
+  // `-`, `- [ ]` and `>` must typeset on the last keystroke of the marker.
+  await fresh();
+  await page.keyboard.type('-', { delay: 25 });
+  await page.locator('.cm-prefix-bullet').waitFor();
+  assert.ok(!(await page.locator('.cm-content').textContent()).includes('-'), '单独一个 - 应立即显示项目符号');
+  await fresh();
+  await page.keyboard.type('- [ ]', { delay: 25 });
+  await page.locator('.cm-prefix-task').waitFor();
+  assert.equal(await page.locator('.cm-prefix-task').textContent(), '☐', '无正文的 - [ ] 应立即显示复选框');
+  assert.ok(!(await page.locator('.cm-content').textContent()).includes('[ ]'), '任务标记不应裸露');
+  await page.keyboard.type(' 待办', { delay: 25 });
+  assert.equal(await page.locator('.cm-prefix-task').count(), 1, '继续输入正文后仍应是任务项');
+  await fresh();
+  await page.keyboard.type('>', { delay: 25 });
+  await page.locator('.cm-lv-quote').waitFor();
+  assert.equal(await page.locator('.cm-hidden-mark').count(), 1, '引用前缀应立即隐藏');
+  assert.ok(!(await page.locator('.cm-content').textContent()).includes('>'), '引用标记不应裸露');
+  await page.keyboard.type(' 引用文字', { delay: 25 });
+  assert.ok((await page.locator('.cm-content').textContent()).includes('引用文字'), '引用正文应可见');
+  console.log('STEP immediate typesetting for empty list, task and quote prefixes');
+  // Leaving the block must not bring the raw `[ ]` back: the rendered widget
+  // has to agree with the checkbox shown while the line was being typed.
+  await fresh();
+  await page.keyboard.insertText('- [ ]\n-\n>\n\n尾段');
+  await page.waitForFunction(() => document.querySelectorAll('.md-widget').length >= 2);
+  assert.equal(await page.locator('.md-widget input[type="checkbox"]').count(), 1, '离开块后空任务项仍应渲染为复选框');
+  assert.ok(!(await page.locator('.md-widget').first().textContent()).includes('[ ]'), '渲染态不应出现裸 [ ]');
+  assert.equal(await page.locator('.md-widget blockquote').count(), 1, '空引用行应保留可见的引用容器');
+  await page.locator('.md-widget input[type="checkbox"]').first().click();
+  await page.locator('[data-command="source"]').click();
+  assert.match(await sourceText(), /- \[x\]/, '点击渲染态复选框应写回真实源码');
+  await ensureLive();
+  console.log('STEP rendered empty task item stays a checkbox and toggles source');
   // `:shortcode` autocompletion writes the Unicode glyph into the source.
   await page.locator('.topbar [data-command="new"]').click();
   await page.locator('.cm-content').click();
@@ -519,7 +553,7 @@ try {
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 2), false, '窄屏不应产生横向溢出');
   console.log('STEP narrow desktop viewport');
   assert.deepEqual(errors, []);
-  console.log('PASS: native startup, editing, undo/redo, character-level click positioning, source mode, save, math, Mermaid labels, task toggle, external conflict + live notification, self-contained fonts in HTML, PDF, version history, preferences, custom CSS theme + themed HTML export, typewriter, dark mode, cross-block rendering parity, graphical table editing, clipboard HTML/Markdown, command palette, persisted zoom, cross-block drag selection, typeset live preview + syntax reveal, grouped undo, frameless chrome, code copy, article panel, resizable sidebar, heading numbering, version diff, outline drag reorder, window bounds, table Tab navigation, 200k+ source fallback, toolbar-free layout, typing in typeset mode, in-place table cells, Enter rows, draggable columns, emoji autocomplete + picker, Pandoc gating, image context menu, independent new window, narrow desktop viewport, immediate typeset on closing delimiter, immediate heading/bullet/ordered/code typesetting.');
+  console.log('PASS: native startup, editing, undo/redo, character-level click positioning, source mode, save, math, Mermaid labels, task toggle, external conflict + live notification, self-contained fonts in HTML, PDF, version history, preferences, custom CSS theme + themed HTML export, typewriter, dark mode, cross-block rendering parity, graphical table editing, clipboard HTML/Markdown, command palette, persisted zoom, cross-block drag selection, typeset live preview + syntax reveal, grouped undo, frameless chrome, code copy, article panel, resizable sidebar, heading numbering, version diff, outline drag reorder, window bounds, table Tab navigation, 200k+ source fallback, toolbar-free layout, typing in typeset mode, in-place table cells, Enter rows, draggable columns, emoji autocomplete + picker, Pandoc gating, image context menu, independent new window, narrow desktop viewport, immediate typeset on closing delimiter, immediate heading/bullet/ordered/code typesetting, immediate empty list/task/quote prefixes, rendered empty task checkbox.');
   if (process.env.INKSTONE_SCREENSHOT) await page.screenshot({ path: process.env.INKSTONE_SCREENSHOT });
 } finally {
   const closed = app.waitForEvent('close');

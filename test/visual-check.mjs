@@ -50,10 +50,25 @@ try {
   await page.keyboard.insertText('# 即时排版验收\n\n普通段落含 **加粗**、`代码`、~~删除线~~、==高亮== 与 [链接](https://example.com)。\n\n- 第一项\n- 第二项\n\n1. 有序项\n2. 另一个有序项');
   await page.waitForTimeout(500);
   await page.screenshot({ path: '/tmp/inkstone-live-typing.png' });
+  // Third shot: type the three content-free prefixes character by character.
+  // insertText supplies line breaks so CodeMirror's newline continuation does
+  // not duplicate the list markers; the markers themselves are real keystrokes.
+  await page.locator('.topbar [data-command="new"]').click();
+  await page.locator('.cm-content').click();
+  await page.keyboard.type('# 前缀即时排版', { delay: 12 });
+  await page.keyboard.insertText('\n\n');
+  await page.keyboard.type('- [ ]', { delay: 25 });
+  await page.keyboard.insertText('\n');
+  await page.keyboard.type('-', { delay: 25 });
+  await page.keyboard.insertText('\n- [x] 已完成，用于对照勾选态复选框\n');
+  await page.keyboard.type('>', { delay: 25 });
+  await page.keyboard.insertText('\n> 引用文字，用于对照上方的空引用行。');
+  await page.waitForTimeout(500);
+  await page.screenshot({ path: '/tmp/inkstone-live-prefixes.png' });
   await page.locator('[data-command="theme"]').click();
   await page.waitForTimeout(400);
   await page.screenshot({ path: dark });
-  console.log(`screenshots written: ${light}, ${dark}, /tmp/inkstone-live-typing.png`);
+  console.log('screenshots written: light, typing, prefixes, dark (prefixes in dark theme)');
 } finally {
   const closed = app.waitForEvent('close');
   await app.evaluate(({ app }) => app.exit(0));

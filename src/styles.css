@@ -96,7 +96,7 @@ details[open] > summary::before { content: '⌄'; }
 .cm-line.cm-lv-h2 { font-size: 1.45em; font-weight: 650; letter-spacing: -.02em; line-height: 1.4; }
 .cm-line.cm-lv-h3 { font-size: 1.15em; font-weight: 650; line-height: 1.45; }
 .cm-line.cm-lv-h4, .cm-line.cm-lv-h5, .cm-line.cm-lv-h6 { font-size: 1em; font-weight: 650; }
-.cm-line.cm-lv-quote { box-shadow: inset 3px 0 var(--color-rule); padding-left: 1em !important; color: var(--color-muted); }
+.cm-line.cm-lv-quote { box-shadow: inset 3px 0 var(--color-rule); padding-left: 1em !important; color: var(--color-muted); min-height: 1.6em; }
 .cm-line.cm-lv-list { padding-left: .15em !important; }
 .cm-line.cm-lv-table, .cm-line.cm-lv-fence { font-family: var(--font-code); font-size: .9em; }
 .cm-editor .cm-lv-strong { font-weight: 650; }
@@ -121,13 +121,18 @@ details[open] > summary::before { content: '⌄'; }
 .prose pre code { padding: 0; background: transparent; display: block; line-height: 1.75; font-size: 13px; }
 .code-language { display: block; color: var(--color-muted); position: absolute; top: 6px; right: 12px; font: 10px var(--font-code); }
 .prose blockquote { margin: 1em 0; border-left: 3px solid var(--color-rule); padding: .2em 1em; color: var(--color-muted); }
+.prose blockquote:empty { min-height: 1.6em; }
 .prose ul, .prose ol { padding-left: 1.6em; margin: .7em 0; }
 .prose li { padding-left: .2em; }
 /* markdown-it-task-lists tags the whole <ul> when any item is a checkbox.
    Removing the marker there would also strip bullets from ordinary items. */
 .prose .contains-task-list { padding-left: 1.6em; }
 .prose .task-list-item { list-style: none; }
-.prose .task-list-item-checkbox { margin: 0 .6em 0 .15em; vertical-align: middle; }
+/* Native checkboxes use a system-dark border in dark theme and nearly vanish.
+   Draw the box ourselves so empty task items stay visible in every theme. */
+.prose .task-list-item-checkbox { appearance: none; -webkit-appearance: none; display: inline-block; position: relative; width: 15px; height: 15px; margin: 0 .6em 0 .15em; border: 1.5px solid var(--color-muted); border-radius: 3px; background: var(--color-surface); vertical-align: middle; cursor: pointer; }
+.prose .task-list-item-checkbox:checked { background: var(--color-focus); border-color: var(--color-focus); }
+.prose .task-list-item-checkbox:checked::after { content: ''; position: absolute; left: 4px; top: 1px; width: 4px; height: 8px; border: solid var(--color-on-accent); border-width: 0 2px 2px 0; transform: rotate(45deg); }
 .prose table { border-collapse: collapse; width: 100%; margin: 1em 0; font-size: .9em; }
 .prose th, .prose td { padding: .5em .85em; border: 1px solid var(--color-rule); text-align: left; }
 .prose th { background: var(--color-code); font-weight: 600; position: relative; }

@@ -111,6 +111,23 @@ function finalizeHTML(html, documentId, toc) {
   }
   for (const link of template.content.querySelectorAll('a')) link.rel = 'noopener noreferrer';
   for (const checkbox of template.content.querySelectorAll('input')) checkbox.setAttribute('aria-label', '切换任务完成状态');
+  // markdown-it-task-lists only recognises `[ ] ` when text follows the box.
+  // A bare `- [ ]` line otherwise renders as literal `[ ]`, contradicting the
+  // checkbox the live preview already shows while that line is being typed.
+  // Normalise empty task items so the rendered and active block agree.
+  for (const item of template.content.querySelectorAll('li')) {
+    if (item.querySelector('input, pre, table, ul, ol, blockquote, img')) continue;
+    const match = /^\[([ xX])\]$/.exec((item.textContent || '').trim());
+    if (!match) continue;
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.className = 'task-list-item-checkbox';
+    input.setAttribute('aria-label', '切换任务完成状态');
+    if (match[1] !== ' ') input.checked = true;
+    item.classList.add('task-list-item', 'enabled');
+    item.parentElement?.classList.add('contains-task-list');
+    item.replaceChildren(input);
+  }
   // A copy affordance on every fenced code block. Inserted after sanitising,
   // so no untrusted markup is reintroduced into the document.
   for (const pre of template.content.querySelectorAll('pre.code-block')) {
