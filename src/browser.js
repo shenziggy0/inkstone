@@ -12,7 +12,7 @@ export function browserBridge() {
     setTimeout(() => URL.revokeObjectURL(url), 10000);
   };
   const actions = {
-    bootstrap: () => ({ documents: [], preferences: { theme: 'light', fontSize: 17, lineWidth: 760, autoSave: false, focus: false, typewriter: false, spellcheck: true, mathNumbering: false, headingNumbering: false, sidebarWidth: 240, zoomLevel: 0, windowBounds: null, windowMaximized: false, showFormatbar: true }, platform: navigator.platform.includes('Mac') ? 'darwin' : 'win32' }),
+    bootstrap: () => ({ documents: [], preferences: { theme: 'light', fontSize: 16, lineWidth: 860, autoSave: false, focus: false, typewriter: false, spellcheck: true, mathNumbering: false, headingNumbering: false, sidebarWidth: 240, zoomLevel: 0, windowBounds: null, windowMaximized: false, showFormatbar: true, uiMode: 'typora', sidebarVisible: false }, platform: navigator.platform.includes('Mac') ? 'darwin' : 'win32' }),
     newDocument: create,
     updateDocument(id, content) { const doc = docs.get(id); doc.content = content; doc.dirty = true; return { ...doc }; },
     async openDocument() {

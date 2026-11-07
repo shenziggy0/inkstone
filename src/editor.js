@@ -2,7 +2,7 @@ import { EditorState, StateEffect, StateField, Compartment, EditorSelection } fr
 import { EditorView, Decoration, WidgetType, keymap, drawSelection, highlightActiveLine, lineNumbers, placeholder } from '@codemirror/view';
 import { defaultKeymap, history, historyKeymap, indentWithTab, undo, redo, selectLine, selectParentSyntax, indentMore, indentLess, cursorDocStart, cursorDocEnd, deleteLine, deleteGroupBackward } from '@codemirror/commands';
 import { markdown, markdownKeymap } from '@codemirror/lang-markdown';
-import { syntaxHighlighting, defaultHighlightStyle, bracketMatching, indentOnInput } from '@codemirror/language';
+import { syntaxHighlighting, defaultHighlightStyle, bracketMatching, indentOnInput, syntaxTree } from '@codemirror/language';
 import { search, searchKeymap, highlightSelectionMatches, openSearchPanel } from '@codemirror/search';
 import { closeBrackets, closeBracketsKeymap, autocompletion } from '@codemirror/autocomplete';
 import { emojiCompletion } from './emoji.js';
@@ -61,13 +61,12 @@ class MarkdownWidget extends WidgetType {
     // Fall back to the block start (after a heading marker) when a click lands
     // on generated UI with no source counterpart, e.g. math, diagrams, TOC.
     const fallback = this.source.match(/^#{1,6} /)?.[0].length || 0;
-    // The widget source is LF-normalized, but document positions use the real
-    // line separator. CRLF files therefore need one extra character per break.
-    const eolExtra = Math.max(0, (view.state.lineBreak || '\n').length - 1);
     const toDocOffset = offset => {
       const clamped = Math.min(Math.max(offset, 0), this.source.length);
-      const breaks = (this.source.slice(0, clamped).match(/\n/g) || []).length;
-      return Math.min(this.to, this.from + clamped + breaks * eolExtra);
+      // CodeMirror positions always count its normalized internal line break
+      // as one character. The configured CRLF separator is used only when
+      // serializing text back out of the state.
+      return Math.min(this.to, this.from + clamped);
     };
     // Consumed by resolveDocPosition for cross-block drag selection.
     element._inkstone = { map: sourceMap, source: this.source, fallback, toDoc: toDocOffset };
@@ -78,7 +77,7 @@ class MarkdownWidget extends WidgetType {
       event.preventDefault();
       element.dispatchEvent(new CustomEvent('inkstone:table-edit', {
         bubbles: true,
-        detail: { source: this.source, from: this.from, eolExtra, index: [...element.querySelectorAll('table')].indexOf(cell.closest('table')) }
+        detail: { source: this.source, from: this.from, index: [...element.querySelectorAll('table')].indexOf(cell.closest('table')) }
       }));
     });
     // Column resize handles are added after the text→source map is built so
@@ -165,20 +164,57 @@ class MarkdownWidget extends WidgetType {
         }
         return;
       }
-      // A single click edits a table cell in place: the block becomes literal
-      // source with the clicked cell selected, so typing replaces its value.
-      // Alt+click (or the palette command) still opens the grid dialog.
+      // A single click edits the rendered cell itself, like Typora. The source
+      // range is updated when editing finishes; Alt+click still opens the full
+      // grid dialog for structural changes.
       const cell = event.target.closest('td, th');
       if (cell) {
         event.preventDefault();
-        const detail = {
-          source: this.source, from: this.from, eolExtra,
-          index: [...element.querySelectorAll('table')].indexOf(cell.closest('table')),
-          row: cell.parentElement.rowIndex, column: cell.cellIndex
+        const tableIndex = [...element.querySelectorAll('table')].indexOf(cell.closest('table'));
+        const detail = { source: this.source, from: this.from, index: tableIndex };
+        if (event.altKey) {
+          element.dispatchEvent(new CustomEvent('inkstone:table-edit', { bubbles: true, detail }));
+          return;
+        }
+        const table = parseTables(this.source)[tableIndex];
+        const row = cell.parentElement.rowIndex, column = cell.cellIndex;
+        const lines = table ? this.source.slice(table.start, table.end).split('\n') : [];
+        const lineIndex = row === 0 ? 0 : row + 1;
+        let offset = table?.start || 0;
+        for (let index = 0; index < lineIndex; index++) offset += lines[index].length + 1;
+        const range = tableCellRanges(lines[lineIndex] || '')[column];
+        if (!range) return;
+        const original = (cell.childNodes[0]?.textContent || cell.textContent || '').trim();
+        cell.replaceChildren(document.createTextNode(original));
+        cell.contentEditable = 'plaintext-only';
+        cell.classList.add('table-cell-editing');
+        const commit = () => {
+          if (!cell.isContentEditable) return;
+          cell.contentEditable = 'false';
+          const value = (cell.textContent || '').replace(/[\r\n]+/g, ' ').replace(/(?<!\\)\|/g, '\\|').trim();
+          document.dispatchEvent(new CustomEvent('inkstone:table-cell-commit', {
+            detail: { from: toDocOffset(offset + range.from), to: toDocOffset(offset + range.to), text: value }
+          }));
         };
-        element.dispatchEvent(new CustomEvent(event.altKey ? 'inkstone:table-edit' : 'inkstone:table-cell', {
-          bubbles: true, detail
-        }));
+        cell.addEventListener('blur', commit, { once: true });
+        cell.addEventListener('keydown', key => {
+          if (key.key === 'Escape') {
+            key.preventDefault();
+            cell.textContent = original;
+            cell.contentEditable = 'false';
+            cell.classList.remove('table-cell-editing');
+            view.focus();
+          } else if (key.key === 'Enter' || key.key === 'Tab') {
+            key.preventDefault();
+            commit();
+          }
+        });
+        queueMicrotask(() => {
+          cell.focus();
+          const selection = window.getSelection(), editingRange = document.createRange();
+          editingRange.selectNodeContents(cell);
+          selection.removeAllRanges(); selection.addRange(editingRange);
+        });
         return;
       }
       event.preventDefault();
@@ -235,6 +271,18 @@ class HiddenMark extends WidgetType {
   ignoreEvent() { return true; }
 }
 const hiddenMark = new HiddenMark();
+
+class RenderedInline extends WidgetType {
+  constructor(text) { super(); this.text = text; }
+  eq(other) { return this.text === other.text; }
+  toDOM() {
+    const span = document.createElement('span');
+    span.className = 'cm-rendered-inline';
+    span.textContent = this.text;
+    return span;
+  }
+  ignoreEvent() { return true; }
+}
 
 /** Bullets, task boxes and rules replace their source prefix in the layout. */
 class PrefixWidget extends WidgetType {
@@ -334,6 +382,11 @@ function liveDecorations(state, id) {
         for (const style of info.styles) {
           ranges.push(Decoration.mark({ class: `cm-lv-${style.kind}` }).range(line.from + style.from, line.from + style.to));
         }
+        for (const replacement of info.replacements || []) {
+          const from = line.from + replacement.from, to = line.from + replacement.to;
+          if (reveal.groups.has(replacement.group)) ranges.push(Decoration.mark({ class: 'cm-md-mark' }).range(from, to));
+          else ranges.push(Decoration.replace({ widget: new RenderedInline(replacement.text) }).range(from, to));
+        }
         if (info.prefix) {
           const prefixFrom = line.from + info.prefix.from, prefixTo = line.from + info.prefix.to;
           if (reveal.prefix) {
@@ -377,7 +430,15 @@ const isDelimiterRow = text => {
 
 /** Enter inside a GFM table appends a row instead of breaking the table. */
 function tableEnter(view) {
+  let node = syntaxTree(view.state).resolveInner(view.state.selection.main.head, -1);
+  while (node) {
+    if (/^(?:FencedCode|CodeBlock|HTMLBlock)$/.test(node.name)) return false;
+    node = node.parent;
+  }
   const line = view.state.doc.lineAt(view.state.selection.main.head);
+  if (/^ {4}|^\t/.test(line.text)) return false;
+  const table = parseTables(view.state.doc.toString()).find(candidate => candidate.start <= line.from && line.to <= candidate.end);
+  if (!table) return false;
   const cells = tableCellRanges(line.text);
   if (cells.length < 2 || isDelimiterRow(line.text)) return false;
   const next = line.number < view.state.doc.lines ? view.state.doc.line(line.number + 1) : null;
@@ -388,6 +449,32 @@ function tableEnter(view) {
     selection: { anchor: at + 2 }, scrollIntoView: true
   });
   view.focus();
+  return true;
+}
+
+/** Typora's Return creates a new paragraph; Shift+Return keeps a soft break. */
+function paragraphEnter(view) {
+  if (tableEnter(view)) return true;
+  const range = view.state.selection.main;
+  const line = view.state.doc.lineAt(range.head);
+  if (!line.text) return false;
+  let node = syntaxTree(view.state).resolveInner(range.head, -1);
+  let paragraph = false;
+  while (node) {
+    if (/^(?:FencedCode|CodeBlock|HTMLBlock|Blockquote|ListItem|BulletList|OrderedList)$/.test(node.name)) return false;
+    if (node.name === 'Paragraph' || /^ATXHeading[1-6]$/.test(node.name)) paragraph = true;
+    node = node.parent;
+  }
+  if (!paragraph) return false;
+  // A following source newline already supplies half of the blank separator.
+  const insert = range.empty && range.head === line.to && line.to < view.state.doc.length ? '\n' : '\n\n';
+  view.dispatch({ changes: { from: range.from, to: range.to, insert }, selection: { anchor: range.from + insert.length }, scrollIntoView: true });
+  return true;
+}
+
+function softBreak(view) {
+  const range = view.state.selection.main;
+  view.dispatch({ changes: { from: range.from, to: range.to, insert: '\n' }, selection: { anchor: range.from + 1 }, scrollIntoView: true });
   return true;
 }
 
@@ -445,7 +532,8 @@ export function createEditor(parent, doc, onChange, onSelection, onCommand, onIm
       keymap.of([
         { key: 'Tab', run: view => tableTab(view, false) },
         { key: 'Shift-Tab', run: view => tableTab(view, true) },
-        { key: 'Enter', run: tableEnter },
+        { key: 'Enter', run: paragraphEnter },
+        { key: 'Shift-Enter', run: softBreak },
         { key: 'Mod-b', run: dispatch('bold') },
         { key: 'Mod-i', run: dispatch('italic') },
         { key: 'Mod-k', run: dispatch('link') },
@@ -554,20 +642,6 @@ export function createEditor(parent, doc, onChange, onSelection, onCommand, onIm
     /** Minimal, selection-preserving edit (used for persisted table widths). */
     applyChange({ from, to, insert }) {
       view.dispatch({ changes: { from, to, insert } });
-      view.focus();
-    },
-    /** Select the clicked rendered cell's source text so typing replaces it. */
-    focusTableCell({ source, from, eolExtra = 0, index = 0, row = 0, column = 0 }) {
-      const table = parseTables(source)[index];
-      if (!table) return;
-      const lines = source.slice(table.start, table.end).split('\n');
-      const lineIndex = Math.min(lines.length - 1, row === 0 ? 0 : row + 1);
-      let offset = table.start;
-      for (let i = 0; i < lineIndex; i++) offset += lines[i].length + 1;
-      const cell = tableCellRanges(lines[lineIndex])[column];
-      if (!cell) return;
-      const toDoc = value => from + value + eolExtra * (source.slice(0, value).split('\n').length - 1);
-      view.dispatch({ selection: EditorSelection.range(toDoc(offset + cell.from), toDoc(offset + cell.to)) });
       view.focus();
     },
     wrap(before, after = before, fallback = '文字') {

@@ -110,6 +110,12 @@ details[open] > summary::before { content: '⌄'; }
 .cm-editor .cm-lv-link { color: var(--color-focus); text-decoration: none; }
 .cm-editor .cm-lv-image { color: var(--color-focus); }
 .cm-editor .cm-lv-math { font-family: var(--font-code); font-size: .92em; }
+.cm-editor .cm-lv-sub { vertical-align: sub; font-size: .78em; }
+.cm-editor .cm-lv-sup { vertical-align: super; font-size: .78em; }
+.cm-editor .cm-lv-u { text-decoration: underline; }
+.cm-editor .cm-lv-literal { color: var(--color-ink) !important; font: inherit; }
+.cm-editor .cm-lv-kbd { font-family: var(--font-code); font-size: .82em; background: var(--color-code); border: 1px solid var(--color-rule); border-radius: 3px; padding: 0 .25em; }
+.cm-rendered-inline { font-family: var(--font-body); font-style: normal; }
 .prose { color: var(--color-ink); font-size: var(--editor-size); font-family: var(--font-body); line-height: var(--editor-leading); }
 .prose > :first-child { margin-top: 0; }
 .prose > :last-child { margin-bottom: 0; }
@@ -142,6 +148,7 @@ details[open] > summary::before { content: '⌄'; }
 .prose .task-list-item-checkbox:checked { background: var(--color-focus); border-color: var(--color-focus); }
 .prose .task-list-item-checkbox:checked::after { content: ''; position: absolute; left: 4px; top: 1px; width: 4px; height: 8px; border: solid var(--color-on-accent); border-width: 0 2px 2px 0; transform: rotate(45deg); }
 .prose table { border-collapse: collapse; width: 100%; margin: .8em 0; font-size: .9em; }
+.prose .table-cell-editing { outline: 2px solid var(--color-focus); outline-offset: -2px; background: var(--color-paper); cursor: text; }
 .prose th, .prose td { padding: 6px 13px; border: 1px solid var(--color-rule); text-align: left; }
 .prose th { background: var(--color-code); font-weight: 600; position: relative; }
 .table-column-resizer { position: absolute; top: 0; right: -4px; width: 9px; height: 100%; cursor: col-resize; z-index: 2; pointer-events: none; }

@@ -126,20 +126,28 @@ class DocumentStore {
       if (this.recoveryDirectory) await fs.unlink(path.join(this.recoveryDirectory, `${id}.json`)).catch(() => {});
     });
   }
-  async recoverAll() {
+  async recoverAll(includeNested = false) {
     if (!this.recoveryDirectory) return [];
     await fs.mkdir(this.recoveryDirectory, { recursive: true });
     const recovered = [];
-    for (const name of await fs.readdir(this.recoveryDirectory)) {
-      if (!name.endsWith('.json')) continue;
+    const files = [];
+    const collect = async directory => {
+      for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+        const file = path.join(directory, entry.name);
+        if (entry.isFile() && entry.name.endsWith('.json')) files.push(file);
+        else if (includeNested && entry.isDirectory() && entry.name.startsWith('window-')) await collect(file);
+      }
+    };
+    await collect(this.recoveryDirectory);
+    for (const file of files) {
       try {
-        const record = JSON.parse(await fs.readFile(path.join(this.recoveryDirectory, name), 'utf8'));
+        const record = JSON.parse(await fs.readFile(file, 'utf8'));
         if (typeof record.content !== 'string') continue;
         const doc = this.create(record.content);
         this.get(doc.id).name = `恢复-${record.name || '未命名.md'}`;
         await this.recover(this.get(doc.id));
         recovered.push(this.public(this.get(doc.id)));
-        await fs.unlink(path.join(this.recoveryDirectory, name));
+        await fs.unlink(file);
       } catch { /* Keep unreadable recovery files for manual recovery. */ }
     }
     return recovered;

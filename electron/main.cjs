@@ -260,7 +260,10 @@ async function chooseOpen(candidate) {
 }
 function registerHandlers() {
   handle('bootstrap', async () => {
-    const recovered = await store.recoverAll();
+    // The first window also collects recovery files left by secondary windows
+    // from a previous crashed session. Live secondary windows keep separate
+    // directories, so their active recovery records are never stolen.
+    const recovered = await store.recoverAll(store === primary?.store);
     const opened = [];
     for (const file of pendingFiles.splice(0)) { try { opened.push(await store.open(file)); } catch {} }
     return { documents: [...recovered, ...opened], preferences, platform: process.platform, recoveryCount: recovered.length };

@@ -43,6 +43,7 @@ test('duplicate headings receive numbered ids from a shared slug counter', () =>
   assert.match(html, /id="标题"/);
   assert.match(html, /id="标题-1"/);
   assert.match(html, /id="标题-2"/);
+  assert.deepEqual(headings('# 标题\n\n# 标题').map(item => item.id), ['标题', '标题-1']);
 });
 
 test('both dollar and LaTeX bracket delimiters render KaTeX', () => {

@@ -74,10 +74,11 @@ parser.renderer.rules.blockquote_open = (tokens, index, options, env, self) => {
   return `${defaultBlockquote(tokens, index, options, env, self)}<div class="alert-label" data-md-skip>${ALERTS[kind]}</div>`;
 };
 
+const slugify = title => title.toLowerCase().replace(/[^\p{L}\p{N}\s_-]/gu, '').replace(/\s+/g, '-');
 const headingRule = parser.renderer.rules.heading_open || ((tokens, index, options, _env, self) => self.renderToken(tokens, index, options));
 parser.renderer.rules.heading_open = (tokens, index, options, env, self) => {
   const title = tokens[index + 1]?.content || '';
-  const slug = title.toLowerCase().replace(/[^\p{L}\p{N}\s_-]/gu, '').replace(/\s+/g, '-');
+  const slug = slugify(title);
   env.slugs ||= {};
   const count = env.slugs[slug] || 0;
   env.slugs[slug] = count + 1;
@@ -86,16 +87,27 @@ parser.renderer.rules.heading_open = (tokens, index, options, env, self) => {
 };
 
 export function headings(source) {
-  const tokens = parser.parse(source, {}), result = [];
+  const tokens = parser.parse(source, {}), result = [], slugs = {};
   for (let i = 0; i < tokens.length; i++) {
-    if (tokens[i].type === 'heading_open' && tokens[i].map) result.push({ title: tokens[i + 1]?.content || '', level: Number(tokens[i].tag.slice(1)), line: tokens[i].map[0] + 1 });
+    if (tokens[i].type !== 'heading_open' || !tokens[i].map) continue;
+    const title = tokens[i + 1]?.content || '';
+    const slug = slugify(title);
+    const count = slugs[slug] || 0;
+    slugs[slug] = count + 1;
+    result.push({ title, level: Number(tokens[i].tag.slice(1)), line: tokens[i].map[0] + 1, id: count ? `${slug}-${count}` : slug });
   }
   return result;
 }
 
-const tocItems = source => headings(source).map(h => `<li style="margin-left:${(h.level - 1) * 12}px"><a href="#" data-line="${h.line}">${escapeHTML(h.title)}</a></li>`).join('');
+const tocItems = source => headings(source).map(h => `<li style="margin-left:${(h.level - 1) * 12}px"><a href="#${escapeHTML(h.id)}" data-line="${h.line}">${escapeHTML(h.title)}</a></li>`).join('');
 
-function finalizeHTML(html, documentId, toc) {
+function footnoteTitles(source, env) {
+  const definitions = new Map();
+  for (const match of source.matchAll(/^\[\^([^\]]+)\]:[ \t]*(.+)$/gm)) definitions.set(match[1], match[2].trim());
+  return (env.footnotes?.list || []).map(note => definitions.get(note.label) || '');
+}
+
+function finalizeHTML(html, documentId, toc, footnotes = []) {
   const withToc = html.replace(/<p>\[toc\]<\/p>/gi, `<nav class="toc" aria-label="文内目录"><ul>${toc}</ul></nav>`);
   const clean = DOMPurify.sanitize(withToc, { USE_PROFILES: { html: true, svg: true, mathMl: true }, ADD_ATTR: ['data-line'], FORBID_TAGS: ['iframe', 'object', 'embed', 'style', 'form'], FORBID_ATTR: ['srcdoc'], ALLOW_DATA_ATTR: true });
   const template = document.createElement('template');
@@ -110,6 +122,16 @@ function finalizeHTML(html, documentId, toc) {
     img.loading = 'lazy';
   }
   for (const link of template.content.querySelectorAll('a')) link.rel = 'noopener noreferrer';
+  // Typora exposes footnote content on hover. A native title keeps that
+  // behavior available without adding a focus-trapping popover, and remains
+  // useful to keyboard users through the normal footnote link.
+  for (const ref of template.content.querySelectorAll('sup.footnote-ref a[href^="#fn"]')) {
+    const id = ref.getAttribute('href')?.slice(1);
+    const note = id && template.content.getElementById(id);
+    const index = /^fn(\d+)$/.exec(id || '');
+    const text = note?.textContent?.replace(/↩+\s*$/, '').trim() || (index ? footnotes[Number(index[1]) - 1] : '');
+    if (text) ref.setAttribute('title', text);
+  }
   for (const checkbox of template.content.querySelectorAll('input')) checkbox.setAttribute('aria-label', '切换任务完成状态');
   // markdown-it-task-lists only recognises `[ ] ` when text follows the box.
   // A bare `- [ ]` line otherwise renders as literal `[ ]`, contradicting the
@@ -145,7 +167,9 @@ function finalizeHTML(html, documentId, toc) {
 
 export function renderMarkdown(source, documentId) {
   const text = source.replace(/^\uFEFF/, '');
-  return injectColumnWidths(finalizeHTML(parser.render(text, {}), documentId, tocItems(text)), readColumnWidths(text));
+  const env = {};
+  const html = parser.render(text, env);
+  return injectColumnWidths(finalizeHTML(html, documentId, tocItems(text), footnoteTitles(text, env)), readColumnWidths(text));
 }
 
 /**
@@ -169,10 +193,11 @@ export function renderDocument(source, documentId) {
   }
   if (current) groups.push(current);
   const toc = tocItems(text);
+  const footnotes = footnoteTitles(text, env);
   const widths = readColumnWidths(text);
   let tableOffset = 0;
   const blocks = groups.map(group => {
-    const html = finalizeHTML(parser.renderer.render(group.tokens, parser.options, env), documentId, toc);
+    const html = finalizeHTML(parser.renderer.render(group.tokens, parser.options, env), documentId, toc, footnotes);
     const withWidths = injectColumnWidths(html, widths, tableOffset);
     tableOffset += (html.match(/<table\b/g) || []).length;
     return { start: group.start, end: group.end, html: withWidths };

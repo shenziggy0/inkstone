@@ -117,6 +117,21 @@ test('stray delimiters are dim, underscores inside words are content', () => {
   assert.deepEqual(liveLine('变量 snake_case 结束').marks, []);
 });
 
+test('escapes, subscript, superscript, HTML spans and emoji match rendered syntax', () => {
+  const escaped = liveLine('\\*literal*');
+  assert.deepEqual(bare(escaped.marks), [{ from: 0, to: 1, kind: 'syntax' }]);
+  assert.deepEqual(bare(escaped.styles), [
+    { from: 1, to: 2, kind: 'literal' },
+    { from: 9, to: 10, kind: 'literal' }
+  ]);
+
+  const extensions = liveLine('H~2~O x^2^ <u>线</u> :smile:');
+  assert.ok(extensions.styles.some(style => style.kind === 'sub' && text('H~2~O x^2^ <u>线</u> :smile:', style.from, style.to) === '2'));
+  assert.ok(extensions.styles.some(style => style.kind === 'sup'));
+  assert.ok(extensions.styles.some(style => style.kind === 'u'));
+  assert.deepEqual(extensions.replacements.map(({ text: value }) => value), ['😄']);
+});
+
 test('a completed syntax renders immediately when the caret follows the closing marker', () => {
   const line = '**加粗**';
   const info = liveLine(line);

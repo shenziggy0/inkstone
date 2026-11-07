@@ -382,7 +382,7 @@ async function exportDocument(format) {
 async function runCommand(command, detail) {
   const editor = current()?.editor;
   try {
-    if (command.startsWith('heading-')) { editor?.prefix('#'.repeat(Number(command.slice(-1))) + ' '); return; }
+    if (/^heading-[1-6]$/.test(command)) { editor?.prefix('#'.repeat(Number(command.slice(-1))) + ' '); return; }
     const wrap = { bold: ['**', '**'], italic: ['*', '*'], strike: ['~~', '~~'], 'inline-code': ['`', '`'], link: ['[', '](https://)', '链接文字'] };
     if (wrap[command]) { editor?.wrap(...wrap[command]); return; }
     const inserts = { code: '\n```typescript\n\n```\n', math: '\n$$\nE = mc^2\n$$\n', table: '\n| 列一 | 列二 |\n| --- | --- |\n| 内容 | 内容 |\n', diagram: '\n```mermaid\nflowchart LR\n  A[开始] --> B[完成]\n```\n', toc: '\n[TOC]\n' };
@@ -477,16 +477,15 @@ async function runCommand(command, detail) {
           const tables = parseTables(detail.source);
           const table = tables[detail.index ?? 0];
           if (!table) { notify('未找到可编辑的表格。', true); break; }
-          // Widget source is LF-normalized; convert offsets back to real CRLF positions.
-          const extra = detail.eolExtra || 0;
-          const toDoc = offset => detail.from + offset + extra * (detail.source.slice(0, offset).split('\n').length - 1);
+          // Widget source and CodeMirror document positions both use one
+          // internal character per line break, including CRLF files.
+          const toDoc = offset => detail.from + offset;
           pendingTable = { from: toDoc(table.start), to: toDoc(table.end), table };
         }
         renderTableDialog();
         if (!$('#dialog').open) $('#dialog').showModal();
         break;
       }
-      case 'focus-table-cell': editor?.focusTableCell(detail); break;
       case 'emoji': {
         const rows = EMOJI.map(([code, glyph]) => `<button class="emoji-item" data-emoji="${escapeHTML(glyph)}" title="${escapeHTML(code)}" aria-label="${escapeHTML(code)}">${escapeHTML(glyph)}</button>`).join('');
         showDialog('插入表情', `<p class="dialog-description">正文中输入 <code>:smile:</code> 会自动补全为表情；也可以在这里直接挑选。</p><label class="quick-filter"><span class="sr-only">搜索表情</span><input id="emoji-filter" type="search" placeholder="搜索表情名称…" autocomplete="off"></label><div class="emoji-grid" id="emoji-grid">${rows}</div>`);
@@ -617,7 +616,7 @@ document.addEventListener('click', async event => {
     if (event.metaKey || event.ctrlKey) {
       const href = anchor.getAttribute('href');
       if (href?.startsWith('#')) {
-        const heading = headings(current().content).find(h => h.title.toLowerCase().replace(/[^\p{L}\p{N}\s_-]/gu, '').replace(/\s+/g, '-') === decodeURIComponent(href.slice(1)));
+        const heading = headings(current().content).find(h => h.id === decodeURIComponent(href.slice(1)));
         if (heading) current().editor.jump(heading.line);
       } else try { await api('openExternal', anchor.href); } catch (error) { notify(error.message, true); }
     }
@@ -646,7 +645,10 @@ document.addEventListener('change', event => {
   renderTableDialog();
 });
 document.addEventListener('inkstone:table-edit', event => runCommand('edit-table', event.detail));
-document.addEventListener('inkstone:table-cell', event => runCommand('focus-table-cell', event.detail));
+document.addEventListener('inkstone:table-cell-commit', event => {
+  const { from, to, text } = event.detail || {};
+  if (Number.isInteger(from) && Number.isInteger(to) && from <= to) current()?.editor.applyChange({ from, to, insert: String(text ?? '') });
+});
 document.addEventListener('inkstone:table-width', event => {
   const doc = current();
   const detail = event.detail;

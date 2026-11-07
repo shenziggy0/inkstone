@@ -41,12 +41,17 @@ const HR_LINE = /^\s{0,3}(?:-{3,}|\*{3,}|_{3,})[ \t]*$/;
 // only appears after the user types the item text.
 const TABLE_DELIMITER = /^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/;
 const LINK = /^(!?)\[([^\]\n]*)\]\(([^)\n]*)\)/;
+import { EMOJI } from './emoji.js';
+
+const EMOJI_MAP = new Map(EMOJI);
+const HTML_PAIR = /^<(u|sub|sup|mark|kbd)>([^\n]*?)<\/\1>/i;
 const HTML_TAG = /^<\/?(?:u|sub|sup|mark|kbd|br)\b[^>\n]*>/i;
+const ESCAPABLE = /[!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~]/;
 
 // Longest markers first: `**` must win over `*`, `$$` over `$`.
 const PAIRS = [
   ['**', 'strong'], ['__', 'strong'], ['~~', 'strike'], ['==', 'mark'],
-  ['$$', 'math'], ['$', 'math'], ['*', 'em'], ['_', 'em']
+  ['$$', 'math'], ['$', 'math'], ['*', 'em'], ['_', 'em'], ['~', 'sub'], ['^', 'sup']
 ];
 
 function closing(line, marker, from, to) {
@@ -61,6 +66,7 @@ function closing(line, marker, from, to) {
 
 function scan(line, from, to, out, depth = 0) {
   let cursor = from;
+  const escapedClosers = [];
   // A group is the editing range of one complete inline element. Its two
   // syntax marks share the group id, so they are revealed/hidden together.
   const group = (from, to, kind) => (out.groups.push({ from, to, kind }), out.groups.length - 1);
@@ -70,6 +76,28 @@ function scan(line, from, to, out, depth = 0) {
   });
   while (cursor < to) {
     const rest = line.slice(cursor, to);
+    if (line[cursor] === '\\' && cursor + 1 < to && ESCAPABLE.test(line[cursor + 1])) {
+      const id = group(cursor, cursor + 2, 'escape');
+      mark(cursor, cursor + 1, 'syntax', id);
+      out.styles.push({ from: cursor + 1, to: cursor + 2, kind: 'literal', group: id });
+      if (/[*_~=$^]/.test(line[cursor + 1])) escapedClosers.push(line[cursor + 1]);
+      cursor += 2;
+      continue;
+    }
+    const escapedIndex = escapedClosers.indexOf(line[cursor]);
+    if (escapedIndex >= 0) {
+      escapedClosers.splice(escapedIndex, 1);
+      out.styles.push({ from: cursor, to: cursor + 1, kind: 'literal', group: -1 });
+      cursor++;
+      continue;
+    }
+    const emoji = /^:[A-Za-z0-9_+-]+:/.exec(rest);
+    if (emoji && EMOJI_MAP.has(emoji[0])) {
+      const id = group(cursor, cursor + emoji[0].length, 'emoji');
+      out.replacements.push({ from: cursor, to: cursor + emoji[0].length, text: EMOJI_MAP.get(emoji[0]), group: id });
+      cursor += emoji[0].length;
+      continue;
+    }
     const link = LINK.exec(rest);
     if (link) {
       const labelFrom = cursor + link[1].length + 1;
@@ -79,6 +107,18 @@ function scan(line, from, to, out, depth = 0) {
       mark(labelTo, cursor + link[0].length, 'syntax', id);
       if (link[2].length) out.styles.push({ from: labelFrom, to: labelTo, kind: link[1] ? 'image' : 'link', group: id });
       cursor += link[0].length;
+      continue;
+    }
+    const htmlPair = HTML_PAIR.exec(rest);
+    if (htmlPair) {
+      const openLength = htmlPair[0].indexOf('>') + 1;
+      const closeLength = htmlPair[1].length + 3;
+      const closeFrom = cursor + htmlPair[0].length - closeLength;
+      const id = group(cursor, cursor + htmlPair[0].length, htmlPair[1].toLowerCase());
+      mark(cursor, cursor + openLength, 'syntax', id);
+      mark(closeFrom, cursor + htmlPair[0].length, 'syntax', id);
+      if (closeFrom > cursor + openLength) out.styles.push({ from: cursor + openLength, to: closeFrom, kind: htmlPair[1].toLowerCase(), group: id });
+      cursor += htmlPair[0].length;
       continue;
     }
     const tag = HTML_TAG.exec(rest);
@@ -129,7 +169,7 @@ function scan(line, from, to, out, depth = 0) {
       cursor++;
       continue;
     }
-    if (/[*_~=$]/.test(line[cursor])) {
+    if (/[*_~=$^]/.test(line[cursor])) {
       // An underscore inside a word (`snake_case`) is content, not syntax.
       if (line[cursor] === '_' && cursor > from && cursor + 1 < to
         && /[\p{L}\p{N}]/u.test(line[cursor - 1]) && /[\p{L}\p{N}]/u.test(line[cursor + 1])) {
@@ -187,7 +227,7 @@ export function revealFor(info, ranges) {
  * to dimming the whole syntax (fenced code, table delimiter rows).
  */
 export function liveLine(line) {
-  const out = { classes: [], prefix: null, marks: [], styles: [], groups: [], plain: false, length: line.length };
+  const out = { classes: [], prefix: null, marks: [], styles: [], groups: [], replacements: [], plain: false, length: line.length };
   if (FENCE_PREFIX.test(line)) {
     out.plain = true;
     out.classes.push('cm-lv-fence');

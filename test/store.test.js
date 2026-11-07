@@ -55,6 +55,17 @@ test('recover unsaved work into a new unnamed document, once', async t => {
   await second.save(recovered[0].id, path.join(root, 'restored.md'));
   assert.deepEqual(await new DocumentStore(store.recoveryDirectory).recoverAll(), []);
 });
+test('primary startup recovers unsaved documents left by secondary windows', async t => {
+  const { root, store } = await fixture(t);
+  const secondary = new DocumentStore(path.join(store.recoveryDirectory, 'window-1'));
+  const doc = secondary.create('secondary draft');
+  await secondary.update(doc.id, 'secondary draft');
+  assert.deepEqual(await store.recoverAll(), [], 'normal recovery must not steal a live secondary window');
+  const recovered = await store.recoverAll(true);
+  assert.equal(recovered.length, 1);
+  assert.equal(recovered[0].content, 'secondary draft');
+  assert.deepEqual((await fs.readdir(path.join(store.recoveryDirectory, 'window-1'))).filter(name => name.endsWith('.json')), []);
+});
 test('serializes changes and saves without losing a later edit', async t => {
   const { root, store } = await fixture(t); const doc = store.create(); const file = path.join(root, 'note.md');
   await Promise.all([store.update(doc.id, 'first'), store.save(doc.id, file), store.update(doc.id, 'second')]);

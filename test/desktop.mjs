@@ -165,7 +165,9 @@ try {
   assert.match(await page.locator('.md-widget .front-matter').textContent(), /title/);
   const tocEntries = await page.locator('.md-widget .toc li').count();
   assert.ok(tocEntries >= 2, `[TOC] 应列出全文标题，实际 ${tocEntries}`);
+  assert.deepEqual(await page.locator('.md-widget .toc a').evaluateAll(nodes => nodes.map(node => node.getAttribute('href'))), ['#标题', '#标题-1']);
   assert.equal(await page.locator('.md-widget .footnote-ref').count(), 1);
+  assert.match(await page.locator('.md-widget .footnote-ref a').getAttribute('title'), /脚注内容/);
   assert.equal(await page.locator('.md-widget a[href="https://example.com/ref"]').count(), 1);
   assert.equal(await page.locator('.md-widget blockquote.alert-note').count(), 1);
   assert.deepEqual(await page.locator('.md-widget h1').evaluateAll(nodes => nodes.map(node => node.id)), ['标题', '标题-1']);
@@ -212,13 +214,18 @@ try {
   assert.match(tableSource, /^\| {2,}\| {2,}\|$/m, '新增的空行应保留在表格中');
   assert.match(tableSource, /前言不变[\s\S]*结尾不变/);
   console.log('STEP graphical table editing');
-  // A single click now edits the cell in place instead of opening a dialog.
+  // A single click edits the rendered cell in place instead of exposing the
+  // whole Markdown table as source.
   await page.locator('.topbar [data-command="new"]').click();
   await page.locator('.cm-content').click();
   await page.keyboard.insertText('| 甲 | 乙 |\n| --- | --- |\n| 1 | 2 |\n');
   await page.locator('.md-widget table td').first().click();
-  assert.match(await page.locator('#selection-status').textContent(), /已选 1 字/, '单击单元格应选中该单元格源码');
+  assert.equal(await page.locator('.md-widget table td').first().getAttribute('contenteditable'), 'plaintext-only');
+  assert.equal(await page.locator('.cm-live-line').count(), 0, '编辑表格单元格时不能把整块表格展开成源码');
   await page.keyboard.insertText('99');
+  await page.keyboard.press('Enter');
+  await page.locator('.md-widget table').waitFor();
+  assert.match(await page.locator('.md-widget table').textContent(), /99/, '提交单元格后表格应保持渲染态');
   await page.locator('[data-command="source"]').click();
   assert.match(await page.locator('.cm-content').textContent(), /\| 99 \| 2 \|/, '就地输入必须写回真实表格源码');
   await page.locator('[data-command="source"]').click();
@@ -647,6 +654,57 @@ try {
   assert.equal(await page.locator('.cm-content').textContent(), '**加粗**中文', '活跃块组合输入后源码必须完整');
   await ensureLive();
   console.log('STEP IME composition keeps typesetting across the document');
+  // Return creates a paragraph like Typora; Shift+Return keeps one soft break.
+  await fresh();
+  await page.keyboard.insertText('第一段');
+  await page.keyboard.press('Enter');
+  await page.keyboard.insertText('第二段');
+  await page.locator('[data-command="source"]').click();
+  assert.equal(await page.locator('.cm-line').allTextContents().then(lines => lines.join('\n')), '第一段\n\n第二段');
+  await ensureLive();
+  await fresh();
+  await page.keyboard.insertText('第一行');
+  await page.keyboard.press('Shift+Enter');
+  await page.keyboard.insertText('第二行');
+  await page.locator('[data-command="source"]').click();
+  assert.equal(await page.locator('.cm-line').allTextContents().then(lines => lines.join('\n')), '第一行\n第二行');
+  await ensureLive();
+  console.log('STEP Typora paragraph and soft-break Enter behavior');
+  // Heading level shortcuts must reach heading(), not the heading-N command branch.
+  await fresh();
+  await page.keyboard.insertText('## 标题');
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+=' : 'Control+=');
+  await page.locator('[data-command="source"]').click();
+  assert.equal(await sourceText(), '# 标题');
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+-' : 'Control+-');
+  assert.equal(await sourceText(), '## 标题');
+  await ensureLive();
+  console.log('STEP heading level shortcuts');
+  // Pipes inside fenced code are never table rows.
+  await fresh();
+  await page.keyboard.insertText('```js\n| a | b |\n| --- | --- |\n```');
+  await page.keyboard.press('ArrowUp');
+  await page.keyboard.press('ArrowUp');
+  await page.keyboard.press('End');
+  await page.keyboard.press('Enter');
+  await page.keyboard.insertText('code');
+  await page.locator('[data-command="source"]').click();
+  const fencedSource = await page.locator('.cm-line').allTextContents().then(lines => lines.join('\n'));
+  assert.doesNotMatch(fencedSource, /\| {2}\| {2}\|/, '代码块内的管道符不能触发表格新增行');
+  assert.match(fencedSource, /\| a \| b \|\ncode\n\| --- \| --- \|/);
+  await ensureLive();
+  console.log('STEP fenced-code Enter is not treated as a table');
+  // CRLF affects serialization only; rendered click positions stay in the
+  // normalized CodeMirror coordinate system.
+  const crlfPath = path.join(root, 'crlf-tasks.md');
+  await fs.writeFile(crlfPath, '- [ ] first\r\n- [ ] second\r\n');
+  await app.evaluate(({ dialog }, filePath) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [filePath] }); }, crlfPath);
+  await page.locator('[data-command="open"]').click();
+  await page.locator('.md-widget input[type="checkbox"]').nth(1).click();
+  await page.locator('[data-command="save"]').click();
+  await page.waitForFunction(() => document.querySelector('#save-status').textContent === '已保存');
+  assert.equal(await fs.readFile(crlfPath, 'utf8'), '- [ ] first\r\n- [x] second\r\n');
+  console.log('STEP CRLF rendered task coordinates');
   // A narrow desktop window must not overflow horizontally or hide the editor.
   await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setBounds({ x: 100, y: 80, width: 760, height: 620 }));
   await page.waitForTimeout(300);
