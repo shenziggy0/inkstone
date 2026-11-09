@@ -1,6 +1,8 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
+// Pure shared parser; also imported by the renderer (src/markdown.js).
+const frontMatter = require('./front-matter.mjs');
 
 const digest = (data) => crypto.createHash('sha256').update(data).digest('hex');
 const inside = (root, candidate) => {
@@ -148,10 +150,23 @@ class DocumentStore {
         if (doc.dirty) await this.writeHistory(doc, doc.savedContent);
         if (diskContent !== null && diskContent !== doc.savedContent) await this.writeHistory(doc, diskContent);
       }
-      await atomicWrite(file, doc.content);
-      Object.assign(doc, { path: file, name: path.basename(file), savedContent: doc.content, version: digest(Buffer.from(doc.content)), dirty: false });
+      // Relocate a document-relative image root only now: the target is
+      // canonical and every rejection above (target open elsewhere, changed
+      // disk version) has happened. The document keeps its old path, text and
+      // clean state until the atomic write succeeds, so a failed Save As can
+      // never rewrite the stored YAML or the recovery copy.
+      const relocation = doc.path ? relocateImageRoot(doc.content, doc.path, file) : { content: doc.content, imageRootRewrite: null };
+      await atomicWrite(file, relocation.content);
+      Object.assign(doc, {
+        path: file,
+        name: path.basename(file),
+        content: relocation.content,
+        savedContent: relocation.content,
+        version: digest(Buffer.from(relocation.content)),
+        dirty: false
+      });
       await this.recover(doc);
-      return this.public(doc);
+      return { ...this.public(doc), imageRootRewrite: relocation.imageRootRewrite };
     });
   }
   /**
@@ -363,6 +378,36 @@ class DocumentStore {
 }
 
 /**
+ * Keep a document-relative `typora-root-url` pointing at the same folder after
+ * the document moved. Absolute and `file:` roots already do; on Windows a move
+ * to another drive falls back to an absolute path, which `path.relative()`
+ * returns by itself.
+ *
+ * The key position comes from electron/front-matter.mjs, the same module the
+ * renderer uses, so this only ever edits the real leading front matter line —
+ * never a code fence or body text that quotes the same line. `imageRootRewrite`
+ * carries the old and new value for the renderer's live buffer, which applies
+ * it only while the line still has the old value.
+ */
+function relocateImageRoot(content, previousPath, nextPath) {
+  const key = frontMatter.imageRootKey(content);
+  if (!key || !key.value || !previousPath || !nextPath) return { content, imageRootRewrite: null };
+  const value = key.value;
+  // Network roots and absolute roots never depend on the document's folder.
+  if (/^file:/i.test(value) || /^[\\/]{2}/.test(value) || path.isAbsolute(value) || path.win32.isAbsolute(value)) {
+    return { content, imageRootRewrite: null };
+  }
+  const previousDirectory = path.dirname(previousPath);
+  const nextDirectory = path.dirname(nextPath);
+  if (previousDirectory === nextDirectory) return { content, imageRootRewrite: null };
+  let nextValue = path.relative(nextDirectory, path.resolve(previousDirectory, value)) || '.';
+  if (path.sep === '\\') nextValue = nextValue.split('\\').join('/');
+  const next = frontMatter.rewriteFrontMatterImageRoot(content, nextValue);
+  if (next === null || next === content) return { content, imageRootRewrite: null };
+  return { content: next, imageRootRewrite: { expected: value, value: nextValue } };
+}
+
+/**
  * Keep relative `assets/` images usable when a document is saved or renamed
  * into a different directory. Only references actually used by the document
  * are copied; the strict basename check prevents path traversal. A target that
@@ -457,4 +502,4 @@ async function listMarkdown(root, base = root, depth = 0, budget = { count: 0 })
   }
   return result;
 }
-module.exports = { DocumentStore, atomicWrite, inside, listMarkdown, syncAssets, HISTORY_LIMIT };
+module.exports = { DocumentStore, atomicWrite, inside, listMarkdown, syncAssets, frontMatterImageRoot: frontMatter.frontMatterImageRoot, imageRootKey: frontMatter.imageRootKey, relocateImageRoot, HISTORY_LIMIT };

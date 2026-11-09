@@ -348,3 +348,35 @@ test('rekey points a document at a renamed folder and moves its history', async 
   assert.equal(saved.path, await fs.realpath(path.join(after, 'x.md')));
   assert.equal(await fs.readFile(path.join(after, 'x.md'), 'utf8'), 'after rename');
 });
+
+test('a failed Save As keeps the original path, text, dirty state and recovery copy', async t => {
+  const { root, store } = await fixture(t);
+  const original = path.join(root, 'docs', 'note.md');
+  const target = path.join(root, 'other', 'occupied.md');
+  await fs.mkdir(path.dirname(original), { recursive: true });
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  const text = '---\ntypora-root-url: assets\n---\n\n![root](/sample.png)\n';
+  await fs.writeFile(original, text);
+  await fs.writeFile(target, '# occupied');
+  const clean = await store.open(original);
+  await store.open(target);
+  await assert.rejects(store.save(clean.id, target), /已在另一个标签页打开/);
+  const doc = store.get(clean.id);
+  assert.equal(doc.path, await fs.realpath(original), '失败后必须仍指向旧路径');
+  assert.equal(doc.content, text, '失败后正文不得被重定位');
+  assert.equal(doc.savedContent, text);
+  assert.equal(doc.dirty, false);
+  assert.equal(await fs.readFile(original, 'utf8'), text, '失败后原文件不得改动');
+  assert.equal(await fs.readFile(target, 'utf8'), '# occupied');
+  assert.equal(await fs.readFile(path.join(store.recoveryDirectory, `${clean.id}.json`), 'utf8').catch(() => null), null, '干净文档失败后不应生成恢复副本');
+
+  // A dirty document must keep its own newer text in the recovery copy as well.
+  const dirtyText = text.replace('\n\n!', '\n\n编辑中\n\n!');
+  await store.update(clean.id, dirtyText);
+  await assert.rejects(store.save(clean.id, target), /已在另一个标签页打开/);
+  assert.equal(store.get(clean.id).content, dirtyText);
+  assert.equal(store.get(clean.id).dirty, true);
+  const recovery = JSON.parse(await fs.readFile(path.join(store.recoveryDirectory, `${clean.id}.json`), 'utf8'));
+  assert.equal(recovery.content, dirtyText, '恢复副本也不得写入迁移后的图根');
+  assert.equal(recovery.path, await fs.realpath(original));
+});

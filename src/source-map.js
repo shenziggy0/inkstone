@@ -23,6 +23,7 @@ const MAX_GAP = 256;
 const GENERATED = [
   '.katex',            // KaTeX emits lots of layout-only glyphs
   '.mermaid',          // diagram source is replaced by SVG
+  '.diagram',          // sequence / flow source is replaced by SVG
   'svg',
   '.toc',              // [TOC] is generated from the outline
   '.code-language',    // highlight.js language badge

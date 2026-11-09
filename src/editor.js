@@ -1,6 +1,6 @@
 import { EditorState, StateEffect, StateField, Compartment, EditorSelection, Prec } from '@codemirror/state';
 import { EditorView, Decoration, WidgetType, ViewPlugin, keymap, drawSelection, highlightActiveLine, lineNumbers, placeholder } from '@codemirror/view';
-import { defaultKeymap, history, historyKeymap, indentWithTab, undo, redo, selectLine, selectParentSyntax, indentMore, indentLess, cursorDocStart, cursorDocEnd, deleteLine, deleteGroupBackward } from '@codemirror/commands';
+import { defaultKeymap, history, historyKeymap, indentWithTab, invertedEffects, isolateHistory, undo, redo, selectLine, selectParentSyntax, indentMore, indentLess, cursorDocStart, cursorDocEnd, deleteLine, deleteGroupBackward } from '@codemirror/commands';
 import { markdown, markdownKeymap } from '@codemirror/lang-markdown';
 import { languages } from '@codemirror/language-data';
 import { HighlightStyle, syntaxHighlighting, defaultHighlightStyle, bracketMatching, indentOnInput, syntaxTree } from '@codemirror/language';
@@ -8,14 +8,15 @@ import { tags } from '@lezer/highlight';
 import { search, searchKeymap, highlightSelectionMatches, openSearchPanel } from '@codemirror/search';
 import { closeBrackets, closeBracketsKeymap, autocompletion } from '@codemirror/autocomplete';
 import { emojiCompletion } from './emoji.js';
-import { renderMarkdown, renderDocument, renderDiagrams, renderMath, escapeHTML, invalidateFenceLanguages } from './markdown.js';
+import { renderMarkdown, renderDocument, renderDiagrams, renderMath, escapeHTML, invalidateFenceLanguages, tableSourceRanges, mathNumberingEnabled } from './markdown.js';
 import { onLanguageLoaded } from './highlight.js';
 import { linkAt } from './links.js';
 import { buildSourceMap, sourceOffsetAt, imageSourceOffset } from './source-map.js';
 import { inlineMarks } from './inline-marks.js';
 import { liveBlock, blockReveal, documentLines } from './live-preview.js';
-import { tableCellRanges, parseTables, rowPrefix } from './table.js';
+import { tableCellRanges, cellSourceRange, normalizeCellMarkdown, parseTables, rowPrefix } from './table.js';
 import { applyEol, createEolContext, toLf } from './eol.js';
+import { containerEnter } from './container-enter.js';
 
 /**
  * Translate a screen point into a document position. Rendered blocks are
@@ -42,27 +43,219 @@ function resolveDocPosition(view, x, y) {
 
 const modeEffect = StateEffect.define();
 const compositionEffect = StateEffect.define();
+// Above this many characters the whole-document live layout is replaced by a
+// plain source view. It is part of the editor's observable state, not just an
+// implementation detail: the status marker below lets the desktop and
+// performance tests tell a typeset document from the fallback. The benchmark
+// keeps a 220k document live (measured well inside its 150 ms/key budget) and
+// uses a document past this limit to cover the fallback path itself.
+const LIVE_PREVIEW_LIMIT = 260000;
 // Keeps the whole document typeset while a cell edit moves from one cell to the
 // next: the commit rebuilds the widget, and without this the block holding the
 // caret would expand into source lines and the target cell would be gone.
 const cellEffect = StateEffect.define();
+// A row / column reorder is a structural edit, not typing: the typeset table the
+// user dropped into has to stay on screen instead of revealing the caret's block
+// as Markdown. Unlike a cell commit this also has to survive undo / redo, which
+// `invertedEffects` below arranges.
+const reorderEffect = StateEffect.define();
+const holdsTypeset = effect => effect.is(cellEffect) || effect.is(reorderEffect);
 const modeField = StateField.define({ create: () => ({ source: false, composing: false, pristine: true, hold: false }), update(value, tr) {
   for (const effect of tr.effects) {
     if (effect.is(modeEffect)) value = { ...value, source: effect.value };
     if (effect.is(compositionEffect)) value = { ...value, composing: effect.value };
     if (effect.is(cellEffect)) value = { ...value, hold: effect.value };
+    if (effect.is(reorderEffect)) value = { ...value, hold: true };
   }
   // Typora shows a newly opened file fully typeset. Only the first real
   // interaction (a click, caret move or keystroke) reveals the active block.
-  if ((tr.docChanged || tr.selection) && !tr.effects.some(effect => effect.is(cellEffect))) {
+  if ((tr.docChanged || tr.selection) && !tr.effects.some(holdsTypeset)) {
     value = { ...value, pristine: false, hold: false };
   }
   return value;
 } });
 
+/**
+ * Row and column drag handles for one rendered table.
+ *
+ * A data row is dragged from the grip in its first cell; a column from the
+ * grip at the top of its header cell (the right edge stays the width resizer).
+ * The header row and the delimiter row are never draggable, and the block's
+ * source is only rewritten on drop, by one document transaction in main.js.
+ *
+ * The drop slot is resolved from the pointer against the current geometry:
+ * dropping an item back into its own place dispatches nothing, and Escape
+ * cancels the drag without touching the document. A drag also ends when the
+ * window loses focus, when the block it started in was rebuilt (its document
+ * changed or another document was activated) or when its positions moved: the
+ * handle events live on `document`, so a stale drag must never edit whatever
+ * document happens to be active at drop time.
+ */
+function bindTableReorder(element, info, table, tableIndex) {
+  // Native HTML tables in the same block are real DOM tables with no Markdown
+  // source of their own, so a DOM index can point past the GFM tables. The
+  // receiving side compares this count with the block's GFM ranges and refuses
+  // when the two index spaces cannot be matched.
+  const domTables = element.querySelectorAll('table').length;
+  // Positions and indices are resolved when the drag ends: the widget may have
+  // been reused meanwhile, so nothing is read from a stale widget instance.
+  const dispatchMove = (kind, from, slot, startedAt) => {
+    if (!element.isConnected || info.from !== startedAt) return;
+    const target = parseTables(info.source)[tableIndex];
+    if (!target) return;
+    // The receiving side re-checks the document id, the block source and the
+    // rendered table boundaries before it writes anything.
+    document.dispatchEvent(new CustomEvent('inkstone:table-move', {
+      detail: {
+        documentId: info.id, blockFrom: info.from, blockSource: info.source, tableIndex, domTables,
+        kind, from, slot
+      }
+    }));
+  };
+  const slotAt = (boxes, coordinate, horizontal) => boxes.reduce((slot, box) =>
+    slot + ((horizontal ? box.left + box.width / 2 : box.top + box.height / 2) < coordinate ? 1 : 0), 0);
+  const highlight = (items, slot) => {
+    for (const node of items) node.classList.remove('table-drop-before', 'table-drop-after');
+    if (slot < 0 || !items.length) return;
+    if (slot >= items.length) items[items.length - 1].classList.add('table-drop-after');
+    else items[slot].classList.add('table-drop-before');
+  };
+  const startDrag = (event, { kind, from, items, horizontal }) => {
+    if (event.button !== 0 || items.length < 2) return;
+    if (kind === 'row' && from < 1) return;
+    // `from` is a table row index (header included) for rows, a column index
+    // for columns; slots are positions in `items`. The two differ by one for
+    // rows because `items` starts at the first data row.
+    const position = kind === 'row' ? from - 1 : from;
+    // Own the gesture: no text selection, no cell edit, no column resize.
+    event.preventDefault();
+    event.stopPropagation();
+    const boxes = items.map(node => node.getBoundingClientRect());
+    const startedX = event.clientX, startedY = event.clientY;
+    const startedAt = info.from;
+    let slot = position, dragging = false, finished = false;
+    const clear = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.removeEventListener('keydown', onKey, true);
+      window.removeEventListener('blur', onBlur);
+      element.classList.remove('table-reorder-active');
+      highlight(items, -1);
+    };
+    // A drag that outlives its block must not keep painting or dispatch later.
+    const stale = () => !element.isConnected || info.from !== startedAt;
+    const onMove = move => {
+      if (stale()) { finished = true; clear(); return; }
+      if (!dragging && Math.hypot(move.clientX - startedX, move.clientY - startedY) < 4) return;
+      dragging = true;
+      element.classList.add('table-reorder-active');
+      slot = slotAt(boxes, horizontal ? move.clientX : move.clientY, horizontal);
+      highlight(items, slot);
+    };
+    const onUp = () => {
+      if (finished) return;
+      finished = true;
+      const dropped = slot, moved = dragging;
+      clear();
+      // A click, Escape or a drop on the item's own place writes nothing.
+      if (!moved || dropped === position || dropped === position + 1) return;
+      dispatchMove(kind, from, kind === 'row' ? dropped + 1 : dropped, startedAt);
+    };
+    const onKey = key => {
+      if (key.key !== 'Escape') return;
+      key.preventDefault();
+      if (finished) return;
+      finished = true;
+      clear();
+    };
+    const onBlur = () => {
+      if (finished) return;
+      finished = true;
+      clear();
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp, { once: true });
+    document.addEventListener('keydown', onKey, true);
+    window.addEventListener('blur', onBlur);
+  };
+  const headerCells = [...(table.querySelector('tr')?.children || [])];
+  const bodyRows = [...table.rows].slice(1);
+  const handle = (className, label) => {
+    const node = document.createElement('span');
+    node.className = className;
+    node.dataset.mdSkip = '';
+    node.title = label;
+    node.setAttribute('aria-hidden', 'true');
+    return node;
+  };
+  headerCells.forEach((cell, column) => {
+    const grip = handle('table-column-handle', '拖动以移动整列');
+    cell.append(grip);
+    grip.addEventListener('mousedown', event => startDrag(event, { kind: 'column', from: column, items: headerCells, horizontal: true }));
+  });
+  for (const row of bodyRows) {
+    const cell = row.cells[0];
+    if (!cell) continue;
+    const grip = handle('table-row-handle', '拖动以移动该行');
+    cell.append(grip);
+    grip.addEventListener('mousedown', event => startDrag(event, { kind: 'row', from: row.rowIndex, items: bodyRows, horizontal: false }));
+  }
+}
+
+// ── In-place table cell editing ────────────────────────────────────────────
+/**
+ * Inline decorations for the cell editor: the cell's own Markdown with the
+ * same content styles the active block uses (bold, italic, code, link text)
+ * and its syntax characters dimmed but visible, so they can be found and
+ * edited. Nothing is inferred from the rendered DOM; this only describes the
+ * editor's own source text.
+ */
+function cellDecorations(state, references) {
+  const blockDocument = documentLines(state.doc.toString());
+  // A reference link in a cell is resolved by the whole document, exactly as
+  // markdown-it renders it when it builds the table.
+  blockDocument.references = references;
+  const live = liveBlock(blockDocument, 0, state.doc.lines, new Set([0]));
+  const ranges = [];
+  live.lines.forEach((info, index) => {
+    // Literal content (fences, indented code) stays exactly as written.
+    if (info.literal) return;
+    const line = state.doc.line(index + 1);
+    if (info.plain) {
+      for (const mark of inlineMarks(line.text)) {
+        ranges.push(Decoration.mark({ class: 'cm-md-mark' }).range(line.from + mark.from, line.from + mark.to));
+      }
+      return;
+    }
+    for (const mark of info.marks) {
+      ranges.push(Decoration.mark({ class: 'cm-md-mark' }).range(line.from + mark.from, line.from + mark.to));
+    }
+    for (const style of info.styles) {
+      ranges.push(Decoration.mark({ class: `cm-lv-${style.kind}` }).range(line.from + style.from, line.from + style.to));
+    }
+  });
+  return Decoration.set(ranges, true);
+}
+
+/** Decorations follow the cell editor's document; no caret proximity rule. */
+const cellPreview = references => ViewPlugin.fromClass(class {
+  constructor(view) { this.decorations = cellDecorations(view.state, references); }
+  update(update) { if (update.docChanged) this.decorations = cellDecorations(update.state, references); }
+}, { decorations: value => value.decorations });
+
+// The cell editor currently open, if any. It is module level because a click
+// into another cell of the same table commits this one first and then reopens
+// the clicked cell once the rebuilt table appears (`pendingCellFocus`).
+let activeCellEdit = null;
+
 class MarkdownWidget extends WidgetType {
-  constructor(source, from, to, id, html) { super(); Object.assign(this, { source, from, to, id, html }); }
-  eq(other) { return this.source === other.source && this.from === other.from && this.to === other.to && this.id === other.id && this.html === other.html; }
+  /**
+   * `selected` marks a block that lies strictly between the two ends of a
+   * selection. It is part of `eq` so a selection change reuses the DOM through
+   * `updateDOM` instead of rebuilding it (and losing Mermaid / KaTeX trees).
+   */
+  constructor(source, from, to, id, html, selected = false) { super(); Object.assign(this, { source, from, to, id, html, selected }); }
+  eq(other) { return this.source === other.source && this.from === other.from && this.to === other.to && this.id === other.id && this.html === other.html && this.selected === other.selected; }
   /**
    * A block that only moved (typically because text was typed in an earlier
    * block) keeps its DOM. Rebuilding it would throw away every Mermaid SVG,
@@ -77,11 +270,13 @@ class MarkdownWidget extends WidgetType {
     info.to = this.to;
     dom.dataset.from = this.from;
     dom.dataset.to = this.to;
+    // The typeset block itself never changes; only the selection tint does.
+    dom.classList.toggle('cm-block-selected', this.selected);
     return true;
   }
   toDOM(view) {
     const element = document.createElement('div');
-    element.className = 'md-widget prose';
+    element.className = `md-widget prose${this.selected ? ' cm-block-selected' : ''}`;
     element.innerHTML = this.html;
     // Handlers and the drag-selection code outlive this widget instance (the
     // DOM is reused by updateDOM), so every document position is read from
@@ -89,6 +284,9 @@ class MarkdownWidget extends WidgetType {
     const info = {
       from: this.from,
       to: this.to,
+      // The document this block belongs to: a drag that started here must never
+      // be applied to another document that became active meanwhile.
+      id: this.id,
       source: this.source,
       html: this.html,
       fallback: 0,
@@ -109,14 +307,39 @@ class MarkdownWidget extends WidgetType {
     // Consumed by resolveDocPosition for cross-block drag selection.
     element._inkstone = info;
     const toDocOffset = info.toDoc;
+    // Resolve a rendered table to its exact source range using the renderer's
+    // own token map. The model parser alone is not enough: a heading such as
+    // `# H | Q` under a quoted table looks like another row, and a raw HTML
+    // table is a DOM table with no Markdown source. When the DOM and the GFM
+    // tables differ in number the index spaces cannot be matched, so the
+    // operation is refused instead of editing a neighbouring table.
+    let tableRanges = null, domTables = 0;
+    const resolveTable = tableIndex => {
+      tableRanges ||= tableSourceRanges(info.source);
+      if (!domTables) domTables = element.querySelectorAll('table').length;
+      if (domTables !== tableRanges.length) return null;
+      const range = tableRanges[tableIndex];
+      if (!range) return null;
+      const source = info.source.slice(range.start, range.end);
+      const parsed = parseTables(source);
+      // The renderer and the model must describe the same table exactly.
+      if (parsed.length !== 1 || parsed[0].start !== 0 || parsed[0].end !== source.length) return null;
+      return { range, source, table: parsed[0] };
+    };
     // Right-click (or Alt+click) opens the full grid editor for this table.
     element.addEventListener('contextmenu', event => {
+      // Inside the in-cell Markdown editor the native text context menu stays.
+      if (event.target.closest('.table-cell-editor')) return;
       const cell = event.target.closest('td, th');
       if (!cell) return;
+      const tableIndex = [...element.querySelectorAll('table')].indexOf(cell.closest('table'));
+      // A raw HTML table and the GFM tables of the same block do not share an
+      // index space; never open a neighbouring table's source from here.
+      if (!resolveTable(tableIndex)) return;
       event.preventDefault();
       element.dispatchEvent(new CustomEvent('inkstone:table-edit', {
         bubbles: true,
-        detail: { source: info.source, from: info.from, index: [...element.querySelectorAll('table')].indexOf(cell.closest('table')) }
+        detail: { source: info.source, from: info.from, index: tableIndex }
       }));
     });
     // Column resize handles are added after the text→source map is built so
@@ -137,6 +360,10 @@ class MarkdownWidget extends WidgetType {
         cell.addEventListener('mousedown', event => {
           if (column + 1 >= header.children.length || event.button !== 0) return;
           if (event.clientX < cell.getBoundingClientRect().right - 9) return;
+          // A native HTML table has no source range; a block whose DOM tables
+          // and GFM tables disagree must not resize a neighbouring table.
+          const resolved = resolveTable(tableIndex);
+          if (!resolved) return;
           event.preventDefault();
           event.stopPropagation();
           const startX = event.clientX;
@@ -163,13 +390,14 @@ class MarkdownWidget extends WidgetType {
           const onUp = () => {
             document.removeEventListener('mousemove', onMove);
             document.removeEventListener('mouseup', onUp);
-            const parsed = parseTables(info.source);
-            const target = parsed[tableIndex];
             // Dispatch on document: the widget may already have been replaced
-            // by source lines while the pointer was moving.
+            // by source lines while the pointer was moving. A detached block
+            // must not write its widths into whichever table happens to be at
+            // that offset now.
+            if (!element.isConnected) return;
             document.dispatchEvent(new CustomEvent('inkstone:table-width', {
               detail: {
-                absoluteStart: target ? info.toDoc(target.start) : info.from,
+                absoluteStart: info.toDoc(resolved.range.start),
                 widths: widths.map(value => value * 100 / total)
               }
             }));
@@ -178,12 +406,18 @@ class MarkdownWidget extends WidgetType {
           document.addEventListener('mouseup', onUp, { once: true });
         });
       });
+      // Row / column drag handles are added last: they are generated UI with no
+      // source counterpart, so they must never influence the character map.
+      bindTableReorder(element, info, table, tableIndex);
     }
-    // A rendered cell is edited in place: it shows the cell's own Markdown
-    // source, and only a real change is written back. Detaching the rendered
-    // child nodes into a fragment (instead of re-creating them from HTML) lets
-    // Escape and "no change" restore the exact same DOM, so the block's
-    // text→source map keeps working afterwards.
+    // A rendered cell is edited in place by a small CodeMirror instance whose
+    // document is exactly the cell's Markdown. The source stays the truth:
+    // the commit writes `state.doc` back to the cell's source range, while
+    // `cellDecorations` keeps bold / italic / code / link text typeset and
+    // shows the Markdown markers dimmed so they can be found and edited.
+    // Detaching the rendered child nodes into a fragment (instead of
+    // re-creating them from HTML) lets Escape and "no change" restore the exact
+    // same DOM, so the block's text→source map keeps working afterwards.
     const cellAt = (tableIndex, lineIndex, column) => {
       const table = element.querySelectorAll('table')[tableIndex];
       const row = table?.rows[lineIndex === 0 ? 0 : lineIndex - 1];
@@ -191,56 +425,135 @@ class MarkdownWidget extends WidgetType {
     };
 
     const startCellEdit = (cell, tableIndex) => {
-      if (!cell || cell.isContentEditable) return;
-      const table = parseTables(info.source)[tableIndex];
-      if (!table) return;
+      if (!cell || cell.querySelector('.table-cell-editor')) return;
+      // The source range comes from the renderer's table map, not from the
+      // model's row scan alone. A quoted heading with a pipe is its own block
+      // and a raw HTML table is not a GFM table, so the index is only trusted
+      // when both sides agree.
+      const resolved = resolveTable(tableIndex);
+      if (!resolved) return;
+      const { table, source: tableSource } = resolved;
       const rowIndex = cell.parentElement.rowIndex, column = cell.cellIndex;
-      const lines = info.source.slice(table.start, table.end).split('\n');
-      const lineIndex = rowIndex === 0 ? 0 : rowIndex + 1;
-      if (lineIndex >= lines.length) return;
-      let offset = table.start;
-      for (let index = 0; index < lineIndex; index++) offset += lines[index].length + 1;
-      const range = tableCellRanges(lines[lineIndex])[column];
+      const lines = tableSource.split('\n');
+      const range = cellSourceRange(tableSource, rowIndex, column);
       if (!range) return;
-      const markdown = lines[lineIndex].slice(range.from, range.to);
+      const lineIndex = range.lineIndex;
+      const markdown = range.markdown;
+      // Moving between cells: the open editor commits first, and the clicked
+      // cell is entered after the table has been rebuilt from that commit.
+      if (activeCellEdit && !activeCellEdit.element.isConnected) activeCellEdit.dispose();
+      if (activeCellEdit) {
+        if (activeCellEdit.element === element) {
+          activeCellEdit.continueAt({ tableIndex, lineIndex, column });
+          return;
+        }
+        activeCellEdit.finish('blur');
+        // The other block's commit may have rebuilt this widget after all.
+        if (!cell.isConnected) return;
+      }
+      // Freeze the table's current column widths while the raw Markdown is
+      // shown. Syntax markers and link destinations are wider than the rendered
+      // text; an auto-layout table would otherwise reflow every column on
+      // entering the cell. The temporary colgroup (or the fixed layout over the
+      // existing one) is removed again on Escape / no change.
+      const tableElement = cell.closest('table');
+      const previousLayout = tableElement.style.tableLayout;
+      const existingColumns = tableElement.querySelector('colgroup');
+      let temporaryColumns = null;
+      if (tableElement.rows[0]?.cells.length) {
+        const widths = [...tableElement.rows[0].cells].map(node => node.getBoundingClientRect().width);
+        const total = widths.reduce((sum, value) => sum + value, 0);
+        if (total > 0) {
+          temporaryColumns = document.createElement('colgroup');
+          temporaryColumns.dataset.mdSkip = '';
+          temporaryColumns.replaceChildren(...widths.map(value => {
+            const col = document.createElement('col');
+            col.style.width = `${(value * 100 / total).toFixed(3)}%`;
+            return col;
+          }));
+          existingColumns?.remove();
+          tableElement.prepend(temporaryColumns);
+          tableElement.style.tableLayout = 'fixed';
+        }
+      }
+      const restoreColumns = () => {
+        temporaryColumns?.remove();
+        if (existingColumns && !existingColumns.isConnected) tableElement.prepend(existingColumns);
+        tableElement.style.tableLayout = previousLayout;
+      };
       const originals = document.createDocumentFragment();
       while (cell.firstChild) originals.append(cell.firstChild);
-      cell.replaceChildren(document.createTextNode(markdown));
-      cell.contentEditable = 'plaintext-only';
+      const host = document.createElement('div');
+      host.className = 'table-cell-editor';
+      host.dataset.mdSkip = '';
+      cell.replaceChildren(host);
       cell.classList.add('table-cell-editing');
+      let cellView = null;
       let finished = false;
-      const restore = () => {
-        cell.contentEditable = 'false';
-        cell.classList.remove('table-cell-editing');
-        cell.replaceChildren(originals);
-      };
-      const cleanup = () => {
-        cell.removeEventListener('blur', onBlur);
-        cell.removeEventListener('keydown', onKey);
-      };
-      const value = () => (cell.textContent || '').replace(/[\r\n]+/g, ' ').replace(/(?<!\\)\|/g, '\\|').trim();
+      // Filled in after the view exists; key bindings only run once it is focused.
+      let submit = null, cancel = null;
+      const references = parsedFor(view.state.doc.toString(), info.id).document.references;
+      cellView = new EditorView({
+        parent: host,
+        state: EditorState.create({
+          doc: markdown,
+          extensions: [
+            cellPreview(references),
+            keymap.of([
+              { key: 'Escape', run: () => (cancel ? cancel() : false) },
+              // Enter appends a row; Shift-Enter has never inserted a line break
+              // into a cell, so it commits the same way.
+              { key: 'Enter', run: () => (submit ? submit('enter') : false) },
+              { key: 'Shift-Enter', run: () => (submit ? submit('enter') : false) },
+              { key: 'Tab', run: () => (submit ? submit('tab') : false) },
+              { key: 'Shift-Tab', run: () => (submit ? submit('shift-tab') : false) }
+            ]),
+            history({ minDepth: 50 }), keymap.of(historyKeymap),
+            EditorView.lineWrapping,
+            EditorView.contentAttributes.of({ spellcheck: 'false', 'aria-label': '表格单元格 Markdown', autocapitalize: 'off' })
+          ]
+        })
+      });
+      // A key that belongs to an IME candidate window must never reach the cell
+      // keymap. CodeMirror only knows a composition that the browser reported;
+      // an IME confirmation can also arrive as `isComposing` / keyCode 229.
+      // Stop it on the capture phase (so no earlier keymap runs), but let the
+      // browser / IME keep its default action.
+      host.addEventListener('keydown', event => {
+        if (event.isComposing || event.keyCode === 229) event.stopPropagation();
+      }, true);
       // Editable cells in reading order; the delimiter row is syntax, not content.
+      // This line is known to be a table row, so outer pipes are optional here.
       const order = [0, ...Array.from({ length: Math.max(0, lines.length - 2) }, (_, index) => index + 2)]
-        .flatMap(line => tableCellRanges(lines[line]).map((_, at) => ({ lineIndex: line, column: at })));
+        .flatMap(line => tableCellRanges(lines[line], { optionalOuterPipes: true }).map((_, at) => ({ lineIndex: line, column: at })));
       const target = step => {
         const at = order.findIndex(candidate => candidate.lineIndex === lineIndex && candidate.column === column);
         return at < 0 ? null : order[at + step] || null;
       };
-      const submit = (direction = 'blur') => {
-        if (finished) return;
+      const value = () => normalizeCellMarkdown(cellView.state.doc.toString());
+      /** Close the editor without writing: the original DOM comes back intact. */
+      const restore = () => {
+        if (cellView) { cellView.destroy(); cellView = null; }
+        host.remove();
+        cell.classList.remove('table-cell-editing');
+        cell.replaceChildren(originals);
+        restoreColumns();
+      };
+      submit = (direction = 'blur', continueAt = null, isolate = false) => {
+        if (finished) return true;
         finished = true;
-        cleanup();
-        const changes = [];
+        activeCellEdit = null;
+        const changes = [], next = value();
         // Nothing typed means nothing to write: no document change and no undo step.
-        if (value() !== markdown.trim()) {
-          changes.push({ from: toDocOffset(offset + range.from), to: toDocOffset(offset + range.to), insert: value() });
+        if (next !== markdown.trim()) {
+          changes.push({ from: toDocOffset(resolved.range.start + range.from), to: toDocOffset(resolved.range.start + range.to), insert: next });
         }
-        let focus = direction === 'tab' ? target(1) : direction === 'shift-tab' ? target(-1) : null;
+        let focus = continueAt || (direction === 'tab' ? target(1) : direction === 'shift-tab' ? target(-1) : null);
         if (direction === 'enter') {
           // Enter appends a body row, keeping the table's container prefix so a
           // table inside a quote or a list item stays inside it.
           const columns = Math.max(...table.rows.map(row => row.length), table.aligns.length);
-          const at = toDocOffset(table.end);
+          const at = toDocOffset(resolved.range.start + table.end);
           const prefix = rowPrefix(lines[lines.length - 1]);
           changes.push({ from: at, to: at, insert: `\n${prefix}|${Array(columns).fill('  ').join('|')}|` });
           focus = { lineIndex: lines.length, column: 0 };
@@ -248,45 +561,58 @@ class MarkdownWidget extends WidgetType {
         if (!changes.length) {
           restore();
           if (focus) startCellEdit(cellAt(tableIndex, focus.lineIndex, focus.column), tableIndex);
-          return;
+          return true;
         }
         pendingCellFocus = focus ? { blockFrom: info.from, tableIndex, ...focus } : null;
-        cell.contentEditable = 'false';
-        cell.classList.remove('table-cell-editing');
-        view.dispatch({ changes, effects: cellEffect.of(true) });
+        restore();
+        // One transaction for the whole cell edit: one undo step, and the table
+        // stays typeset because the commit is not caret-relative typing. A
+        // lifecycle commit (explicit save / close / document switch) is isolated
+        // so it cannot be merged with the typing that preceded it.
+        const spec = { changes, effects: cellEffect.of(true) };
+        if (isolate) spec.annotations = isolateHistory.of('full');
+        view.dispatch(spec);
         continuePendingCellEdit();
+        return true;
       };
-      const onBlur = () => submit('blur');
-      const onKey = key => {
-        // An IME owns Enter / Tab / Escape while a candidate window is open.
-        if (key.isComposing || key.keyCode === 229) return;
-        if (key.key === 'Escape') {
-          key.preventDefault();
-          finished = true;
-          cleanup();
-          restore();
-          view.focus();
-        } else if (key.key === 'Enter') {
-          key.preventDefault();
-          submit('enter');
-        } else if (key.key === 'Tab') {
-          key.preventDefault();
-          submit(key.shiftKey ? 'shift-tab' : 'tab');
-        }
+      cancel = () => {
+        if (finished) return true;
+        finished = true;
+        activeCellEdit = null;
+        restore();
+        view.focus();
+        return true;
       };
-      cell.addEventListener('blur', onBlur);
-      cell.addEventListener('keydown', onKey);
+      activeCellEdit = {
+        element,
+        cell,
+        isDirty: () => value() !== markdown.trim(),
+        isComposing: () => Boolean(cellView?.composing),
+        commit: () => submit('blur', null, true),
+        continueAt: targetCell => submit('blur', targetCell),
+        finish: direction => submit(direction),
+        dispose: () => { if (!finished) { finished = true; activeCellEdit = null; restore(); } }
+      };
+      // Leaving the cell commits, exactly as the old contenteditable did. Focus
+      // moving inside the cell editor is not leaving it.
+      host.addEventListener('focusout', event => {
+        if (finished) return;
+        if (event.relatedTarget && host.contains(event.relatedTarget)) return;
+        submit('blur');
+      });
       queueMicrotask(() => {
-        cell.focus();
-        const selection = window.getSelection(), editingRange = document.createRange();
-        editingRange.selectNodeContents(cell);
-        selection.removeAllRanges(); selection.addRange(editingRange);
+        if (finished || !host.isConnected) return;
+        cellView.dispatch({ selection: { anchor: 0, head: cellView.state.doc.length } });
+        cellView.focus();
       });
     };
     element._inkstone.editCell = (tableIndex, lineIndex, column) => startCellEdit(cellAt(tableIndex, lineIndex, column), tableIndex);
     element.addEventListener('mousedown', event => {
       // Right-click belongs to the context-menu handler (grid table editor).
       if (event.button !== 0) return;
+      // The in-cell editor owns its own pointer gestures (caret placement,
+      // source selection); a click inside it must not reopen the cell.
+      if (event.target.closest('.table-cell-editor')) return;
       // The edge of a header cell belongs to the column resizer.
       const headerCell = event.target.closest('th');
       if (headerCell && event.clientX >= headerCell.getBoundingClientRect().right - 9) return;
@@ -323,12 +649,14 @@ class MarkdownWidget extends WidgetType {
       // grid dialog for structural changes.
       const cell = event.target.closest('td, th');
       if (cell) {
-        // A click inside the cell that is being edited belongs to the browser's
-        // own caret handling, so the widget must not swallow it.
-        if (cell.isContentEditable) return;
+        // A click inside the cell editor is the nested editor's own business.
+        if (cell.querySelector('.table-cell-editor')) return;
         event.preventDefault();
         const tableIndex = [...element.querySelectorAll('table')].indexOf(cell.closest('table'));
         if (event.altKey) {
+          // Ambiguous DOM / GFM indices (a raw HTML table in the same block) must
+          // not open the grid editor on a neighbouring table.
+          if (!resolveTable(tableIndex)) return;
           element.dispatchEvent(new CustomEvent('inkstone:table-edit', {
             bubbles: true,
             detail: { source: info.source, from: info.from, index: tableIndex }
@@ -442,7 +770,7 @@ class RenderedInline extends WidgetType {
   ignoreEvent() { return true; }
 }
 
-/** Bullets, task boxes and rules replace their source prefix in the layout. */
+/** Bullets, task boxes, quotes and rules replace their source prefix in the layout. */
 class PrefixWidget extends WidgetType {
   constructor(kind, docFrom, checked, label) { super(); Object.assign(this, { kind, docFrom, checked, label }); }
   eq(other) { return this.kind === other.kind && this.docFrom === other.docFrom && this.checked === other.checked && this.label === other.label; }
@@ -451,6 +779,10 @@ class PrefixWidget extends WidgetType {
     span.className = `cm-prefix cm-prefix-${this.kind}`;
     if (this.kind === 'bullet') span.textContent = '•';
     if (this.kind === 'ordered') span.textContent = this.label;
+    if (this.kind === 'quote') {
+      span.setAttribute('aria-label', '引用');
+      span.setAttribute('aria-hidden', 'true');
+    }
     if (this.kind === 'hr') span.setAttribute('aria-label', '分隔线');
     if (this.kind === 'task') {
       span.textContent = this.checked ? '☑' : '☐';
@@ -469,20 +801,27 @@ class PrefixWidget extends WidgetType {
     }
     return span;
   }
-  ignoreEvent() { return true; }
+  // Let CodeMirror place the caret from a click on a bullet, quote marker or
+  // rule; clicking the left half of a compact marker lands inside its hidden
+  // source and the next decoration pass reveals it, so the rule is one click
+  // away from its Markdown source. A task widget owns its click (toggling the
+  // box), so the editor must not also move the caret there.
+  ignoreEvent() { return this.kind === 'task'; }
 }
 
 // Rendering the whole document once is what gives every block the same parse
 // environment. Cache by (document id + text): selection changes recompute
 // decorations but must not re-parse the file.
-let blockCache = { key: '', blocks: [], tokens: [], document: null };
+let blockCache = { key: '', blocks: [], tokens: [], document: null, math: null };
+const blockCacheKey = (id, source) => `${id}\u0000${mathNumberingEnabled() ? '1' : '0'}\u0000${source}`;
 function parsedFor(source, id) {
-  const key = `${id}\u0000${source}`;
+  const numbering = mathNumberingEnabled();
+  const key = blockCacheKey(id, source);
   // One parse per document version. Selection-only updates reuse both the
   // block HTML and the token ranges, which keeps caret movement cheap even
   // in long technical documents. `document` holds the normalised text and the
   // line table the active block is sliced and parsed from.
-  if (blockCache.key !== key) blockCache = { key, ...renderDocument(source, id), document: documentLines(source) };
+  if (blockCache.key !== key) blockCache = { key, ...renderDocument(source, id, { mathNumbering: numbering }), document: documentLines(source) };
   return blockCache;
 }
 
@@ -504,6 +843,10 @@ const codeHighlightStyle = HighlightStyle.define([
   { tag: [tags.comment, tags.lineComment, tags.blockComment, tags.docComment], color: 'var(--color-muted)', fontStyle: 'italic' }
 ]);
 
+// Heading typography belongs to the preview layer. CodeMirror's default
+// heading tag otherwise adds bold/underline even while a heading is pending.
+const editorHighlightStyle = HighlightStyle.define(defaultHighlightStyle.specs.filter(spec => spec.tag !== tags.heading));
+
 /** A language finished loading: refresh the blocks that fence it. */
 const refreshEffect = StateEffect.define();
 const previewViews = new Set();
@@ -514,7 +857,7 @@ onLanguageLoaded(language => {
   // editor-level parse cache has to go too, or it would hand the old HTML back
   // without asking the renderer again.
   invalidateFenceLanguages([language]);
-  blockCache = { key: '', blocks: [], tokens: [], document: null };
+  blockCache = { key: '', blocks: [], tokens: [], document: null, math: null };
   for (const view of previewViews) {
     if (!view.dom.isConnected) { previewViews.delete(view); continue; }
     view.dispatch({ effects: refreshEffect.of(true) });
@@ -529,7 +872,7 @@ const mathFence = /^\s*\$\$\s*$/;
 const fenceOpen = /^\s*(`{3,}|~{3,})\s*([^\s`~]*)/;
 const MAX_PREVIEW_BLOCK_LINES = 400;
 
-/** The `$$…$$` or ```mermaid block that contains `pos`, or null. */
+/** The `$$…$$` or ```mermaid / ```sequence / ```flow block that contains `pos`, or null. */
 function enclosingPreviewBlock(doc, pos) {
   const caret = doc.lineAt(pos);
   const first = Math.max(1, caret.number - MAX_PREVIEW_BLOCK_LINES);
@@ -540,8 +883,8 @@ function enclosingPreviewBlock(doc, pos) {
     const fence = fenceOpen.exec(text);
     if (fence) {
       const language = fence[2].toLowerCase();
-      if (language !== 'mermaid') return null;
-      opener = { kind: 'mermaid', number, marker: fence[1] };
+      if (language !== 'mermaid' && language !== 'sequence' && language !== 'flow') return null;
+      opener = { kind: language, number, marker: fence[1] };
       break;
     }
   }
@@ -561,11 +904,14 @@ function enclosingPreviewBlock(doc, pos) {
 }
 
 const previewEffect = StateEffect.define();
-const previewKey = preview => preview ? `${preview.kind}\u0000${preview.source}\u0000${preview.from}\u0000${preview.to}` : '';
+const previewKey = preview => preview ? `${preview.kind}\u0000${preview.source}\u0000${preview.renderSource || ''}\u0000${preview.mathKey || ''}\u0000${preview.from}\u0000${preview.to}` : '';
 
 const previewField = StateField.define({
   create: () => null,
   update(value, tr) {
+    // Manual source mode shows source only, so an existing preview is cleared
+    // immediately. Switching back is handled by the scheduler below.
+    if (tr.state.field(modeField, false)?.source) return null;
     for (const effect of tr.effects) if (effect.is(previewEffect)) value = effect.value;
     // Editing shifts the block; the widget position follows the document.
     if (tr.docChanged && value) value = { ...value, from: tr.changes.mapPos(value.from, -1), to: tr.changes.mapPos(value.to, 1) };
@@ -574,13 +920,19 @@ const previewField = StateField.define({
 });
 class PreviewWidget extends WidgetType {
   constructor(preview) { super(); Object.assign(this, preview); }
-  // Only the source decides whether the preview must be rebuilt; a move only
-  // refreshes the position the click puts the caret at.
-  eq(other) { return this.kind === other.kind && this.source === other.source; }
+  // The source and its prepared math decide whether the preview must be
+  // rebuilt; a move only refreshes the position the click puts the caret at.
+  eq(other) {
+    return this.kind === other.kind && this.source === other.source &&
+      (this.renderSource || '') === (other.renderSource || '') &&
+      (this.mathKey || '') === (other.mathKey || '');
+  }
   updateDOM(dom) {
     const info = dom._inkstone;
-    if (!info || info.source !== this.source || info.kind !== this.kind) return false;
+    if (!info || info.source !== this.source || info.kind !== this.kind ||
+      (info.renderSource || '') !== (this.renderSource || '')) return false;
     info.to = this.anchor;
+    info.mathKey = this.mathKey || '';
     dom.dataset.to = String(this.anchor);
     return true;
   }
@@ -592,7 +944,7 @@ class PreviewWidget extends WidgetType {
     wrap.setAttribute('role', 'note');
     // The widget ignores CodeMirror's own event handling, so the click that
     // returns the caret to the end of the source block is handled here.
-    wrap._inkstone = { kind: this.kind, source: this.source, to: this.anchor };
+    wrap._inkstone = { kind: this.kind, source: this.source, to: this.anchor, renderSource: this.renderSource || '', mathKey: this.mathKey || '' };
     wrap.addEventListener('mousedown', event => {
       event.preventDefault();
       event.stopPropagation();
@@ -610,15 +962,16 @@ class PreviewWidget extends WidgetType {
     body.className = 'md-live-preview-body';
     wrap.append(label, body);
     if (this.kind === 'math') {
-      const { html, error } = renderMath(this.source);
+      const { html, error } = renderMath(this.renderSource || this.source);
       if (error) body.innerHTML = `<p class="md-live-preview-error">${escapeHTML(error)}</p>`;
       else body.innerHTML = html;
     } else {
       const diagram = document.createElement('pre');
-      diagram.className = 'mermaid';
+      diagram.className = this.kind === 'mermaid' ? 'mermaid' : 'diagram';
+      if (this.kind !== 'mermaid') diagram.dataset.diagram = this.kind;
       diagram.textContent = this.source;
       body.append(diagram);
-      // The shared Mermaid queue renders asynchronously and shows a Chinese
+      // The shared diagram queue renders asynchronously and shows a Chinese
       // message in place of a failed diagram, so this cannot end up blank.
       queueMicrotask(() => renderDiagrams(body).catch(() => {}));
     }
@@ -645,7 +998,10 @@ const previewDecorations = StateField.define({
     if (!inside) return Decoration.none;
     const position = Math.min(preview.to, tr.state.doc.length);
     return Decoration.set([Decoration.widget({
-      widget: new PreviewWidget({ kind: preview.kind, source: preview.source, anchor: position }),
+      widget: new PreviewWidget({
+        kind: preview.kind, source: preview.source, anchor: position,
+        renderSource: preview.renderSource || '', mathKey: preview.mathKey || ''
+      }),
       block: true, side: 1
     }).range(position)]);
   },
@@ -657,22 +1013,51 @@ const previewDecorations = StateField.define({
  * re-typeset on every keystroke, and a Mermaid diagram is not queued per
  * character either.
  */
-const previewScheduler = ViewPlugin.fromClass(class {
+const previewSchedulerFor = id => ViewPlugin.fromClass(class {
   constructor(view) { this.timer = 0; this.schedule(view); }
-  update(update) { if (update.docChanged || update.selectionSet) this.schedule(update.view); }
+  update(update) {
+    const changed = update.transactions.some(transaction =>
+      transaction.effects.some(effect => effect.is(refreshEffect) || effect.is(modeEffect)));
+    if (update.docChanged || update.selectionSet || changed) this.schedule(update.view);
+  }
   schedule(view) {
     clearTimeout(this.timer);
     this.timer = setTimeout(() => {
       if (!view.dom.isConnected) return;
       // In source mode the whole document is code; a preview would duplicate
       // the block the user is already reading, so it only applies to the
-      // typeset view.
+      // typeset view. The large-document fallback is still a source layout,
+      // but a local formula or Mermaid preview needs no document-wide parse,
+      // so it keeps working there.
       const mode = view.state.field(modeField, false);
       const position = view.state.selection.main.head;
       let next = null;
       if (!mode?.source) {
         const block = enclosingPreviewBlock(view.state.doc, position);
-        if (block) next = { ...block, anchor: block.to };
+        if (block) {
+          next = { ...block, anchor: block.to };
+          // Only a formula needs the whole-document registry for labels and
+          // automatic numbers. Mermaid and the >260k source fallback stay on
+          // the local source and must not trigger parsedFor().
+          if (block.kind === 'math' && view.state.doc.length <= LIVE_PREVIEW_LIMIT) {
+            // Use the whole-document context for the viewed document. The
+            // global block cache may currently hold another document or an
+            // older numbering preference; parsedFor() reuses this document's
+            // existing render when it matches and otherwise rebuilds it through
+            // the normal shared-parse entry point. That prepared content
+            // already contains this formula's automatic number and every
+            // resolved reference.
+            const source = view.state.doc.toString();
+            const plan = blockCache.key === blockCacheKey(id, source) ? blockCache : parsedFor(source, id);
+            const line = view.state.doc.lineAt(block.from).number - 1;
+            const token = plan.tokens.find(token =>
+              token.type === 'math_block' && token.math && token.map?.[0] === line);
+            if (token?.math) {
+              next.renderSource = token.math.content;
+              next.mathKey = `${token.math.number ?? ''}\u0002${token.math.content}`;
+            }
+          }
+        }
       }
       const current = view.state.field(previewField, false);
       const changed = !next !== !current || (next && current && (next.kind !== current.kind || next.source !== current.source || next.to !== current.to));
@@ -693,9 +1078,9 @@ function blockOffset(live, state, pos, startLine) {
 
 function liveDecorations(state, id) {
   const mode = state.field(modeField);
-  if (mode.source || state.doc.length > 200000) return Decoration.none;
+  if (mode.source || state.doc.length > LIVE_PREVIEW_LIMIT) return Decoration.none;
   const source = state.doc.toString();
-  const { tokens, blocks, document } = parsedFor(source, id);
+  const { tokens, blocks, document, imageRoot } = parsedFor(source, id);
   const htmlByStart = new Map(blocks.map(block => [block.start, block.html]));
   const ranges = [], occupied = new Set();
   // Before any interaction, the caret at offset 0 must not turn the first
@@ -709,14 +1094,24 @@ function liveDecorations(state, id) {
     const from = state.doc.line(start + 1).from;
     const to = state.doc.line(end).to;
     if (from === to) continue;
+    // Only the block that owns a selection endpoint stays editable. A block
+    // that the selection merely passes through keeps its typeset layout and its
+    // Markdown hidden, so the page does not turn into source as the selection
+    // grows. Both endpoints are active: the anchor is where the drag (or
+    // Shift-extend) began and the head is where it is now, and each has to be
+    // visible to place a caret.
+    const active = selection.some(range =>
+      (range.anchor >= from && range.anchor <= to) || (range.head >= from && range.head <= to));
     // The active block stays editable, but reads as typeset prose: syntax
     // characters are removed from the layout until the caret comes near them,
     // and the content itself receives real typography (bold, italic, code…).
-    if (selection.some(range => range.from <= to && range.to >= from)) {
+    if (active) {
       // The block is parsed as a whole, so emphasis may cross soft line breaks
       // and code fences nested in a list are known to be literal. Only this
       // block is parsed, which keeps every keystroke proportional to it.
-      const live = liveBlock(document, start, end);
+      const editingLines = new Set(selection.filter(range => range.empty).map(range => state.doc.lineAt(range.head).number - 1));
+      const live = liveBlock(document, start, end, editingLines);
+      const pendingHeading = token.type === 'heading_open' && editingLines.has(end - 1);
       // Typora renders a completed syntax at once, even with the caret right
       // after the closing marker. Only a caret *inside* the element (or a
       // selection overlapping it) brings the source characters back.
@@ -725,9 +1120,18 @@ function liveDecorations(state, id) {
       })));
       live.lines.forEach((info, index) => {
         const line = state.doc.line(start + 1 + index);
+        // Keep the current heading line at body size until the caret leaves it.
+        // A Setext underline is also provisional: typing `- ` must not resize
+        // the preceding paragraph before the author finishes the list item.
+        const pendingLine = editingLines.has(start + index) && info.prefixes.some(prefix => prefix.kind === 'heading');
+        if (pendingLine) {
+          // Only the heading marker is provisional; an enclosing quote or list
+          // on the same line stays typeset.
+          info.prefixes = info.prefixes.filter(prefix => prefix.kind !== 'heading');
+          info.classes = info.classes.filter(name => !/^cm-lv-h[1-6]$/.test(name));
+        }
         const classes = ['cm-live-line', ...info.classes];
-        if (index === 0 && token.type === 'heading_open') classes.push(`cm-heading-${token.tag.slice(1)}`);
-        if (index === 0 && token.type === 'blockquote_open') classes.push('cm-live-quote');
+        if (index === 0 && token.type === 'heading_open' && !pendingHeading) classes.push(`cm-heading-${token.tag.slice(1)}`);
         ranges.push(Decoration.line({ class: classes.join(' ') }).range(line.from));
         // Code, formulas, HTML blocks and front matter are literal source.
         if (info.literal) return;
@@ -754,15 +1158,18 @@ function liveDecorations(state, id) {
           if (reveal.groups.has(replacement.group)) ranges.push(Decoration.mark({ class: 'cm-md-mark' }).range(from, to));
           else ranges.push(Decoration.replace({ widget: new RenderedInline(replacement.text) }).range(from, to));
         }
-        if (info.prefix) {
-          const prefixFrom = line.from + info.prefix.from, prefixTo = line.from + info.prefix.to;
-          if (reveal.prefix.has(index)) {
+        for (const prefix of info.prefixes) {
+          const prefixFrom = line.from + prefix.from, prefixTo = line.from + prefix.to;
+          if (reveal.prefixes.has(prefix)) {
             ranges.push(Decoration.mark({ class: 'cm-md-mark' }).range(prefixFrom, prefixTo));
-          } else if (info.prefix.kind === 'heading' || info.prefix.kind === 'quote') {
+          } else if (prefix.kind === 'heading') {
             ranges.push(Decoration.replace({ widget: hiddenMark }).range(prefixFrom, prefixTo));
           } else {
+            // A quote owns an inline indentation/rule span, so prefixes remain
+            // ordered correctly for `- > item` as well as `> - item`. The line
+            // class only contributes the muted quote colour.
             ranges.push(Decoration.replace({
-              widget: new PrefixWidget(info.prefix.kind, line.from + (info.prefix.checkOffset ?? 0), info.prefix.checked, info.prefix.label)
+              widget: new PrefixWidget(prefix.kind, line.from + (prefix.checkOffset ?? 0), prefix.checked, prefix.label)
             }).range(prefixFrom, prefixTo));
           }
         }
@@ -770,11 +1177,32 @@ function liveDecorations(state, id) {
       continue;
     }
     const text = state.doc.sliceString(from, to, '\n');
-    const html = htmlByStart.get(start) ?? renderMarkdown(text, id);
-    ranges.push(Decoration.replace({ widget: new MarkdownWidget(text, from, to, id, html), block: true }).range(from, to));
+    const html = htmlByStart.get(start) ?? renderMarkdown(text, id, { mathNumbering: mathNumberingEnabled(), imageRoot });
+    // A block strictly inside one selection range is a middle block: it stays
+    // typeset (no Markdown revealed, no layout change) and is only tinted.
+    const selected = selection.some(range => !range.empty && range.from <= from && range.to >= to);
+    ranges.push(Decoration.replace({ widget: new MarkdownWidget(text, from, to, id, html, selected), block: true }).range(from, to));
   }
   return Decoration.set(ranges, true);
 }
+
+/**
+ * Publish the layout on the editor element: `typeset`, explicit `source`, or
+ * `source-fallback` for a document past LIVE_PREVIEW_LIMIT. The benchmark and
+ * the desktop test use this instead of inferring the state from whether a
+ * widget happens to be visible in the viewport.
+ */
+const layoutMarker = ViewPlugin.fromClass(class {
+  constructor(view) { this.publish(view); }
+  update(update) { this.publish(update.view); }
+  publish(view) {
+    const source = view.state.field(modeField, false)?.source;
+    view.dom.dataset.inkstoneLength = String(view.state.doc.length);
+    view.dom.dataset.inkstoneLines = String(view.state.doc.lines);
+    view.dom.dataset.inkstoneLayout = source ? 'source'
+      : view.state.doc.length > LIVE_PREVIEW_LIMIT ? 'source-fallback' : 'typeset';
+  }
+});
 
 /** Tab / Shift+Tab walk table cells when the caret is on a GFM table row. */
 function tableTab(view, backwards) {
@@ -914,7 +1342,7 @@ export function createEditor(parent, doc, onChange, onSelection, onCommand, onIm
       // recompute once compositionend arrives and the text is committed.
       const mode = tr.state.field(modeField, false);
       if (mode?.composing && !mode.source) return tr.docChanged ? value.map(tr.changes) : value;
-      return tr.docChanged || tr.selection || tr.effects.some(e => e.is(modeEffect) || e.is(compositionEffect) || e.is(cellEffect) || e.is(refreshEffect))
+      return tr.docChanged || tr.selection || tr.effects.some(e => e.is(modeEffect) || e.is(compositionEffect) || holdsTypeset(e) || e.is(refreshEffect))
         ? liveDecorations(tr.state, doc.id) : value;
     },
     provide: field => EditorView.decorations.from(field)
@@ -929,7 +1357,7 @@ export function createEditor(parent, doc, onChange, onSelection, onCommand, onIm
     // are restored by applyEol() whenever text goes back out to disk.
     doc: toLf(doc.content),
     extensions: [
-      modeField, preview, gutter.of([]), spelling.of(EditorView.contentAttributes.of({ spellcheck: 'true', 'aria-label': 'Markdown 文档编辑器' })),
+      modeField, layoutMarker, preview, gutter.of([]), spelling.of(EditorView.contentAttributes.of({ id: 'write', spellcheck: 'true', 'aria-label': 'Markdown 文档编辑器' })),
       // Windows binds redo to Mod-y in historyKeymap, so this is the only
       // Mod-Shift-z binding. It has to run ahead of the keymap: some
       // environments report Shift+Z as a lowercase "z", which makes the plain
@@ -946,13 +1374,24 @@ export function createEditor(parent, doc, onChange, onSelection, onCommand, onIm
       })),
       // A longer grouping window keeps a continuous typing burst in one undo
       // step even when the caret crosses rendered block boundaries.
-      history({ minDepth: 100, newGroupDelay: 600 }), drawSelection(), highlightActiveLine(), highlightSelectionMatches(), bracketMatching(), closeBrackets(), indentOnInput(),
+      history({ minDepth: 100, newGroupDelay: 600 }),
+      // Reordering a table keeps the document typeset, and its undo / redo has
+      // to look the same instead of exposing the caret's block as Markdown.
+      invertedEffects.of(tr => tr.effects.filter(effect => effect.is(reorderEffect))),
+      drawSelection(), highlightActiveLine(), highlightSelectionMatches(), bracketMatching(), closeBrackets(), indentOnInput(),
       autocompletion({ override: [emojiCompletion], activateOnTyping: true, icons: false }),
       // `codeLanguages` gives the fence the caret is in a real parser (loaded on
       // demand by @codemirror/language-data); the extra highlight style maps its
       // tokens onto the same palette the rendered page uses.
-      markdown({ codeLanguages: languages }), syntaxHighlighting(defaultHighlightStyle), syntaxHighlighting(codeHighlightStyle),
-      previewField, previewDecorations, previewScheduler,
+      markdown({ codeLanguages: languages }), syntaxHighlighting(editorHighlightStyle), syntaxHighlighting(codeHighlightStyle),
+      // Run before the Markdown language's own Enter binding, which inserts
+      // an extra list/quote line before it lets the caret leave the container.
+      Prec.highest(keymap.of([{ key: 'Enter', run: view => {
+        const { doc, selection } = view.state;
+        if (enclosingPreviewBlock(doc, selection.main.head)?.kind === 'math') return false;
+        return containerEnter(view);
+      } }])),
+      previewField, previewDecorations, previewSchedulerFor(doc.id),
       EditorView.lineWrapping, placeholder('开始写作，或输入 # 创建标题'),
       // Panel labels and prompts follow the Chinese interface.
       EditorState.phrases.of(CHINESE_PHRASES),
@@ -998,6 +1437,11 @@ export function createEditor(parent, doc, onChange, onSelection, onCommand, onIm
         { key: 'Mod-Shift-0', run: dispatch('zoom-reset') },
         { key: 'Mod-Shift-=', run: dispatch('zoom-in') },
         { key: 'Mod-Shift--', run: dispatch('zoom-out') },
+        // The application menu owns ⌘⇧O on macOS and Ctrl+P on Windows / Linux.
+        // macOS keeps ⌘P as an editor binding (Typora's habit), registered only
+        // here: the renderer's own handler stays off in Electron, and the Windows
+        // menu accelerator is never duplicated by a second key registration.
+        ...(window.desktop && isMac ? [{ key: 'Mod-p', run: dispatch('quick-open') }] : []),
         ...(isMac ? [
           { key: 'Mod-t', run: dispatch('new') },
           { key: 'Mod-Alt-t', run: dispatch('table') },
@@ -1021,6 +1465,11 @@ export function createEditor(parent, doc, onChange, onSelection, onCommand, onIm
         ...closeBracketsKeymap, ...markdownKeymap, ...defaultKeymap, ...historyKeymap, ...searchKeymap, indentWithTab
       ]),
       EditorView.updateListener.of(update => {
+        // A cell editor lives inside a widget DOM. If that block was rebuilt by
+        // an edit from elsewhere (reload, external change, undo of another
+        // block), the cell is gone and its CodeMirror instance must not keep
+        // document listeners alive.
+        if (activeCellEdit && !activeCellEdit.element.isConnected) activeCellEdit.dispose();
         if (update.docChanged) onChange(applyEol(update.state.doc.toString(), eol));
         if (update.selectionSet || update.docChanged) onSelection(update);
       }),
@@ -1058,11 +1507,23 @@ export function createEditor(parent, doc, onChange, onSelection, onCommand, onIm
   previewViews.add(view);
   return {
     view,
-    destroy() { previewViews.delete(view); view.destroy(); },
+    destroy() {
+      if (activeCellEdit && view.dom.contains(activeCellEdit.element)) activeCellEdit.dispose();
+      previewViews.delete(view);
+      view.destroy();
+    },
     undo() { undo(view); view.focus(); },
     redo() { redo(view); view.focus(); },
     setSource(value) { view.dispatch({ effects: [modeEffect.of(value), gutter.reconfigure(value ? lineNumbers() : [])] }); },
-    setSpellcheck(value) { view.dispatch({ effects: spelling.reconfigure(EditorView.contentAttributes.of({ spellcheck: String(value), 'aria-label': 'Markdown 文档编辑器' })) }); },
+    /** Re-render every block after a preference that is baked into HTML.
+     *  Formula auto-numbering is the current caller: unlike the old CSS
+     *  counters, the number now has to be part of the KaTeX tree so references
+     *  and exports agree with the reading view. */
+    refreshRendered() {
+      blockCache = { key: '', blocks: [], tokens: [], document: null, math: null };
+      if (view.dom.isConnected) view.dispatch({ effects: refreshEffect.of(true) });
+    },
+    setSpellcheck(value) { view.dispatch({ effects: spelling.reconfigure(EditorView.contentAttributes.of({ id: 'write', spellcheck: String(value), 'aria-label': 'Markdown 文档编辑器' })) }); },
     find() { openSearchPanel(view); view.focus(); },
     setContent(value) {
       // A reload / history restore replaces the baseline the newline style is
@@ -1096,6 +1557,24 @@ export function createEditor(parent, doc, onChange, onSelection, onCommand, onIm
     insert(text) { view.dispatch(view.state.replaceSelection(toLf(text))); view.focus(); },
     /** The document as CodeMirror sees it: LF line breaks, same offsets as positions. */
     text() { return view.state.doc.toString(); },
+    /**
+     * Commit the active in-cell Markdown draft before an explicit lifecycle
+     * action reads the document (save, save as, close, document switch).
+     *
+     * Only a dirty, non-composing draft is committed: an unchanged cell stays
+     * open, and background flushes never call this. The commit is an isolated
+     * history step, so one undo removes exactly the committed draft and not
+     * the typing that preceded it.
+     */
+    commitActiveCell({ focus = false } = {}) {
+      const edit = activeCellEdit;
+      if (!edit || !view.dom.contains(edit.element)) return false;
+      if (!edit.element.isConnected) { edit.dispose(); return false; }
+      if (edit.isComposing() || !edit.isDirty()) return false;
+      edit.commit();
+      if (focus) view.focus();
+      return true;
+    },
     selectedText() {
       const range = view.state.selection.main;
       return range.empty ? view.state.doc.toString() : view.state.sliceDoc(range.from, range.to);
@@ -1106,9 +1585,24 @@ export function createEditor(parent, doc, onChange, onSelection, onCommand, onIm
       view.focus();
     },
     caretOffset() { return view.state.selection.main.head; },
-    /** Minimal, selection-preserving edit (used for persisted table widths). */
-    applyChange({ from, to, insert }) {
-      view.dispatch({ changes: { from, to, insert: toLf(insert) } });
+    /**
+     * Minimal, selection-preserving edit (persisted table widths). An array of
+     * changes becomes a single transaction, so one undo restores all of it.
+     */
+    applyChange(changes) {
+      const list = (Array.isArray(changes) ? changes : [changes]).map(change => ({ ...change, insert: toLf(change.insert) }));
+      view.dispatch({ changes: list });
+      view.focus();
+    },
+    /**
+     * A table row / column reorder. It is one isolated history step (typing
+     * nearby and two consecutive reorders stay separate undo steps) and it
+     * keeps the typeset layout, so the table the user dragged stays a table
+     * instead of turning into the caret's source block.
+     */
+    applyReorder(changes) {
+      const list = (Array.isArray(changes) ? changes : [changes]).map(change => ({ ...change, insert: toLf(change.insert) }));
+      view.dispatch({ changes: list, effects: reorderEffect.of(true), annotations: isolateHistory.of('full') });
       view.focus();
     },
     wrap(before, after = before, fallback = '文字') {

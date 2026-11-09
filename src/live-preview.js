@@ -42,18 +42,7 @@ import { documentLines, frontMatterRange, decodeEntity, referenceLabel, syntaxPa
 // module's API.
 export { documentLines };
 
-// A block prefix is complete even when the line has no content after it.
-// `-`, `- [ ]`, `- [x]`, `1.` and `>` are all valid (and parsed as lists /
-// quotes by CommonMark on their own), so they must typeset the moment the
-// last character is typed. `[]` also counts: CodeMirror's bracket autoclosing
-// produces it while `- [ ]` is being typed.
-const TASK_PREFIX = /^(\s{0,3})([-*+]|\d+[.)])[ \t]+\[([ xX]?)\](?:[ \t]+|$)/;
-const HEADING_PREFIX = /^(\s{0,3})(#{1,6})[ \t]+/;
-const QUOTE_PREFIX = /^(\s{0,3}>+)[ \t]?/;
-const BULLET_PREFIX = /^(\s{0,3})([-*+])(?:[ \t]+|$)/;
-const ORDERED_PREFIX = /^(\s{0,3})(\d+[.)])(?:[ \t]+|$)/;
 const FENCE_PREFIX = /^\s{0,3}(?:```|~~~)/;
-const HR_LINE = /^\s{0,3}(?:-{3,}|\*{3,}|_{3,})[ \t]*$/;
 // A GFM delimiter row always contains a pipe. Without this check a lone `-`
 // (or `- ` while typing a list item) is mistaken for a table and the bullet
 // only appears after the user types the item text.
@@ -70,39 +59,124 @@ const HTML_KINDS = new Set(['u', 'sub', 'sup', 'mark', 'kbd']);
 const VOID_TAGS = new Set(['br', 'hr', 'img', 'input', 'wbr', 'source', 'col', 'area', 'base', 'embed', 'link', 'meta', 'param', 'track']);
 
 const emptyInfo = length => ({
-  text: '', offset: 0, length, classes: [], prefix: null, marks: [], styles: [], groups: [],
-  replacements: [], plain: false, literal: false
+  text: '', offset: 0, length, classes: [], prefix: null, prefixes: [],
+  marks: [], styles: [], groups: [], replacements: [], plain: false, literal: false
 });
 
-/** Prefix of one line: bullet, task box, number, heading or quote marker. */
-function prefixOf(line) {
-  const task = TASK_PREFIX.exec(line);
-  if (task) {
-    return {
-      prefix: {
-        from: task[1].length, to: task[0].length, kind: 'task',
-        checked: /[xX]/.test(task[3]),
-        checkOffset: task[0].lastIndexOf('[') + 1
-      },
-      classes: ['cm-lv-list', 'cm-lv-task']
-    };
+/**
+ * Split one line's parsed block markers into the prefix segments that sit
+ * before the content. Nested containers interleave arbitrarily
+ * (`> - item`, `- > item`, `>> item`), so a single regex cannot describe the
+ * prefix: the marker positions and their types come from the parser, and this
+ * only walks the contiguous chain from the line start.
+ *
+ * While editing, a marker becomes visible syntax until its own separator (or,
+ * for a compact quote such as `>>`, the next quote marker) is complete. This
+ * keeps the current convention that `-`, `1.`, `>` and `>>` stay raw until a
+ * space is typed, while an outer quote can already be typeset next to an inner
+ * marker that is still missing its separator.
+ */
+function prefixOf(text, markers, editing, lineStart = 0) {
+  const empty = { prefixes: [], classes: [] };
+  if (!markers?.length) return empty;
+  // Marker positions come from the block parse; the chain below works with
+  // line-relative offsets because it compares them with the line text.
+  const ordered = markers
+    .map(marker => ({ ...marker, from: marker.from - lineStart, to: marker.to - lineStart }))
+    .sort((a, b) => a.from - b.from || a.to - b.to);
+  const lead = /^[ \t]*/.exec(text)[0].length;
+  const chain = [];
+  let at = lead;
+  for (;;) {
+    const marker = ordered.find(candidate => candidate.from === at);
+    if (!marker) break;
+    let to = marker.to;
+    while (to < text.length && (text[to] === ' ' || text[to] === '\t')) to++;
+    chain.push({ ...marker, markerTo: marker.to, to });
+    at = to;
   }
-  const heading = HEADING_PREFIX.exec(line);
-  if (heading) return { prefix: { from: heading[1].length, to: heading[0].length, kind: 'heading' }, classes: [`cm-lv-h${heading[2].length}`] };
-  const quote = QUOTE_PREFIX.exec(line);
-  if (quote) return { prefix: { from: 0, to: quote[0].length, kind: 'quote' }, classes: ['cm-lv-quote'] };
-  const bullet = BULLET_PREFIX.exec(line);
-  if (bullet) return { prefix: { from: bullet[1].length, to: bullet[0].length, kind: 'bullet' }, classes: ['cm-lv-list'] };
-  const ordered = ORDERED_PREFIX.exec(line);
-  if (ordered) {
-    // Typora typesets the list number as soon as `1. ` is typed; the literal
-    // `1. ` only reappears while the caret sits inside the prefix.
-    return {
-      prefix: { from: ordered[1].length, to: ordered[0].length, kind: 'ordered', label: ordered[2] },
-      classes: ['cm-lv-list', 'cm-lv-ordered']
-    };
+  if (!chain.length) return empty;
+
+  const ready = chain.map(() => !editing);
+  if (editing) {
+    // The innermost marker is the one the author is typing. An outer compact
+    // quote or list marker becomes ready once the marker that follows it is.
+    for (let index = chain.length - 1; index >= 0; index--) {
+      const marker = chain[index];
+      if (marker.to > marker.markerTo) ready[index] = true;
+      else if (index + 1 < chain.length && ready[index + 1]) ready[index] = true;
+    }
   }
-  return { prefix: null, classes: [] };
+
+  const prefixes = [], classes = [];
+  chain.forEach((marker, index) => {
+    if (!ready[index]) return;
+    const previous = index > 0 ? chain[index - 1] : null;
+    // A task item is one checkbox in the active view. Its direct list marker
+    // is absorbed into the checkbox range; outer lists and quotes remain.
+    if (marker.type === 'list' && chain[index + 1]?.type === 'task' && ready[index + 1]) return;
+    if (marker.type === 'quote') {
+      const from = index === 0 ? 0 : marker.from;
+      prefixes.push({ from, to: marker.to, kind: 'quote' });
+      classes.push('cm-lv-quote');
+    } else if (marker.type === 'heading') {
+      prefixes.push({ from: marker.from, to: marker.to, kind: 'heading' });
+      classes.push(`cm-lv-h${marker.level}`);
+    } else if (marker.type === 'task') {
+      const from = previous?.type === 'list' && ready[index - 1] ? previous.from : marker.from;
+      prefixes.push({ from, to: marker.to, kind: 'task', checked: marker.checked, checkOffset: marker.from + 1 });
+      classes.push('cm-lv-list', 'cm-lv-task');
+    } else if (marker.type === 'list') {
+      const label = text.slice(marker.from, marker.markerTo);
+      if (/^\d/.test(label)) {
+        prefixes.push({ from: marker.from, to: marker.to, kind: 'ordered', label });
+        classes.push('cm-lv-list', 'cm-lv-ordered');
+      } else {
+        prefixes.push({ from: marker.from, to: marker.to, kind: 'bullet' });
+        classes.push('cm-lv-list');
+      }
+    }
+  });
+  return { prefixes, classes: [...new Set(classes)] };
+}
+
+/**
+ * An empty list marker that is still being typed. A bare `- ` after a
+ * paragraph is parsed as a Setext underline, and the same ambiguity inside a
+ * quote can hide both the quote marker and the list marker. Recover only the
+ * contiguous prefix of the current line: quote markers plus one empty list
+ * marker. Without the separator the marker itself stays raw; a completed
+ * underline, rule, code, formula or a marker followed by text is untouched.
+ */
+function inProgressEmptyList(text) {
+  let at = 0, lead = 0;
+  while (lead < 3 && (text[lead] === ' ' || text[lead] === '\t')) lead++;
+  at = lead;
+  const quotes = [];
+  while (text[at] === '>') {
+    quotes.push({ type: 'quote', from: at, to: at + 1 });
+    at++;
+    if (text[at] === ' ' || text[at] === '\t') at++;
+  }
+  let indent = 0;
+  while (indent < 3 && (text[at] === ' ' || text[at] === '\t')) { at++; indent++; }
+  const match = /^(?:[-*+]|\d+[.)])/.exec(text.slice(at));
+  if (!match) return null;
+  const from = at;
+  at += match[0].length;
+  const rest = text.slice(at);
+  if (!rest) return { quotes, list: null };
+  if (!/^[ \t]+$/.test(rest)) return null;
+  return { quotes, list: { type: 'list', from, to: at } };
+}
+
+/** One span for callers that only need to remove/reveal the whole prefix. */
+function combinePrefixes(prefixes) {
+  if (!prefixes.length) return null;
+  if (prefixes.length === 1) return prefixes[0];
+  // The innermost segment owns the kind/checkbox metadata, while the range
+  // covers every segment so the reading-view parity check cuts all of them.
+  return { ...prefixes[prefixes.length - 1], from: prefixes[0].from, to: prefixes[prefixes.length - 1].to };
 }
 
 /**
@@ -113,7 +187,7 @@ function prefixOf(line) {
  * editing ranges and every entry of `lines` is the info for one source line,
  * with offsets relative to that line start.
  */
-export function liveBlock(document, startLine, endLine) {
+export function liveBlock(document, startLine, endLine, editingLines) {
   const source = document.source;
   const lineStarts = document.lineStarts;
   const last = Math.min(endLine, lineStarts.length);
@@ -130,6 +204,13 @@ export function liveBlock(document, startLine, endLine) {
   const marks = [];
   const styles = [];
   const replacements = [];
+  const lineMarkers = texts.map(() => []);
+  // A thematic break is whatever the CommonMark parse says it is: `* * *`,
+  // `___` and a rule nested in a quote or list item are rules, while a Setext
+  // underline (`标题` + `---`), a table delimiter row, a fence line and front
+  // matter are not. Describing them from the tree instead of the line text is
+  // what keeps this layer agreeing with the reading view.
+  const rules = new Map();
   // null = ordinary prose, 'literal' = source shown as written (code, formula),
   // 'plain' = syntax dimmed by the caller (`inlineMarks`).
   const kinds = texts.map(() => null);
@@ -357,6 +438,31 @@ export function liveBlock(document, startLine, endLine) {
       stack.push(ref.name);
       const parent = stack[stack.length - 2];
       switch (ref.name) {
+        case 'HeaderMark': {
+          // A Setext underline is not a rule and not a list marker; the parse
+          // already tells it apart, so only an ATX `#` becomes a prefix.
+          if (/^ATXHeading[1-6]$/.test(parent)) {
+            const line = lineAt(ref.from);
+            lineMarkers[line].push({ type: 'heading', level: Number(parent.slice(-1)), from: ref.from, to: ref.to });
+          }
+          break;
+        }
+        case 'HorizontalRule': {
+          const line = lineAt(ref.from);
+          rules.set(line, { from: ref.from - starts[line], to: ref.to - starts[line] });
+          break;
+        }
+        case 'ListMark':
+          lineMarkers[lineAt(ref.from)].push({ type: 'list', from: ref.from, to: ref.to });
+          break;
+        case 'QuoteMark':
+          lineMarkers[lineAt(ref.from)].push({ type: 'quote', from: ref.from, to: ref.to });
+          break;
+        case 'TaskMarker':
+          lineMarkers[lineAt(ref.from)].push({
+            type: 'task', from: ref.from, to: ref.to, checked: /[xX]/.test(blockText.slice(ref.from, ref.to))
+          });
+          break;
         case 'FencedCode': classify(ref.from, ref.to, 'literal'); break;
         case 'CodeBlock': classify(ref.from, ref.to, 'literal'); break;
         case 'MathBlock': classify(ref.from, ref.to, 'literal'); break;
@@ -412,15 +518,35 @@ export function liveBlock(document, startLine, endLine) {
       lines.push(info);
       continue;
     }
-    if (HR_LINE.test(text)) {
-      info.prefix = { from: 0, to: text.length, kind: 'hr' };
-      info.classes.push('cm-lv-hr');
-      lines.push(info);
-      continue;
+    const editing = Boolean(editingLines?.has(startLine + index));
+    let markers = lineMarkers[index];
+    if (editing && !markers.some(marker => marker.type === 'list' || marker.type === 'task')) {
+      const pending = inProgressEmptyList(text);
+      if (pending) {
+        const offset = lineFrom;
+        markers = [
+          ...pending.quotes.map(marker => ({ ...marker, from: marker.from + offset, to: marker.to + offset })),
+          ...(pending.list ? [{ ...pending.list, from: pending.list.from + offset, to: pending.list.to + offset }] : [])
+        ];
+      }
     }
-    const prefix = prefixOf(text);
-    info.prefix = prefix.prefix;
+    const prefix = prefixOf(text, markers, editing, lineFrom);
+    info.prefixes = prefix.prefixes;
     info.classes.push(...prefix.classes);
+    // The rule owns the rest of its line, after the container markers. An
+    // enclosing quote or list layer stays a prefix of its own, so a nested
+    // rule keeps its nesting instead of flattening to one span. A marker that
+    // is still waiting for its separator (`>---`) keeps the whole line as
+    // source: a rule may only absorb whitespace before it.
+    const rule = rules.get(index);
+    if (rule) {
+      const start = info.prefixes.length ? info.prefixes[info.prefixes.length - 1].to : 0;
+      if (/^[ \t]*$/.test(text.slice(start, rule.from))) {
+        info.prefixes.push({ from: start, to: text.length, kind: 'hr' });
+        info.classes.push('cm-lv-hr');
+      }
+    }
+    info.prefix = combinePrefixes(info.prefixes);
     if (text.includes('|') && (text.trimStart().startsWith('|') || /\s\|\s/.test(text))) info.classes.push('cm-lv-table');
     pushLineMarks(info, marks, lineFrom, lineTo);
     pushLineStyles(info, styles, lineFrom, lineTo);
@@ -428,12 +554,12 @@ export function liveBlock(document, startLine, endLine) {
       if (replacement.from < lineFrom || replacement.to > lineTo) continue;
       info.replacements.push({ from: replacement.from - lineFrom, to: replacement.to - lineFrom, text: replacement.text, group: replacement.group });
     }
-    if (prefix.prefix) {
+    if (info.prefix) {
       // The prefix owns its characters. The inline parse of `- [x]` sees a
       // shortcut link in the task box, and the block markers of nested quotes
-      // are part of the prefix as well; the prefix widget is what renders
-      // those characters, so nothing inside them may be hidden twice.
-      const outside = range => range.to <= prefix.prefix.from || range.from >= prefix.prefix.to;
+      // are part of the prefix as well; the prefix widgets render those
+      // characters, so nothing inside them may be hidden twice.
+      const outside = range => range.to <= info.prefix.from || range.from >= info.prefix.to;
       info.marks = info.marks.filter(outside);
       info.styles = info.styles.filter(outside);
       info.replacements = info.replacements.filter(outside);
@@ -496,10 +622,15 @@ export function blockReveal(block, ranges) {
   const groups = new Set();
   block.groups.forEach((group, index) => { if (inside(ranges, group.from, group.to)) groups.add(index); });
   const prefix = new Set();
+  const prefixes = new Set();
   block.lines.forEach((info, index) => {
-    if (info.prefix && inside(ranges, info.offset + info.prefix.from, info.offset + info.prefix.to)) prefix.add(index);
+    for (const segment of info.prefixes || []) {
+      if (!inside(ranges, info.offset + segment.from, info.offset + segment.to)) continue;
+      prefixes.add(segment);
+      prefix.add(index);
+    }
   });
-  return { groups, prefix };
+  return { groups, prefix, prefixes };
 }
 
 /**
@@ -510,7 +641,11 @@ export function blockReveal(block, ranges) {
 export function revealFor(info, ranges) {
   const groups = new Set();
   (info.groups || []).forEach((group, index) => { if (inside(ranges, group.from, group.to)) groups.add(index); });
-  return { groups, prefix: Boolean(info.prefix && inside(ranges, info.prefix.from, info.prefix.to)) };
+  const prefixes = new Set();
+  for (const segment of info.prefixes || []) {
+    if (inside(ranges, info.offset + segment.from, info.offset + segment.to)) prefixes.add(segment);
+  }
+  return { groups, prefix: prefixes.size > 0, prefixes };
 }
 
 /**
@@ -519,7 +654,7 @@ export function revealFor(info, ranges) {
  * `liveBlock()` so that syntax spanning soft line breaks is parsed as one.
  */
 export function liveLine(line) {
-  const block = liveBlock(documentLines(line), 0, 1);
+  const block = liveBlock(documentLines(line), 0, 1, new Set([0]));
   const info = block.lines[0] || emptyInfo(line.length);
   info.text = line;
   return { ...info, groups: block.groups };

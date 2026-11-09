@@ -13,7 +13,7 @@ export function browserBridge() {
     setTimeout(() => URL.revokeObjectURL(url), 10000);
   };
   const actions = {
-    bootstrap: () => ({ documents: [], preferences: { theme: 'light', fontSize: 16, lineWidth: 860, autoSave: false, focus: false, typewriter: false, spellcheck: true, mathNumbering: false, headingNumbering: false, sidebarWidth: 240, zoomLevel: 0, windowBounds: null, windowMaximized: false, showFormatbar: true, uiMode: 'typora', sidebarVisible: false }, platform: mac ? 'darwin' : 'win32', titleBar: { overlay: false, height: 38, controlsWidth: 0, trashName: mac ? '废纸篓' : '回收站' } }),
+    bootstrap: () => ({ documents: [], preferences: { theme: 'light', fontSize: 16, lineWidth: 860, autoSave: false, focus: false, typewriter: false, spellcheck: true, mathNumbering: false, headingNumbering: false, sidebarWidth: 240, zoomLevel: 0, windowBounds: null, windowMaximized: false, showFormatbar: true, uiMode: 'typora', sidebarVisible: false, pdfExport: { header: '', footer: '', pageNumbers: false, pageSize: 'css', landscape: false, margins: 'css' }, pdfPresets: [] }, platform: mac ? 'darwin' : 'win32', titleBar: { overlay: false, height: 38, controlsWidth: 0, trashName: mac ? '废纸篓' : '回收站' } }),
     newDocument: (content, name) => create(content, name || '未命名.md', name ? false : !!content),
     updateDocument(id, content) { const doc = docs.get(id); doc.content = content; doc.dirty = true; return { ...doc }; },
     async openDocument() {
@@ -32,12 +32,14 @@ export function browserBridge() {
     closeDocument(id) { const doc = docs.get(id); if (doc.dirty && !confirm('关闭此文档？浏览器预览中的未保存内容会丢失。')) return false; docs.delete(id); return true; },
     settings: patch => patch,
     openExternal: url => { if (/^https?:/.test(url)) window.open(url, '_blank', 'noopener,noreferrer'); },
-    exportDocument(id, format, html) {
+    exportDocument(id, format, payload) {
       if (format !== 'html' && format !== 'pdf') return unavailable();
       if (format === 'pdf') { window.print(); return '打印对话框'; }
+      const html = typeof payload === 'string' ? payload : payload?.html;
+      if (typeof html !== 'string') throw new Error('导出内容无效。');
       const name = docs.get(id).name.replace(/\.[^.]+$/, '') + '.html'; download(html, name, 'text/html'); return name;
     },
-    openFolder: unavailable, openFolderPath: unavailable, refreshFolder: () => null,
+    openFolder: unavailable, openFolderPath: unavailable, refreshFolder: () => null, activeFolder: () => null,
     searchFolder: async () => ({ query: '', files: [], total: 0, truncated: false, cancelled: false }),
     cancelSearch: () => true, recentFiles: () => [], clearRecent: () => [], saveSession: () => true,
     createEntry: unavailable, renameEntry: unavailable, trashEntry: unavailable, revealPath: unavailable,
@@ -54,7 +56,7 @@ export function browserBridge() {
     },
     readClipboardText: () => navigator.clipboard?.readText() ?? Promise.resolve(''),
     capabilities: () => ({ installed: false, version: null, platform: navigator.platform }),
-    copyImage: unavailable, copyImagePath: unavailable, newWindow: () => { window.open(location.href, '_blank'); return true; }, appMenu: () => false,
+    copyImage: unavailable, copyImagePath: unavailable, chooseImageRoot: unavailable, newWindow: () => { window.open(location.href, '_blank'); return true; }, appMenu: () => false,
   };
   const bridge = Object.fromEntries(Object.entries(actions).map(([key, fn]) => [key, async (...args) => {
     try { return { ok: true, value: await fn(...args) }; } catch (error) { return { ok: false, error: error.message }; }

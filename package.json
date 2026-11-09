@@ -2,9 +2,10 @@
   "name": "inkstone-editor",
   "version": "0.1.0",
   "private": true,
-  "description": "墨页 — a local-first Markdown editor for macOS and Windows",
+  "description": "墨页 — a local-first Markdown editor for macOS, Windows and Linux",
   "author": "Inkstone",
   "main": "electron/main.cjs",
+  "desktopName": "inkstone.desktop",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
@@ -14,6 +15,7 @@
     "visual": "node test/visual-check.mjs",
     "package:mac": "npm run build && electron-builder --mac dir",
     "package:win": "npm run build && electron-builder --win nsis",
+    "package:linux": "npm run build && electron-builder --linux AppImage --publish never",
     "package": "npm run build && electron-builder"
   },
   "build": {
@@ -41,6 +43,20 @@
         "nsis"
       ]
     },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Office",
+      "synopsis": "Local-first Markdown editor",
+      "syncDesktopName": true,
+      "desktop": {
+        "entry": {
+          "Name": "Inkstone",
+          "Name[zh_CN]": "墨页"
+        }
+      }
+    },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
@@ -52,6 +68,8 @@
           "markdown"
         ],
         "name": "Markdown document",
+        "description": "Markdown document",
+        "mimeType": "text/markdown",
         "role": "Editor"
       }
     ]

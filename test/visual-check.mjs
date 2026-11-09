@@ -81,11 +81,11 @@ try {
   await page.locator('.cm-content').click();
   await page.keyboard.type('# 前缀即时排版', { delay: 12 });
   await page.keyboard.insertText('\n\n');
-  await page.keyboard.type('- [ ]', { delay: 25 });
+  await page.keyboard.type('- [ ] ', { delay: 25 });
   await page.keyboard.insertText('\n');
-  await page.keyboard.type('-', { delay: 25 });
+  await page.keyboard.type('- ', { delay: 25 });
   await page.keyboard.insertText('\n- [x] 已完成，用于对照勾选态复选框\n');
-  await page.keyboard.type('>', { delay: 25 });
+  await page.keyboard.type('> ', { delay: 25 });
   await page.keyboard.insertText('\n> 引用文字，用于对照上方的空引用行。');
   await page.waitForTimeout(500);
   await page.screenshot({ path: shot('prefixes') });

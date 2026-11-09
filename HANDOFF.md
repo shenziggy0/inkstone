@@ -45,6 +45,7 @@ node test/desktop.mjs
 | `tokens.css`、`src/styles.css` | Typora 默认主题色板与排版（纯白纸面、16px/1.6、860px 列宽、标题下细线、浅灰代码块、蓝色链接）、深色 Night 风格、极简 chrome 与工作台两套外观 |
 | `src/browser.js` | 浏览器开发预览用的桌面接口替身 |
 | `electron/main.cjs`、`electron/preload.cjs` | 原生菜单与快捷键矩阵、沉浸式标题栏、对话框、**按窗口路由的 IPC**、每窗口独立文档存储、文件工作区、主题目录、版本历史、外部变更轮询、原生剪贴板、缩放/窗口状态持久化、Pandoc 能力探测与导入导出 |
+| `electron/theme-css.cjs` | 主题加载：按入口 CSS 是否含实际 `#write` 选择器识别 Typora / legacy 模式，整棵 import 树继承；本地 `@import` 递归内联、`url()` 字体/图片转 data URL、`realpath` 限制在主题目录内并拒绝网络/UNC/绝对路径/符号链接/复杂资源语法逃逸；Typora 模式把 `#write` 映射到单一内容面（编辑器 `#write`、导出 `.write-surface`），legacy 模式保留原始选择器语义 |
 | `electron/store.cjs` | 原文读取、文件身份识别、原子写入、磁盘版本检查、保存历史、恢复副本及 `syncAssets()` 资源同步 |
 | `electron/assets.cjs` | 图片与链接路径统一解析：UNC/设备路径/带 host 的 `file://` 拒绝、图片扩展名白名单（realpath 后复查）、可执行文件与 `PATHEXT` 拒绝、未保存文档临时图片目录 |
 | `electron/search.cjs` | 文件夹全文搜索（逐行匹配、片段窗口、单文件/总量上限、跳过 `node_modules` 等目录、可取消）与文件名/工作区边界校验 |
@@ -178,6 +179,7 @@ node test/desktop.mjs
 4. **第 4 批：图片与资源路径统一解析。** 新增 `electron/assets.cjs`：协议、剪贴板、HTML 导出共用一套解析；UNC、`\?\UNC\` 与 `\.\` 设备路径、带 host 的 `file://` 在第一次文件系统调用前拒绝（避免 Windows 上仅 `realpath` 就泄露 NTLM 哈希），`realpath` 之后再查一次；图片只接受白名单扩展名且必须是真实文件；文档链接允许任意类型，但可执行/脚本扩展名（含 Windows `PATHEXT` 声明的全部类型）一律拒绝。DOMPurify 的保留属性改为 `FORBID_ATTR` 配置而不是字符串二次遍历；未保存文档的图片进入按文档 id 派生的临时目录，首次保存时迁移，崩溃恢复沿用原 id 的目录，关闭与启动时清理过期目录。回归：`test/assets.test.js`（12 项）+ 相关 `test/store.test.js` 用例，桌面 STEP 60–66 / 79–80 / 101–102。
 5. **第 5 批：欢迎页、默认外观、侧栏与 Windows 标题栏、中文化。** 欢迎页改为「未修改」的命名文档（`欢迎使用.md`），首个打开的文件替换它、编辑后成为普通未保存文档；默认极简外观下保留侧栏开关、新建、主题、设置与菜单按钮；侧栏列出全部已打开文档（切换、未保存标记、键盘操作、关闭提示）；Windows / Linux 使用单条 38px 标题栏（`titleBarOverlay` 随主题换色、原生菜单按钮、全屏时释放右侧留白）；查找替换面板、菜单、回收站/废纸篓提示中文化。回归：桌面 STEP 1–4 / 33 / 75–77 / 85–86；macOS 红绿灯位置联动无自动覆盖（需 macOS）。
 6. **第 6A 批：搜索、会话、文件树、链接、高亮与实时预览。** 新增 `electron/search.cjs`（文件夹全文搜索：逐行匹配、片段窗口、单文件/总量上限、跳过构建目录、可取消、未保存内容覆盖磁盘字节、文件名校验、工作区边界）与 `electron/session.cjs`（最近文件/文件夹、会话恢复、缺失与网络位置剔除）；文件树支持新建、重命名、移到回收站、刷新；新增 `src/links.js` 处理本地 `.md` 链接与跨文档锚点（可执行文件与网络路径仍拒绝）；活跃代码块用 `@codemirror/language-data` 高亮，`src/highlight.js` 改为「核心 18 种内置 + 其余按需动态加载」，导出前预取；公式块与 Mermaid 图表支持输入时实时预览并显示语法错误。回归：`test/search.test.js`（9 项）、`test/session.test.js`（5 项）、`test/links.test.js`（6 项）、新增 `test/highlight.test.js`（4 项），桌面 STEP 87–103。
+7. **第 7A 批：Typora CSS 主题兼容。** 新增 `electron/theme-css.cjs`，复用现有 `readTheme` / `applyCustomTheme`：本地 `@import` 按被导入文件的位置递归内联，`@font-face` 的 woff2/woff/ttf 与 CSS 图片按 `realpath` 限制在 `<userData>/themes` 内后转成 data URL；网络、`file:`、UNC/设备路径、Windows 盘符、绝对路径、`..` 越界与符号链接逃逸全部变成空资源，不再依赖网络或新增协议。选择器层先按入口主题是否存在**实际 `#write` 选择器**识别模式，并让整棵 `@import` 树继承：Typora 模式把 `#write` 本身映射到单一文档面（CodeMirror 内容新增 `id="write"`，导出/打印 article 新增 `.write-surface`），后代排版仍通过 `#write ...` 作用到 `.md-widget` 与导出正文；不再把 `#write` 的 `padding-bottom` 落到每个 `.prose` 区块。legacy 模式（未使用 `#write` 的旧墨页 CSS）保留原始选择器/prelude/声明语义，`.topbar`、`button[data-command="settings"]`、`.prose p` 等选择器不再被强制包一层文档作用域；两种模式仍共用本地资源、安全声明和上限检查。Typora 模式下 `html`/`body` 只作用于编辑器/导出正文，`#write h1`、正文、链接、`code`/`pre`、`table`、`blockquote` 及 `.md-fences` / `.md-task-list-item` / `.md-meta-block` / `.md-toc` 做代表性映射；标题字号/字体/颜色/行高还会同步到活跃排版行。资源重写只处理真实 `url()` token：`url()` 内的 data URL 原样保留，避免二次包裹；`image-set` / `-webkit-image-set` / `image` / `cross-fade` / `paint` / `src` 与转义函数名（如 `u\72l`）明确拒绝，普通 `content` 字符转义保留。源 CSS（含 `@import`）上限 2 MiB，展开输出上限 8 MiB，超限明确报错而不是 `slice` 截断已嵌入资源。渲染进程用递增请求序号丢弃晚返回的旧主题，避免覆盖新选择。HTML/PDF/PNG 导出沿用同一份 CSS 与 data URL 资源，PNG 背景取主题纸张色。回归：`test/theme-css.test.js`（12 项：导入/字体、远程与遍历拒绝、符号链接、旧主题、文件名、资源门、选择器/声明/at-rule 逃逸、导出 `<style>` 逃逸、data URL/复杂资源语法、超限报错、legacy 原始选择器/按钮选择器、模式识别边界），新增独立 `test/theme.desktop.mjs`（偏好入口切换、编辑/预览/打印样式、开/存、HTML/PDF/PNG、切回内置、晚返回竞态）。本机另用 `/tmp` 临时 profile 实测 Typora 1.14.15 的 GitHub / Night / Newsprint：GitHub 4 个 woff2 与 Open Sans 生效，Newsprint 4 个 woff2 与 PT Serif 生效，Night 的 3 个本地 `@import` 内联生效；正文/标题/链接/代码/表格/引用计算样式、打开与保存、HTML/PDF/PNG 均通过，且无网络请求。外部 `check-typora-themes.mjs` 的 default（含 legacy 应用选择器）/ security / style-escape / legacy 模式均通过，security 模式用本机 HTTP 服务器确认零请求；legacy 模式回归包含 `.topbar` 与 `button[data-command="settings"]` 原生选择器。
 
 **本轮新增单测**：`test/highlight.test.js`（4 项，只 import `src/highlight.js`，不启动 Electron）——覆盖「文档请求了哪些语言」「未知语言如何回退」「语言包到达后是否注册别名」。因此 `npm test` 由 136 项变为 **140 项**；桌面用例仍为 **103 步**。
 
@@ -195,9 +197,14 @@ node test/desktop.mjs
 ### 已知边界（十轮后仍未根治）
 
 - 活跃块是「行内装饰模拟排版」，Typora 是「可编辑渲染 DOM」；嵌套强调（`**粗 *斜* 字**`）的内层标记仍只淡化不隐藏；跨块拖选时中间块展开为源码行而非保留渲染高亮。**窗口 chrome 与默认主题排版已按 Typora 对齐**，但原生菜单栏、系统窗口装饰、主题内每一条 CSS 规则仍不是像素级复刻。
+- Typora 主题兼容是**代表性选择器子集**：`#write` / `html` / `body`、标题、正文、链接、`code` / `pre`、表格、引用与本地字体已验证；`@include-when-export`、远程资源和 `image-set` / 转义函数名等复杂资源写法被明确拒绝，`#write` 的 padding 仍由编辑器布局控制（避免破坏打字机/打印布局），活动单行标题在编辑时有意的保持正文字号。未使用 `#write` 的旧墨页 CSS 保持原始选择器语义（包括 `.topbar`、按钮选择器与 `.prose`）；含 `#write` 的 Typora 主题才进入受限正文映射。真实 Typora 主题不隐藏原生顶栏，Windows 标题栏 overlay 仍只跟随内置 light/dark/sepia。
 - 字符映射仍基于「渲染文本是源码字符子序列」的贪心对齐；长 HTML 属性中的同形字符、复杂转义实体可能偏移。
 - 表格就地输入是「选中源码单元格后键入」，不是渲染态单元格内的富文本编辑；列宽拖动按表头右边缘 9px 命中。
 - 公式引擎为 KaTeX，宏支持范围与 MathJax 不同；跨进程多窗口并发写同一文件的冲突语义未定义（应用内窗口隔离已验收）。
+
+### RFC 0001 本地验收（2026-11-09）
+
+当前工作区通过 242 项单测、123 步 macOS 桌面回归，以及主题、导出和 Pandoc 专项验证。Apple Silicon 验证包位于 `release/rfc-0001/mac/mac-arm64/Inkstone.app`，通过打开、编辑、保存和真实系统拼音。Linux x64 验证包位于 `release/rfc-0001/linux/Inkstone-0.1.0.AppImage`，已解包核对 `text/markdown` 与两种 Markdown 扩展名。Windows、Linux 的实机启动和系统关联待验证。下面为上一轮交接时的记录。
 
 ### 需要后续跟进
 

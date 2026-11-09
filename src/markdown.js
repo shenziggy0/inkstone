@@ -10,6 +10,14 @@ import { highlightCode } from './highlight.js';
 import katex from 'katex';
 import DOMPurify from 'dompurify';
 import { readColumnWidths, injectColumnWidths } from './table.js';
+import { prepareMath, prepareStandaloneMath } from './math-labels.js';
+import { NATIVE_DIAGRAM_KINDS, renderNativeDiagram } from './diagrams.js';
+import {
+  imageRootKey,
+  frontMatterImageRoot,
+  setFrontMatterImageRoot,
+  replaceFrontMatterImageRoot
+} from '../electron/front-matter.mjs';
 
 export const escapeHTML = value => String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
@@ -90,13 +98,57 @@ export function decodeAssetReference(src) {
  * single opaque path segment because WHATWG URL parsing collapses `..`
  * segments, which would silently drop the `../` in `../shared/a.png`. Keep the
  * round trip in sync with electron/assets.cjs (asserted in test/assets.test.js).
+ *
+ * A root-relative reference (`/images/a.png`) also carries the document's
+ * image root as a query value. The main process still validates the root, but
+ * the URL has to change when the author edits `typora-root-url`, or Chromium
+ * would keep serving the previously decoded picture from its cache. Relative
+ * references keep the exact same URL as before: a root cannot affect them.
  */
-export function assetURL(documentId, src) {
-  return `inkstone-asset://${documentId}/${encodeURIComponent(decodeAssetReference(src))}`;
+export function assetURL(documentId, src, imageRoot = null) {
+  const reference = decodeAssetReference(src);
+  const base = `inkstone-asset://${documentId}/${encodeURIComponent(reference)}`;
+  if (!/^\/(?!\/)/.test(reference)) return base;
+  // A root-relative URL always states its root, including «no root» as an
+  // empty value. The renderer can be ahead of the 500 ms document flush; an
+  // omitted value would let the main process fall back to the previous front
+  // matter and briefly (or, for a new URL, permanently) use the wrong folder.
+  return `${base}?root=${encodeURIComponent(imageRoot ?? '')}`;
 }
+
+// ── typora-root-url ────────────────────────────────────────────────────────
+// Typora resolves `/images/a.png` against the folder named by the front matter
+// key `typora-root-url`. The renderer reads that one scalar to build the asset
+// URL hint and to write the line from the «设置图片根目录» entry. The parser and
+// the line edit live in electron/front-matter.mjs, which the main process shares
+// (it needs the same key position for Save As relocation); the main process is
+// still the only side that reads image files.
+export { frontMatterImageRoot, setFrontMatterImageRoot, replaceFrontMatterImageRoot, imageRootKey };
+
+// Optional app-wide fallback, set from the preferences. The document's own
+// `typora-root-url` always wins; an empty document value means «not set».
+let imageRootDefault = '';
+
+export function setImageRootSetting(value) {
+  const next = typeof value === 'string' ? value.trim() : '';
+  if (next === imageRootDefault) return false;
+  imageRootDefault = next;
+  return true;
+}
+
+/** The root an image reference of `source` resolves against, if any. */
+export function effectiveImageRoot(source) {
+  return frontMatterImageRoot(source) ?? (imageRootDefault || null);
+}
+
 export const parser = new MarkdownIt({
   html: true, linkify: true, breaks: false,
   highlight(code, language) {
+    // Typora's `sequence` and `flow` fences use their own grammars. They must
+    // never reach Mermaid (or highlight.js), so they are recognised here and
+    // rendered by the local, offline renderer in diagrams.js.
+    const native = NATIVE_DIAGRAM_KINDS.has(String(language || '').toLowerCase()) ? String(language).toLowerCase() : '';
+    if (native) return `<pre class="diagram" data-diagram="${native}">${escapeHTML(code)}</pre>`;
     if (language === 'mermaid') return `<pre class="mermaid">${escapeHTML(code)}</pre>`;
     // A language that is not registered yet lands on the escaped fallback; the
     // loader reports back through onLanguageLoaded() so only the blocks that
@@ -110,6 +162,69 @@ export const parser = new MarkdownIt({
   // Typora 1.11+ accepts both $…$ / $$…$$ and \(…\) / \[…\].
   .use(texmath, { engine: katex, delimiters: ['dollars', 'brackets'], katexOptions: { throwOnError: false, trust: false } })
   .use(mark).use(sub).use(sup).use(emoji);
+
+// The app-wide "公式自动编号" preference. Pure helpers accept an explicit
+// `mathNumbering` option; the editor and export use this fallback so both paths
+// render the same document with the same numbering. The value is per renderer
+// process, never per document, and no label registry is stored here.
+let mathNumberingDefault = false;
+
+export function mathNumberingEnabled() {
+  return mathNumberingDefault;
+}
+
+/** Change the preference and return true when it actually changed. */
+export function setMathNumbering(enabled) {
+  const next = !!enabled;
+  if (next === mathNumberingDefault) return false;
+  mathNumberingDefault = next;
+  resetRenderCache();
+  return true;
+}
+
+const numberingFor = options => options?.mathNumbering === undefined ? mathNumberingDefault : !!options.mathNumbering;
+
+// Labels and references are resolved after inline parsing, when every math
+// token of the document is known. This is the same shared parse that feeds
+// footnotes, reference links, heading anchors and [TOC].
+parser.core.ruler.after('inline', 'math_labels', state => {
+  state.env.math = prepareMath(state.tokens, { numbering: state.env.mathNumbering === true });
+});
+
+// texmath installs its own renderer rules. They are replaced by the same
+// templates, but with the prepared token content: labels removed, automatic
+// numbers injected and `\ref` resolved before KaTeX sees the TeX. KaTeX's
+// trust stays off and no user macro is enabled.
+function renderTeX(token, displayMode) {
+  const content = token.math?.content ?? token.content;
+  try {
+    return katex.renderToString(content, { displayMode, throwOnError: false, trust: false });
+  } catch (error) {
+    return escapeHTML(`${content}:${error.message}`);
+  }
+}
+
+function mathAttributes(token) {
+  const math = token.math;
+  const attributes = [];
+  if (math?.anchor) attributes.push(`id="${escapeHTML(math.anchor)}"`);
+  if (math?.number !== null && math?.number !== undefined && math.number !== '') {
+    attributes.push(`data-math-number="${escapeHTML(String(math.number))}"`);
+  }
+  if (math?.duplicates?.length) {
+    attributes.push(`data-math-duplicate-label="${escapeHTML(math.duplicates.join(','))}"`);
+  }
+  return attributes.length ? ` ${attributes.join(' ')}` : '';
+}
+
+const mathBlockRule = (tokens, index) =>
+  `<section${mathAttributes(tokens[index])}><eqn>${renderTeX(tokens[index], true)}</eqn></section>`;
+parser.renderer.rules.math_block = mathBlockRule;
+parser.renderer.rules.math_inline_double = mathBlockRule;
+parser.renderer.rules.math_block_eqno = (tokens, index) =>
+  `<section class="eqno"${mathAttributes(tokens[index])}><eqn>${renderTeX(tokens[index], true)}</eqn><span>(${escapeHTML(tokens[index].info || '')})</span></section>`;
+parser.renderer.rules.math_inline = (tokens, index) =>
+  `<eq>${renderTeX(tokens[index], false)}</eq>`;
 
 // Typora renders local images referenced as `file:///…` URLs. markdown-it drops
 // any `file:` destination before it becomes an image token, so allow that one
@@ -139,7 +254,11 @@ parser.block.ruler.before('hr', 'front_matter', (state, startLine, endLine, sile
   return true;
 }, { alt: ['paragraph', 'reference', 'blockquote', 'list'] });
 
-parser.renderer.rules.front_matter = (tokens, index) => {
+parser.renderer.rules.front_matter = (tokens, index, _options, env) => {
+  // The card is editor chrome. Skip it at generation time instead of relying
+  // on data-md-skip surviving sanitisation; a document-authored element with
+  // the same class is not touched by this rule.
+  if (env?.chrome === false) return '';
   const raw = tokens[index].content.replace(/^---[^\n]*\r?\n/, '').replace(/\r?\n(?:---|\.\.\.)\s*$/, '');
   const rows = raw.split(/\r?\n/).filter(line => line.trim()).map(line => {
     const colon = line.indexOf(':');
@@ -165,7 +284,10 @@ parser.renderer.rules.blockquote_open = (tokens, index, options, env, self) => {
   if (first?.type === 'text') first.content = first.content.replace(alertMarker, '');
   if (first?.content === '' && inline.children?.[1]?.type === 'softbreak') inline.children.splice(0, 2);
   inline.content = inline.content.replace(alertMarker, '');
-  return `${defaultBlockquote(tokens, index, options, env, self)}<div class="alert-label" data-md-skip>${ALERTS[kind]}</div>`;
+  const quote = defaultBlockquote(tokens, index, options, env, self);
+  // The label is editor chrome; the alert blockquote and its body are content.
+  if (env?.chrome === false) return quote;
+  return `${quote}<div class="alert-label" data-md-skip>${ALERTS[kind]}</div>`;
 };
 
 const slugify = title => title.toLowerCase().replace(/[^\p{L}\p{N}\s_-]/gu, '').replace(/\s+/g, '-');
@@ -186,17 +308,25 @@ parser.renderer.rules.heading_open = (tokens, index, options, env, self) => {
  * the breadcrumb and [TOC] can share the parse that rendered the document
  * instead of running the whole file through markdown-it a second time.
  */
-export function headingsFromTokens(tokens) {
-  const result = [], slugs = {};
+function headingDataFromTokens(tokens) {
+  const result = [], anchors = new Map(), slugs = {};
   for (let i = 0; i < tokens.length; i++) {
-    if (tokens[i].type !== 'heading_open' || !tokens[i].map) continue;
+    const token = tokens[i];
+    if (token.type !== 'heading_open' || !token.map) continue;
     const title = tokens[i + 1]?.content || '';
     const slug = slugify(title);
     const count = slugs[slug] || 0;
     slugs[slug] = count + 1;
-    result.push({ title, level: Number(tokens[i].tag.slice(1)), line: tokens[i].map[0] + 1, id: count ? `${slug}-${count}` : slug });
+    // `anchors` is keyed by token identity so prepareDocument can attach the
+    // same anchor to the heading's block context without slugifying it again.
+    anchors.set(token, `${slug}:${count}`);
+    result.push({ title, level: Number(token.tag.slice(1)), line: token.map[0] + 1, id: count ? `${slug}-${count}` : slug });
   }
-  return result;
+  return { items: result, anchors };
+}
+
+export function headingsFromTokens(tokens) {
+  return headingDataFromTokens(tokens).items;
 }
 
 /** The text markdown-it parses: no BOM, LF line breaks. */
@@ -232,6 +362,7 @@ function footnoteTitles(source, env) {
  */
 function finalizeHTML(html, documentId, toc, footnotes = [], options = {}) {
   const chrome = options.chrome !== false;
+  const imageRoot = options.imageRoot ?? null;
   const withToc = html.replace(/<p>\[toc\]<\/p>/gi, `<nav class="toc" aria-label="文内目录"><ul>${toc}</ul></nav>`);
   const clean = DOMPurify.sanitize(withToc, { ...SANITIZE_CONFIG });
   const template = document.createElement('template');
@@ -248,7 +379,7 @@ function finalizeHTML(html, documentId, toc, footnotes = [], options = {}) {
     img.dataset.mdSrc = src;
     // A reference to another machine would make the asset protocol contact it;
     // no URL is generated for these (the main process rejects them as well).
-    if (documentId && !isNetworkReference(src)) img.src = assetURL(documentId, src);
+    if (documentId && !isNetworkReference(src)) img.src = assetURL(documentId, src, imageRoot);
     else img.removeAttribute('src');
     img.loading = 'lazy';
   }
@@ -306,9 +437,48 @@ function finalizeHTML(html, documentId, toc, footnotes = [], options = {}) {
 
 export function renderMarkdown(source, documentId, options = {}) {
   const text = source.replace(/^\uFEFF/, '');
-  const env = {};
+  const env = { mathNumbering: numberingFor(options), chrome: options.chrome !== false };
   const html = parser.render(text, env);
-  return injectColumnWidths(finalizeHTML(html, documentId, tocItems(text), footnoteTitles(text, env), options), readColumnWidths(text));
+  const imageRoot = options.imageRoot !== undefined ? options.imageRoot : effectiveImageRoot(text);
+  return injectColumnWidths(finalizeHTML(html, documentId, tocItems(text), footnoteTitles(text, env), { ...options, imageRoot }), readColumnWidths(text));
+}
+
+/**
+ * Exact source range of every GFM table in one LF document, in render order.
+ *
+ * `parseTables` models a table from its syntax alone; the block boundaries are
+ * decided by this renderer. A heading such as `# H | Q` on the line directly
+ * after a table contains a pipe but starts a new block, so table editing has to
+ * use the map markdown-it actually rendered instead of scanning for more rows.
+ * `source` must already be in the editor's LF coordinates (the caller's text).
+ */
+export function tableSourceRanges(source) {
+  const raw = String(source ?? '');
+  // The renderer parses the document without its BOM, but the ranges are handed
+  // back in the caller's coordinates: without this shift every table in a
+  // BOM-prefixed file would be reported one character too short and a reorder
+  // would leave the last row's "|" behind.
+  const shift = raw.startsWith('\uFEFF') ? 1 : 0;
+  const text = normalized(raw);
+  // Line starts are only needed for the tables, but the whole table is one
+  // index over them; documents are already indexed per keystroke elsewhere.
+  const starts = [0];
+  for (let at = text.indexOf('\n'); at >= 0; at = text.indexOf('\n', at + 1)) starts.push(at + 1);
+  const ranges = [];
+  // The BOM is line 0's first character, so line 0 still starts at offset 0;
+  // every later offset moves by one.
+  const toSource = position => (position > 0 ? position + shift : 0);
+  for (const token of parser.parse(text, {})) {
+    if (token.type !== 'table_open' || !token.map) continue;
+    const [first, after] = token.map;
+    // The range covers the table's own lines and stops before their line
+    // breaks, so a caller replacing it cannot damage a following block.
+    let end = starts[after] ?? text.length;
+    if (end > 0 && text[end - 1] === '\n') end--;
+    if (end > 0 && text[end - 1] === '\r') end--;
+    ranges.push({ start: toSource(starts[first] ?? text.length), end: toSource(end) });
+  }
+  return ranges;
 }
 
 /**
@@ -341,7 +511,7 @@ export function groupTokens(tokens) {
  * a new heading refreshes that heading and the table of contents instead of
  * the entire document.
  */
-export function globalSignature({ tokens = [], env = {}, documentId = '', widths = [] } = {}) {
+export function globalSignature({ tokens = [], env = {}, documentId = '', widths = [], imageRoot = null } = {}) {
   const references = env.references || {};
   const notes = env.footnotes?.list || [];
   const bodies = [];
@@ -355,10 +525,13 @@ export function globalSignature({ tokens = [], env = {}, documentId = '', widths
   }
   return [
     `doc\u0000${documentId}`,
+    `image-root\u0000${imageRoot ?? ''}`,
     `widths\u0000${widths.map(group => group.join(',')).join(';')}`,
     `references\u0000${Object.keys(references).map(key => `${key}\u0002${references[key].href || ''}\u0002${references[key].title || ''}`).join('\u0001')}`,
     `notes\u0000${notes.map(note => note.label ?? `inline:${note.content ?? ''}`).join('\u0001')}`,
-    `bodies\u0000${bodies.join('\u0001')}`
+    `bodies\u0000${bodies.join('\u0001')}`,
+    `math\u0000${env.math?.signature || ''}`,
+    `chrome\u0000${env.chrome === false ? '0' : '1'}`
   ].join('\u0003');
 }
 
@@ -448,12 +621,12 @@ export function renderGroups(groups, signature, render) {
  * rest of the document, which a per-block parse cannot see.
  * Returns [{ start (0-based line), end, html }] keyed to editor block maps.
  */
-export function renderDocument(source, documentId) {
-  const plan = prepareDocument(source, documentId);
+export function renderDocument(source, documentId, options = {}) {
+  const plan = prepareDocument(source, documentId, options);
   // One parse feeds the block HTML, the outline and [TOC].
   outlineCache = { key: plan.text, items: plan.items };
   const { entries, stats } = renderGroups(plan.groups, plan.signature, group => {
-    const html = finalizeHTML(parser.renderer.render(group.tokens, parser.options, plan.env), documentId, plan.toc, plan.footnotes);
+    const html = finalizeHTML(parser.renderer.render(group.tokens, parser.options, plan.env), documentId, plan.toc, plan.footnotes, { imageRoot: plan.imageRoot, chrome: plan.chrome });
     return { html, tables: (html.match(/<table\b/g) || []).length };
   });
   let tableOffset = 0;
@@ -465,7 +638,7 @@ export function renderDocument(source, documentId) {
   });
   // Returning the tokens lets the editor reuse this single parse for its
   // decoration ranges instead of parsing the whole file on every caret move.
-  return { tokens: plan.tokens, blocks, stats };
+  return { tokens: plan.tokens, blocks, stats, math: plan.math, imageRoot: plan.imageRoot };
 }
 
 /**
@@ -474,31 +647,38 @@ export function renderDocument(source, documentId) {
  * signature that decides whether a block may be reused. No DOM is touched, so
  * the caching behaviour can be asserted directly in unit tests.
  */
-export function prepareDocument(source, documentId) {
+export function prepareDocument(source, documentId, options = {}) {
   const text = normalized(source);
-  const env = {};
+  const env = { mathNumbering: numberingFor(options), chrome: options.chrome !== false };
   const tokens = parser.parse(text, env);
-  const items = headingsFromTokens(tokens);
+  const headingData = headingDataFromTokens(tokens);
+  const items = headingData.items;
   const widths = readColumnWidths(text);
   const groups = groupTokens(tokens);
-  const lines = text.split('\n');
+  // `/images/a.png` depends on this value, so it belongs to the document-wide
+  // signature: editing the front matter must not reuse an image block that was
+  // rendered against the previous root.
+  const imageRoot = effectiveImageRoot(text);
+  // Block sources are slices of the normalised text. Building one line table
+  // avoids allocating a split copy of the whole document and joining every
+  // block back together on a file that is re-planned on each keystroke.
+  const lineStarts = [0];
+  for (let at = text.indexOf('\n'); at >= 0; at = text.indexOf('\n', at + 1)) lineStarts.push(at + 1);
   // Per-block inputs that come from the heading sequence: a heading's anchor
   // depends on how many earlier headings share its slug, and a [TOC] block
   // lists all of them. Nothing else in a block's HTML depends on the outline.
   // Tokens are walked in the same order the renderer assigns ids, including
   // headings that live inside a footnote body.
-  const slugs = {};
   let tocContext = null;
   for (const group of groups) {
-    group.source = lines.slice(group.start, group.end).join('\n');
+    group.source = text.slice(
+      lineStarts[group.start] ?? text.length,
+      group.end < lineStarts.length ? lineStarts[group.end] - 1 : text.length
+    );
     const anchors = [];
-    for (let index = 0; index < group.tokens.length; index++) {
-      const token = group.tokens[index];
-      if (token.type !== 'heading_open') continue;
-      const slug = slugify(group.tokens[index + 1]?.content || '');
-      const count = slugs[slug] || 0;
-      slugs[slug] = count + 1;
-      anchors.push(`${slug}:${count}`);
+    for (const token of group.tokens) {
+      const anchor = token.type === 'heading_open' ? headingData.anchors.get(token) : null;
+      if (anchor) anchors.push(anchor);
     }
     if (anchors.length) group.context = `a\u0000${anchors.join('\u0001')}`;
     else if (/\[toc\]/i.test(group.source)) {
@@ -508,15 +688,18 @@ export function prepareDocument(source, documentId) {
   }
   return {
     text, env, tokens, items, groups, widths,
+    chrome: env.chrome,
     toc: tocItemsFromHeadings(items),
     footnotes: footnoteTitles(text, env),
-    signature: globalSignature({ tokens, env, documentId, widths })
+    math: env.math,
+    imageRoot,
+    signature: globalSignature({ tokens, env, documentId, widths, imageRoot })
   };
 }
 
 /** Backwards-compatible helper for callers that only need the HTML blocks. */
-export function renderBlocks(source, documentId) {
-  return renderDocument(source, documentId).blocks;
+export function renderBlocks(source, documentId, options = {}) {
+  return renderDocument(source, documentId, options).blocks;
 }
 
 /**
@@ -524,12 +707,18 @@ export function renderBlocks(source, documentId) {
  * uses, for the live preview under a `$$…$$` block being edited. A syntax error
  * comes back as a short Chinese message instead of throwing, so the preview can
  * say what is wrong instead of staying blank.
+ *
+ * `options.labels` is the document's label registry for live references and
+ * `options.number` is the number the document assigned to this formula. The
+ * editor normally passes content that was already prepared by prepareMath(),
+ * so no document context is needed there.
  */
-export function renderMath(source) {
+export function renderMath(source, options = {}) {
   const text = String(source ?? '').trim();
   if (!text) return { html: '', error: '公式为空。' };
+  const prepared = prepareStandaloneMath(text, options);
   try {
-    return { html: katex.renderToString(text, { displayMode: true, throwOnError: true, trust: false, strict: false }), error: null };
+    return { html: katex.renderToString(prepared.content, { displayMode: true, throwOnError: true, trust: false, strict: false }), error: null };
   } catch (error) {
     const message = String(error?.message || error).replace(/^KaTeX parse error:\s*/i, '');
     return { html: '', error: `公式语法错误：${message}` };
@@ -538,30 +727,107 @@ export function renderMath(source) {
 
 let mermaidModule;
 let renderQueue = Promise.resolve();
+
+/**
+ * Which renderer owns one diagram fence: `'mermaid'`, a native kind, or null
+ * for an ordinary `<pre>`. Document HTML can spell `class="diagram"` itself,
+ * so a plain `pre.diagram` (or one with an unsupported `data-diagram`) is not
+ * a diagram at all and must never fall through to the Mermaid renderer.
+ */
+export function diagramKindFor(element) {
+  const kind = element?.dataset?.diagram || '';
+  if (NATIVE_DIAGRAM_KINDS.has(kind) && element?.classList?.contains('diagram')) return kind;
+  if (element?.classList?.contains('mermaid')) return 'mermaid';
+  return null;
+}
+
+const nativeDiagramSelector = suffix => [...NATIVE_DIAGRAM_KINDS]
+  .map(kind => `pre.diagram[data-diagram="${kind}"]${suffix}`)
+  .join(', ');
+// Only the existing Mermaid entry and the two native kinds are selected. A
+// document-authored pre.diagram cannot opt itself into either renderer.
+const pendingDiagramSelector = `pre.mermaid:not([data-processed]), ${nativeDiagramSelector(':not([data-processed])')}`;
+const processedDiagramSelector = `pre.mermaid[data-processed], ${nativeDiagramSelector('[data-processed]')}`;
+
+/** Paint colours the diagrams inherit from the active theme. */
+function diagramPalette() {
+  if (typeof document === 'undefined') return undefined;
+  const probe = document.createElement('span');
+  probe.style.cssText = 'position:absolute;visibility:hidden;pointer-events:none';
+  document.body?.append(probe);
+  const read = (name, fallback) => {
+    probe.style.color = `var(${name})`;
+    const value = getComputedStyle(probe).color;
+    return value && value !== 'rgba(0, 0, 0, 0)' ? value : fallback;
+  };
+  const palette = {
+    ink: read('--color-ink', '#333333'),
+    muted: read('--color-muted', '#777777'),
+    rule: read('--color-rule', '#c8c8c8'),
+    paper: read('--color-paper', '#ffffff'),
+    soft: read('--color-code', '#f6f8fa')
+  };
+  probe.remove();
+  return palette;
+}
+
+/**
+ * Replace a diagram with the same readable error block Mermaid uses, keeping
+ * the original fence text visible so the author can fix it from the document.
+ */
+function failDiagram(node, message) {
+  node.dataset.processed = 'error';
+  const label = document.createElement('div');
+  label.className = 'diagram-error-message';
+  label.setAttribute('data-md-skip', '');
+  label.textContent = message;
+  node.replaceChildren(label, document.createTextNode(node.dataset.source));
+  node.title = message;
+  node.classList.add('diagram-error');
+}
+
+/**
+ * Render every unprocessed diagram in `container`: Mermaid fences through the
+ * shared Mermaid queue, and Typora's `sequence` / `flow` fences through the
+ * local diagrams.js renderer. The editor widgets, the live preview under the
+ * active fence and the HTML/PDF export all call this one function, so all
+ * three views carry identical SVG.
+ */
 export function renderDiagrams(container) {
-  const jobs = [...container.querySelectorAll('pre.mermaid:not([data-processed])')];
+  const jobs = [...container.querySelectorAll(pendingDiagramSelector)];
   if (!jobs.length) return Promise.resolve();
   renderQueue = renderQueue.catch(() => {}).then(async () => {
-    mermaidModule ||= (await import('mermaid')).default;
-    mermaidModule.initialize({ startOnLoad: false, securityLevel: 'strict', htmlLabels: false, flowchart: { htmlLabels: false }, theme: document.documentElement.dataset.theme === 'dark' ? 'dark' : 'neutral', suppressErrorRendering: true });
+    const mermaidJobs = jobs.filter(node => diagramKindFor(node) === 'mermaid');
+    if (mermaidJobs.length) {
+      mermaidModule ||= (await import('mermaid')).default;
+      mermaidModule.initialize({ startOnLoad: false, securityLevel: 'strict', htmlLabels: false, flowchart: { htmlLabels: false }, theme: document.documentElement.dataset.theme === 'dark' ? 'dark' : 'neutral', suppressErrorRendering: true });
+    }
+    const palette = diagramPalette();
     for (const node of jobs) {
       if (!node.isConnected) continue;
+      const kind = diagramKindFor(node);
+      if (!kind) continue;
       node.dataset.source ||= node.textContent;
+      if (kind !== 'mermaid') {
+        const { svg, error } = renderNativeDiagram(kind, node.dataset.source, { palette, idPrefix: crypto.randomUUID() });
+        if (error) {
+          failDiagram(node, `图表渲染失败：${error}`);
+        } else {
+          node.innerHTML = svg;
+          node.dataset.processed = 'true';
+          node.classList.remove('diagram-error');
+          node.removeAttribute('title');
+        }
+        continue;
+      }
       try {
         const { svg } = await mermaidModule.render(`diagram-${crypto.randomUUID()}`, node.dataset.source);
         node.innerHTML = DOMPurify.sanitize(svg, { USE_PROFILES: { html: true, svg: true, svgFilters: true }, ADD_TAGS: ['foreignObject'], ADD_ATTR: ['dominant-baseline'] });
         node.dataset.processed = 'true';
         node.classList.remove('diagram-error');
+        node.removeAttribute('title');
       } catch (error) {
-        node.dataset.processed = 'error';
-        const message = `图表渲染失败：${String(error.message || error)}`;
-        const label = document.createElement('div');
-        label.className = 'diagram-error-message';
-        label.setAttribute('data-md-skip', '');
-        label.textContent = message;
-        node.replaceChildren(label, document.createTextNode(node.dataset.source));
-        node.title = message;
-        node.classList.add('diagram-error');
+        failDiagram(node, `图表渲染失败：${String(error.message || error)}`);
       }
     }
   });
@@ -570,7 +836,7 @@ export function renderDiagrams(container) {
 
 /** Re-render existing diagrams after a theme change so colours follow. */
 export function refreshDiagrams(root = document) {
-  for (const node of root.querySelectorAll('pre.mermaid[data-processed]')) {
+  for (const node of root.querySelectorAll(processedDiagramSelector)) {
     if (node.dataset.source) node.textContent = node.dataset.source;
     node.removeAttribute('data-processed');
   }

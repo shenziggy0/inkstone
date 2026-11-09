@@ -28,13 +28,22 @@ test('fenceLanguages lists every fenced label once, in order, and skips diagrams
     'flowchart LR',
     '```',
     '',
+    '```sequence',
+    'Alice->Bob: hello',
+    '```',
+    '',
+    '```flow',
+    'a=>start: A',
+    '```',
+    '',
     '```JS',
     'const b = 2;',
     '```',
     ''
   ].join('\n');
-  // mermaid is rendered as a diagram, not highlighted as code; the repeat of
-  // `js` (different case) must not ask for the grammar twice.
+  // mermaid / sequence / flow are rendered as diagrams, not highlighted as
+  // code; the repeat of `js` (different case) must not ask for the grammar
+  // twice.
   assert.deepEqual(fenceLanguages(source), ['js', 'haskell']);
   // A long fence and an indented list item are both real fences.
   assert.deepEqual(fenceLanguages('  ````css\n  a { }\n  ````\n'), ['css']);

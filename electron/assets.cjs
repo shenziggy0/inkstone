@@ -56,10 +56,11 @@ function referenceFromPath(pathname) {
   try { return decodeURIComponent(encoded); } catch { return ''; }
 }
 
-/** `{ documentId, reference }` of an asset URL string or URL object. */
+/** `{ documentId, reference, imageRoot }` of an asset URL string or URL object. */
 function parseAssetURL(url) {
   const parsed = typeof url === 'string' ? new URL(url) : url;
-  return { documentId: parsed.hostname, reference: referenceFromPath(parsed.pathname) };
+  const imageRoot = parsed.searchParams.has('root') ? parsed.searchParams.get('root') : null;
+  return { documentId: parsed.hostname, reference: referenceFromPath(parsed.pathname), imageRoot };
 }
 
 /**
@@ -77,6 +78,58 @@ const isAbsoluteReference = reference =>
   /^[a-zA-Z]:[\\/]/.test(reference) || /^\\\\/.test(reference) || path.isAbsolute(reference) || path.win32.isAbsolute(reference);
 
 /**
+ * Resolve the folder `typora-root-url` names to a canonical local directory.
+ *
+ * The scalar comes from the document (or from the optional app-wide fallback),
+ * so it is as untrusted as a reference: network shapes are refused before the
+ * first filesystem call, and a `file:` URL must not carry a host. The returned
+ * realpath is the only base a root-relative image may use.
+ */
+async function resolveImageRoot(rootValue, { documentPath = null, unsavedDirectory = null } = {}) {
+  const raw = String(rootValue ?? '');
+  if (!raw || raw.length > 4096 || raw.includes('\0')) throw new Error(INVALID);
+  if (isNetworkPath(raw)) throw new Error(NETWORK);
+  let target;
+  if (/^file:/i.test(raw)) {
+    let url;
+    try { url = new URL(raw); } catch { throw new Error(INVALID); }
+    if (isNetworkFileURL(url)) throw new Error(NETWORK);
+    try { target = fileURLToPath(url); } catch { throw new Error(INVALID); }
+  } else if (isAbsoluteReference(raw)) {
+    target = raw;
+  } else if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(raw)) {
+    throw new Error(LOCAL_ONLY);
+  } else {
+    // Same pre-normalisation rule as a relative image: a share must be refused
+    // before `dirname()` can collapse its prefix away.
+    if (isNetworkPath(documentPath ?? unsavedDirectory)) throw new Error(NETWORK);
+    const base = documentPath ? path.dirname(documentPath) : unsavedDirectory;
+    if (!base) throw new Error(INVALID);
+    target = path.resolve(base, raw);
+  }
+  if (isNetworkPath(target)) throw new Error(NETWORK);
+  const resolved = await fs.realpath(target);
+  if (isNetworkPath(resolved)) throw new Error(NETWORK);
+  return resolved;
+}
+
+/**
+ * Resolve the root-relative image `/a/b.png` of a document whose front matter
+ * names `imageRoot`. Both the lexical path and the realpath must stay inside
+ * the canonical root, which is what refuses `/%2e%2e/out.png` and a symlink
+ * that points at a file outside the configured folder.
+ */
+async function resolveRootedImage(raw, rootValue, { documentPath, unsavedDirectory }) {
+  const root = await resolveImageRoot(rootValue, { documentPath, unsavedDirectory });
+  const target = path.resolve(root, raw.slice(1));
+  if (!inside(root, target)) throw new Error(INVALID);
+  const resolved = await fs.realpath(target);
+  if (isNetworkPath(resolved) || !inside(root, resolved)) throw new Error(INVALID);
+  if (!IMAGE_MIME.has(path.extname(resolved).toLowerCase())) throw new Error(INVALID);
+  return resolved;
+}
+
+/**
  * Resolve one image reference to the real file the app may read.
  *
  * Accepted, per Typora's habit: a path relative to the document, `../` above the
@@ -92,11 +145,24 @@ const isAbsoluteReference = reference =>
  *
  * Network locations are refused before any filesystem call (see isNetworkPath):
  * opening a document must never make the machine contact another host.
+ *
+ * `imageRoot` (a document's `typora-root-url`) and `globalImageRoot` (the
+ * optional app-wide fallback) redirect only references written with one leading
+ * slash, as Typora does. A relative reference, a Windows drive path, a local
+ * `file:` URL and a `//host` share keep exactly their previous meaning.
+ * `decoded` says the reference already came out of an `inkstone-asset:` URL,
+ * whose segment was percent-decoded once — decoding it again could corrupt a
+ * file name that really contains `%20`.
  */
-async function resolveAssetFile(reference, { documentPath = null, unsavedDirectory = null } = {}) {
-  const raw = decodeReference(reference);
+async function resolveAssetFile(reference, { documentPath = null, unsavedDirectory = null, imageRoot = null, globalImageRoot = null, decoded = false } = {}) {
+  const raw = decoded ? String(reference ?? '') : decodeReference(reference);
   if (!raw || raw.length > 4096 || raw.includes('\0')) throw new Error(INVALID);
   if (isNetworkPath(raw)) throw new Error(NETWORK);
+  const rootValue = typeof imageRoot === 'string' && imageRoot.trim() ? imageRoot
+    : typeof globalImageRoot === 'string' && globalImageRoot.trim() ? globalImageRoot : null;
+  // `/images/a.png` is root-relative only while a root is configured. Without
+  // one it stays the plain absolute path it has always been.
+  if (rootValue && /^\/(?!\/)/.test(raw)) return resolveRootedImage(raw, rootValue, { documentPath, unsavedDirectory });
   let target;
   if (/^file:/i.test(raw)) {
     let url;
@@ -108,6 +174,13 @@ async function resolveAssetFile(reference, { documentPath = null, unsavedDirecto
   } else if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(raw)) {
     throw new Error(LOCAL_ONLY);
   } else {
+    // The base of a relative reference can itself be a network location: the
+    // document may live on a share, and an unsaved document resolves inside its
+    // temporary folder. Refuse that before `dirname()`/`resolve()` run, because
+    // normalisation can drop the UNC prefix (`///host/share` becomes
+    // `\host\share`, `\\host` becomes `\`), leaving nothing for the checks
+    // below to recognise as network. Ordinary paths keep the host's own rules.
+    if (isNetworkPath(documentPath ?? unsavedDirectory)) throw new Error(NETWORK);
     const base = documentPath ? path.dirname(documentPath) : unsavedDirectory;
     if (!base) throw new Error(LOCAL_ONLY);
     target = path.resolve(base, raw);
@@ -193,6 +266,10 @@ async function resolveDocumentLink(reference, { documentPath = null, unsavedDire
   } else if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(raw)) {
     throw new Error(LINK_LOCAL_ONLY);
   } else {
+    // Same pre-normalisation refusal as the image resolver: `dirname()` would
+    // collapse `///host/share` and `\\host` into forms isNetworkPath() can no
+    // longer see, so the share must be rejected before it is resolved.
+    if (isNetworkPath(documentPath ?? unsavedDirectory)) throw new Error(LINK_NETWORK);
     const base = documentPath ? path.dirname(documentPath) : unsavedDirectory;
     if (!base) throw new Error('请先保存文档，才能打开相对链接。');
     target = path.resolve(base, raw);
@@ -210,7 +287,7 @@ async function resolveDocumentLink(reference, { documentPath = null, unsavedDire
 
 module.exports = {
   IMAGE_MIME, imageMime, decodeReference, referenceFromPath, isNetworkPath, isNetworkFileURL,
-  parseAssetURL, unsavedAssetsDirectory, resolveAssetFile, resolveDocumentLink,
+  parseAssetURL, unsavedAssetsDirectory, resolveAssetFile, resolveImageRoot, resolveDocumentLink,
   isExecutableExtension, EXECUTABLE_EXTENSIONS,
   LINK_INVALID, LINK_LOCAL_ONLY, LINK_NETWORK, LINK_MISSING
 };

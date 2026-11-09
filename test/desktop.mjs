@@ -305,7 +305,8 @@ try {
   await page.locator('.cm-content').click();
   await page.keyboard.insertText('| 甲 | 乙 |\n| --- | --- |\n| 1 | 2 |\n');
   await page.locator('.md-widget table td').first().click();
-  assert.equal(await page.locator('.md-widget table td').first().getAttribute('contenteditable'), 'plaintext-only');
+  await page.waitForFunction(() => !!document.querySelector('.md-widget table td.table-cell-editing .cm-content'));
+  assert.equal(await page.locator('.md-widget table td.table-cell-editing .cm-content').count(), 1, '单击单元格应打开就地 Markdown 编辑器');
   assert.equal(await page.locator('.cm-live-line').count(), 0, '编辑表格单元格时不能把整块表格展开成源码');
   await page.keyboard.insertText('99');
   await page.keyboard.press('Enter');
@@ -379,6 +380,210 @@ try {
   assert.ok(await page.locator('.quick-item').count() >= 1);
   await page.locator('[data-dismiss]').click();
   console.log('STEP quick open');
+  // Dragging a data-row grip or a column grip reorders the rendered table in
+  // one transaction: header and delimiter stay put, a moved column carries its
+  // alignment, cells and stored width, and one undo restores the original.
+  // Pixel dragging needs the still viewport set up by the width-drag step.
+  await page.locator('.topbar [data-command="new"]').click();
+  await page.locator('.cm-content').click();
+  await page.keyboard.insertText([
+    '前言段落', '',
+    '| 名称 | 数量 |',
+    '| :--- | ---: |',
+    '| 苹果 \\| 红 | 3 |',
+    '| 梨 | 5 |', '',
+    '第二张表：', '',
+    '| A | B |',
+    '| --- | --- |',
+    '| 1 | 2 |', '',
+    '<!-- inkstone:columns 30.0,70.0;60.0,40.0 -->',
+    '结尾段落', ''
+  ].join('\n'));
+  await page.locator('.md-widget .table-row-handle').first().waitFor();
+  await page.waitForTimeout(300);
+  const readReorderSource = async () => {
+    if (await page.locator('[data-command="source"]').getAttribute('aria-pressed') !== 'true') await page.locator('[data-command="source"]').click();
+    await page.waitForTimeout(120);
+    const text = await page.locator('.cm-line').allTextContents().then(lines => lines.join('\n'));
+    await page.locator('[data-command="source"]').click();
+    await page.waitForTimeout(120);
+    return text;
+  };
+  const tableWidths = () => page.evaluate(() => [...document.querySelectorAll('.md-widget table col')].map(col => col.style.width));
+  const dragGrip = async (grip, dx, dy) => {
+    const box = await grip.boundingBox();
+    assert.ok(box, '行列拖动入口必须可见');
+    const x = box.x + box.width / 2, y = box.y + box.height / 2;
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.move(x + dx, y + dy, { steps: 12 });
+    await page.mouse.up();
+    await page.waitForTimeout(350);
+  };
+  const reorderOriginal = await readReorderSource();
+  assert.deepEqual((await tableWidths()).slice(0, 2), ['30%', '70%']);
+  await dragGrip(page.locator('.md-widget tbody tr').first().locator('.table-row-handle'), 0, 46);
+  let reorderSource = await readReorderSource();
+  assert.ok(reorderSource.indexOf('梨') < reorderSource.indexOf('苹果 \\| 红'), `数据行应下移，实际\n${reorderSource}`);
+  assert.ok(reorderSource.includes('| 名称'), '表头不得被拖走');
+  assert.match(reorderSource, /\| :--- +\| ---: +\|/, '分隔行与对齐必须保持');
+  assert.ok(reorderSource.includes('<!-- inkstone:columns 30.0,70.0;60.0,40.0 -->'), '行移动不得改动宽度注释');
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+z' : 'Control+z');
+  await page.waitForTimeout(400);
+  assert.equal(await readReorderSource(), reorderOriginal, '单次撤销应恢复原文');
+  const headers = await page.locator('.md-widget table').first().locator('th').evaluateAll(nodes => nodes.map(node => {
+    const box = node.getBoundingClientRect();
+    return { left: box.left, width: box.width };
+  }));
+  const lastColumn = headers[headers.length - 1];
+  await dragGrip(page.locator('.md-widget table').first().locator('th').first().locator('.table-column-handle'),
+    lastColumn.left + lastColumn.width * 0.8 - (headers[0].left + headers[0].width / 2), 0);
+  reorderSource = await readReorderSource();
+  const reorderHeader = reorderSource.split('\n').find(line => line.startsWith('| 名称') || line.startsWith('| 数量'));
+  assert.ok(reorderHeader?.startsWith('| 数量'), `表头应换位，实际 ${reorderHeader}\n${reorderSource}`);
+  assert.match(reorderSource, /\| ---: +\| :---/, '列对齐必须跟随列移动');
+  assert.match(reorderSource, /\| +3 +\| +苹果 \\\| 红/, '单元格内容必须跟随列移动');
+  assert.ok(reorderSource.includes('<!-- inkstone:columns 70.0,30.0;60.0,40.0 -->'), `被移动列的宽度必须换位，第二张表不变，实际\n${reorderSource}`);
+  assert.deepEqual((await tableWidths()).slice(0, 2), ['70%', '30%'], '渲染列宽应跟随列移动');
+  assert.ok(reorderSource.includes('| A | B |') && reorderSource.includes('| 1 | 2 |'), '第二张表不得被改写');
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+z' : 'Control+z');
+  await page.waitForTimeout(400);
+  assert.equal(await readReorderSource(), reorderOriginal, '单次撤销应恢复列顺序与列宽');
+  // Escape and a same-place drop must not create a document change at all.
+  const cancelGrip = page.locator('.md-widget tbody tr').nth(1).locator('.table-row-handle');
+  const cancelBox = await cancelGrip.boundingBox();
+  await page.mouse.move(cancelBox.x + cancelBox.width / 2, cancelBox.y + cancelBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(cancelBox.x + cancelBox.width / 2, cancelBox.y + cancelBox.height / 2 + 30, { steps: 6 });
+  await page.keyboard.press('Escape');
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  assert.equal(await readReorderSource(), reorderOriginal, 'Escape 取消不得写入文档');
+  await dragGrip(cancelGrip, 0, 8);
+  assert.equal(await readReorderSource(), reorderOriginal, '同位放下不得写入文档');
+  // A window blur (app switched away, a native menu) abandons the drag.
+  await page.mouse.move(cancelBox.x + cancelBox.width / 2, cancelBox.y + cancelBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(cancelBox.x + cancelBox.width / 2, cancelBox.y + cancelBox.height / 2 + 30, { steps: 6 });
+  await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  assert.equal(await readReorderSource(), reorderOriginal, '窗口失焦必须取消拖动');
+  // Typing next to the table and the reorder itself stay separate undo steps.
+  // Focus the content element directly: the previous step's last interaction was
+  // a toolbar click, and a click on the page could open a table cell instead.
+  await page.locator('.cm-content').evaluate(node => node.focus());
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+End' : 'Control+End');
+  await page.keyboard.insertText('追加');
+  await page.waitForTimeout(250);
+  const typedTail = await readReorderSource();
+  assert.ok(/结尾段落\s*追加\s*$/.test(typedTail), `输入应写入文档末尾：${typedTail}`);
+  await dragGrip(page.locator('.md-widget tbody tr').first().locator('.table-row-handle'), 0, 46);
+  const typedThenReordered = await readReorderSource();
+  assert.notEqual(typedThenReordered, typedTail, '拖动应改变顺序');
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+z' : 'Control+z');
+  await page.waitForTimeout(350);
+  assert.equal(await readReorderSource(), typedTail, '一次撤销只退回重排，保留刚才的输入');
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+z' : 'Control+z');
+  await page.waitForTimeout(350);
+  assert.equal(await readReorderSource(), reorderOriginal, '再撤销一次才移除输入');
+  // Two consecutive reorders are separate undo steps, not one grouped edit.
+  await dragGrip(page.locator('.md-widget tbody tr').first().locator('.table-row-handle'), 0, 46);
+  const afterFirstReorder = await readReorderSource();
+  await dragGrip(page.locator('.md-widget tbody tr').first().locator('.table-row-handle'), 0, 46);
+  const afterSecondReorder = await readReorderSource();
+  assert.notEqual(afterSecondReorder, afterFirstReorder, '第二次拖动应再次改顺序');
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+z' : 'Control+z');
+  await page.waitForTimeout(350);
+  assert.equal(await readReorderSource(), afterFirstReorder, '第一次撤销只应退回第二次重排');
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+z' : 'Control+z');
+  await page.waitForTimeout(350);
+  assert.equal(await readReorderSource(), reorderOriginal, '第二次撤销恢复原文');
+  console.log('STEP table row / column drag reorder, atomic widths and single-step undo');
+  // ── Table reorder source boundaries ────────────────────────────────────
+  // Three reproducible edges. A document BOM must stay at the head (copying the
+  // first line's prefix onto every row used to write one BOM per line and the
+  // table stopped rendering), identical columns must still swap their stored
+  // widths, and a heading such as `# H | Q` under a table is a separate block.
+  const saveCurrent = async () => {
+    await page.locator('[data-command="save"]').click();
+    await page.waitForFunction(() => document.querySelector('#save-status').textContent === '已保存');
+  };
+  const openBoundary = async (file, content) => {
+    await fs.writeFile(file, content);
+    await app.evaluate(({ dialog }, target) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [target] }); }, file);
+    await page.locator('[data-command="open"]').click();
+    await page.waitForFunction(name => document.querySelector('#location').textContent.includes(name), path.basename(file));
+    await page.locator('.md-widget table').first().waitFor();
+    await page.waitForTimeout(280);
+  };
+  const closeCurrent = async name => {
+    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.send('inkstone:command', 'close'));
+    await page.waitForFunction(target => !document.querySelector('#location').textContent.includes(target), name);
+  };
+  // The last interaction was a toolbar click, so undo has to go back to the
+  // editor first: Meta+Z on a focused button is not the editor's history.
+  const undoBoundary = async () => {
+    await page.locator('.cm-content').evaluate(node => node.focus());
+    await page.keyboard.press(process.platform === 'darwin' ? 'Meta+z' : 'Control+z');
+    await page.waitForTimeout(400);
+  };
+  const bomFile = path.join(root, 'boundary-bom.md');
+  const bomSecond = ['| W | K |', '| --- | --- |', '| 1 | 2 |'];
+  const bomOriginal = '\uFEFF' + ['| H | I |', '| --- | --- |', '| a | b |', '| c | d |', '', ...bomSecond, ''].join('\r\n');
+  await openBoundary(bomFile, bomOriginal);
+  // The table is the first block, so the caret sits inside it: the drop must keep
+  // the table typeset instead of revealing the caret's source block.
+  await dragGrip(page.locator('.md-widget tbody tr').first().locator('.table-row-handle'), 0, 46);
+  assert.equal(await page.locator('.cm-live-line').count(), 0, '从首块拖放后仍应保持整篇排版');
+  assert.match(await page.locator('.md-widget table').first().textContent(), /c[\s\S]*a/, '标题行下的数据行已下移');
+  await saveCurrent();
+  const bomSaved = await fs.readFile(bomFile, 'utf8');
+  assert.equal((bomSaved.match(/\uFEFF/g) || []).length, 1, 'BOM 只能出现在文档头一次');
+  assert.doesNotMatch(bomSaved.replace(/\r\n/g, ''), /\n/, '重排后必须仍是 CRLF');
+  assert.ok(bomSaved.includes(bomSecond.join('\r\n')), '第二张表不得被改写');
+  assert.equal(await page.locator('.md-widget table').count(), 2, 'BOM + CRLF 表格必须仍渲染');
+  await undoBoundary();
+  await saveCurrent();
+  assert.equal(await fs.readFile(bomFile, 'utf8'), bomOriginal, '单次撤销应恢复带 BOM 的原文');
+  await closeCurrent('boundary-bom.md');
+  const sameFile = path.join(root, 'boundary-same.md');
+  const sameOriginal = ['| A | A |', '| --- | --- |', '| B | B |', '', '<!-- inkstone:columns 15,85 -->', ''].join('\n');
+  await openBoundary(sameFile, sameOriginal);
+  assert.deepEqual((await tableWidths()).slice(0, 2), ['15%', '85%']);
+  const sameHeaders = await page.locator('.md-widget table').first().locator('th').evaluateAll(nodes => nodes.map(node => {
+    const box = node.getBoundingClientRect();
+    return { left: box.left, width: box.width };
+  }));
+  await dragGrip(page.locator('.md-widget table').first().locator('th').first().locator('.table-column-handle'),
+    sameHeaders[1].left + sameHeaders[1].width * 0.8 - (sameHeaders[0].left + sameHeaders[0].width / 2), 0);
+  assert.deepEqual((await tableWidths()).slice(0, 2), ['85%', '15%'], '内容相同的两列也必须换宽度');
+  await saveCurrent();
+  assert.match(await fs.readFile(sameFile, 'utf8'), /<!-- inkstone:columns 85(?:\.0)?,15(?:\.0)? -->/, '宽度必须随列写回');
+  await undoBoundary();
+  await saveCurrent();
+  assert.equal(await fs.readFile(sameFile, 'utf8'), sameOriginal, '撤销应恢复原列宽');
+  await closeCurrent('boundary-same.md');
+  const adjacentFile = path.join(root, 'boundary-adjacent.md');
+  const adjacentOriginal = ['| A | B |', '| --- | --- |', '| x | y |', '# H | Q', '', '| W | K |', '| --- | --- |', '| 1 | 2 |', ''].join('\n');
+  await openBoundary(adjacentFile, adjacentOriginal);
+  assert.equal(await page.locator('.md-widget h1').textContent(), 'H | Q', '紧邻标题应单独渲染');
+  assert.equal(await page.locator('.md-widget table').first().locator('tbody tr').count(), 1, '标题不得被并入表格');
+  const adjacentHeaders = await page.locator('.md-widget table').first().locator('th').evaluateAll(nodes => nodes.map(node => {
+    const box = node.getBoundingClientRect();
+    return { left: box.left, width: box.width };
+  }));
+  await dragGrip(page.locator('.md-widget table').first().locator('th').first().locator('.table-column-handle'),
+    adjacentHeaders[1].left + adjacentHeaders[1].width * 0.8 - (adjacentHeaders[0].left + adjacentHeaders[0].width / 2), 0);
+  const adjacentSaved = await (async () => { await saveCurrent(); return fs.readFile(adjacentFile, 'utf8'); })();
+  assert.ok(adjacentSaved.includes('# H | Q\n'), '重排不得改写紧邻标题');
+  assert.equal(await page.locator('.md-widget h1').textContent(), 'H | Q');
+  assert.ok(adjacentSaved.includes('| W | K |'), '后面的表格不得被改写');
+  await undoBoundary();
+  await saveCurrent();
+  assert.equal(await fs.readFile(adjacentFile, 'utf8'), adjacentOriginal, '撤销应恢复原文');
+  await closeCurrent('boundary-adjacent.md');
+  console.log('STEP table reorder boundaries: BOM / CRLF, identical columns, adjacent heading');
   await page.evaluate(() => window.desktop.zoom(1));
   const settings = await page.evaluate(() => window.desktop.settings());
   assert.equal(settings.value.zoomLevel, 1);
@@ -417,25 +622,196 @@ try {
   await page.keyboard.press('End');
   console.log('STEP typeset live preview + syntax reveal on caret approach');
   await page.waitForTimeout(300);
-  // Dragging from one rendered block into another must produce a real
-  // cross-block selection, not just a caret in the first block.
-  const paragraphs = await page.locator('.md-widget p').evaluateAll(nodes => nodes.map(node => {
-    const rect = node.getBoundingClientRect();
-    return { x: rect.left + Math.min(Math.max(rect.width - 8, 8), 80), y: rect.top + rect.height / 2 };
-  }));
-  assert.ok(paragraphs.length >= 2, `需要至少两个渲染段落，实际 ${paragraphs.length}`);
-  await page.mouse.move(paragraphs[0].x, paragraphs[0].y);
+  // ── Cross-block selection (RFC 0001 batch 2A) ──────────────────────────
+  // The selection is a Markdown source range in EditorSelection. Only the two
+  // blocks that own an endpoint reveal their source; every block in between
+  // keeps its typeset layout and is only tinted. Copy, delete and undo all
+  // consume that same source range, so Markdown markers and block separators
+  // are reproduced exactly instead of being reconstructed from the DOM.
+  const crossBlockSample = '# 标题甲\n\n- 列表一\n- 列表二\n\n```js\nconst x = 1;\n```\n\n段落 **加粗** 结尾。\n';
+  const crossBlockLines = crossBlockSample.split('\n');
+  const mod = process.platform === 'darwin' ? 'Meta' : 'Control';
+  const caretPosition = async () => {
+    const text = await page.locator('#position').textContent();
+    const match = /行 (\d+)，列 (\d+)/.exec(text || '');
+    assert.ok(match, `状态栏缺少光标位置：${text}`);
+    return { line: Number(match[1]), column: Number(match[2]) };
+  };
+  const sourceOffset = ({ line, column }) =>
+    crossBlockLines.slice(0, line - 1).reduce((total, text) => total + text.length + 1, 0) + column - 1;
+  // A `.cm-line` is one document line; joining them back restores the LF source.
+  const crossBlockSource = () => page.evaluate(() =>
+    [...document.querySelectorAll('.cm-content .cm-line')].map(node => node.textContent).join('\n'));
+  const crossBlockHighlight = () => page.evaluate(() => [...document.querySelectorAll('.md-widget.cm-block-selected')].map(node => ({
+    list: !!node.querySelector('ul'),
+    code: !!node.querySelector('pre'),
+    paragraph: !!node.querySelector('p'),
+    text: node.textContent,
+    tint: getComputedStyle(node, '::after').backgroundColor
+  })));
+  const copyMarkdown = async () => {
+    await app.evaluate(async ({ clipboard, BrowserWindow }) => {
+      await clipboard.clear();
+      BrowserWindow.getAllWindows()[0].webContents.send('inkstone:command', 'copy-markdown');
+    });
+    for (let attempt = 0; attempt < 40; attempt++) {
+      const value = await app.evaluate(({ clipboard }) => clipboard.readText());
+      if (value) return value;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    return '';
+  };
+  const newCrossDoc = async () => {
+    if (await page.locator('[data-command="source"]').getAttribute('aria-pressed') === 'true') {
+      await page.locator('[data-command="source"]').click();
+    }
+    await page.locator('.topbar [data-command="new"]').click();
+    await page.locator('.cm-content').click();
+    await page.keyboard.insertText(crossBlockSample);
+    await page.waitForFunction(() => document.querySelectorAll('.md-widget').length >= 4, null, { timeout: 8000 });
+    await page.waitForTimeout(200);
+  };
+  // Rects of the first heading glyph, the bold glyph and the paragraph's last
+  // glyph as currently typeset. Used only while every block is rendered.
+  const crossBlockGeometry = () => page.evaluate(() => {
+    const textNodes = root => {
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      const nodes = [];
+      let node;
+      while ((node = walker.nextNode())) if (node.nodeValue.trim()) nodes.push(node);
+      return nodes;
+    };
+    const charRect = (node, from, to) => {
+      const range = document.createRange();
+      range.setStart(node, from);
+      range.setEnd(node, to);
+      const { x, y, width, height } = range.getBoundingClientRect();
+      return { x, y, width, height };
+    };
+    const heading = document.querySelector('.md-widget h1');
+    const paragraph = [...document.querySelectorAll('.md-widget p')].at(-1);
+    const paragraphText = textNodes(paragraph).at(-1);
+    const strong = document.querySelector('.md-widget strong')?.firstChild;
+    return {
+      heading: charRect(textNodes(heading)[0], 0, 1),
+      strong: strong ? charRect(strong, 0, 1) : null,
+      paragraphLast: charRect(paragraphText, paragraphText.nodeValue.length - 1, paragraphText.nodeValue.length)
+    };
+  });
+
+  await newCrossDoc();
+  assert.equal(await page.locator('.cm-live-line').count(), 0, '三个以上渲染块未交互时应全部排版');
+  const headingGeometry = await crossBlockGeometry();
+  await page.mouse.click(headingGeometry.heading.x + 1, headingGeometry.heading.y + headingGeometry.heading.height / 2);
+  await page.waitForTimeout(200);
+  assert.deepEqual(await caretPosition(), { line: 1, column: 3 }, '点击标题文字应定位到 # 之后的源码字符');
+  assert.ok(await page.locator('.cm-live-line').count() >= 1, '点击后端点块应以源码显示光标');
+  // A paragraph containing Markdown markers maps rendered glyphs to their own
+  // source characters: the first glyph of 加粗 is after the opening `**`.
+  await newCrossDoc();
+  const boldGeometry = await crossBlockGeometry();
+  assert.ok(boldGeometry.strong, '样例应包含渲染后的粗体文字');
+  await page.mouse.click(boldGeometry.strong.x + 1, boldGeometry.strong.y + boldGeometry.strong.height / 2);
+  await page.waitForTimeout(200);
+  assert.deepEqual(await caretPosition(), { line: 10, column: 6 }, '点击渲染后的粗体应映射到源码中的粗体文字');
+  assert.ok((await page.locator('.cm-live-line').last().textContent()).includes('**加粗**'), '光标进入元素后源码标记必须可见');
+  console.log('STEP cross-block caret mapping through heading and inline markers');
+
+  // Forward drag: heading start → paragraph. The captured anchor is the same
+  // offset verified by the click above; the head is read back from the status
+  // bar, so the assertion covers the exact source range the editor reports.
+  await newCrossDoc();
+  const forward = await crossBlockGeometry();
+  const forwardStart = { x: forward.heading.x + 1, y: forward.heading.y + forward.heading.height / 2 };
+  const forwardEnd = { x: forward.paragraphLast.x + forward.paragraphLast.width - 1, y: forward.paragraphLast.y + forward.paragraphLast.height / 2 };
+  await page.mouse.move(forwardStart.x, forwardStart.y);
   await page.mouse.down();
-  await page.mouse.move(paragraphs[1].x, paragraphs[1].y, { steps: 14 });
+  await page.mouse.move(forwardEnd.x, forwardEnd.y, { steps: 20 });
   await page.mouse.up();
-  await page.waitForFunction(() => document.querySelectorAll('.cm-live-line').length >= 2, { timeout: 4000 }).catch(() => {});
-  const liveLines = await page.locator('.cm-live-line').count();
-  assert.ok(liveLines >= 2, `跨块拖选应展开多个源码行，实际 ${liveLines}`);
-  assert.ok((await page.evaluate(() => window.getSelection().toString())).includes('\n'), '跨块选区应包含段落之间的换行');
-  assert.ok(await page.locator('.cm-selectionBackground').count() >= 1, '跨块拖选应产生可见选区');
-  await app.evaluate(async ({ clipboard, BrowserWindow }) => { await clipboard.clear(); BrowserWindow.getAllWindows()[0].webContents.send('inkstone:command', 'copy-markdown'); });
-  await pollClipboard('text', /文字|结尾|普通/);
-  console.log('STEP cross-block drag selection');
+  await page.waitForTimeout(300);
+  const forwardHead = await caretPosition();
+  const forwardHeadOffset = sourceOffset(forwardHead);
+  assert.ok(forwardHeadOffset > crossBlockSample.indexOf('```js'), `正向拖选应越过列表和代码块，实际停在 ${JSON.stringify(forwardHead)}`);
+  const forwardExpected = crossBlockSample.slice(2, forwardHeadOffset);
+  assert.match(await page.locator('#selection-status').textContent(), new RegExp(`已选 ${[...forwardExpected].length} 字`), '选区状态必须统计同一源码区间');
+  const forwardMiddle = await crossBlockHighlight();
+  assert.ok(forwardMiddle.some(block => block.list), '选区中间的列表必须保持渲染并高亮');
+  assert.ok(forwardMiddle.every(block => block.tint !== 'rgba(0, 0, 0, 0)' && block.tint !== 'transparent'), '渲染块高亮必须可见');
+  assert.ok(forwardMiddle.map(block => block.text).join('').includes('列表一'), '中间块内容仍应可见');
+  assert.ok(!forwardMiddle.map(block => block.text).join('').includes('- 列表'), '中间块不得展开 Markdown 源码');
+  assert.equal(await page.evaluate(() => getComputedStyle(document.querySelector('.md-widget.cm-block-selected'), '::after').pointerEvents), 'none', '高亮层不得拦截点击');
+  assert.ok((await page.locator('.cm-live-line').count()) >= 1, '端点块仍应以源码显示选区端点');
+  assert.ok(await page.locator('.cm-selectionBackground').count() >= 1, '跨块选区必须产生可见选区');
+  assert.equal(await copyMarkdown(), forwardExpected, '复制必须给出精确的 Markdown 源码区间');
+  await app.evaluate(async ({ clipboard }) => { await clipboard.clear(); });
+  await page.keyboard.press(`${mod}+c`);
+  await page.waitForTimeout(250);
+  assert.equal(await app.evaluate(({ clipboard }) => clipboard.readText()), forwardExpected, '原生复制必须使用同一源码区间');
+  await page.screenshot({ path: path.join(root, 'cross-block-forward.png') });
+  // Delete removes only the selected source; a single undo restores it.
+  await page.keyboard.press('Backspace');
+  await page.waitForTimeout(300);
+  await page.locator('[data-command="source"]').click();
+  await page.waitForTimeout(200);
+  assert.equal(await crossBlockSource(), crossBlockSample.slice(0, 2) + crossBlockSample.slice(forwardHeadOffset), '删除必须只移除选区源码');
+  await page.keyboard.press(`${mod}+z`);
+  await page.waitForTimeout(300);
+  assert.equal(await crossBlockSource(), crossBlockSample, '单次撤销必须恢复整个选区源码');
+  await page.locator('[data-command="source"]').click();
+  console.log('STEP cross-block drag selection: rendered middle blocks, exact copy / delete / undo');
+
+  // Reverse drag: paragraph end → heading start. The paragraph end was
+  // verified on a pristine copy; the heading is the topmost block, so its
+  // coordinates cannot move while lower blocks expand.
+  await newCrossDoc();
+  const reverseGeometry = await crossBlockGeometry();
+  const reverseStart = { x: reverseGeometry.paragraphLast.x + reverseGeometry.paragraphLast.width - 1, y: reverseGeometry.paragraphLast.y + reverseGeometry.paragraphLast.height / 2 };
+  await page.mouse.click(reverseStart.x, reverseStart.y);
+  await page.waitForTimeout(200);
+  const anchorPosition = await caretPosition();
+  assert.equal(anchorPosition.line, 10, '点击段落末尾应落在段落的源码行');
+  assert.equal(crossBlockSample.slice(sourceOffset(anchorPosition)), '\n', '点击段落末尾应定位到最后一个源码字符之后');
+  await newCrossDoc();
+  await page.mouse.move(reverseStart.x, reverseStart.y);
+  await page.mouse.down();
+  await page.mouse.move(reverseGeometry.heading.x + 1, reverseGeometry.heading.y + reverseGeometry.heading.height / 2, { steps: 24 });
+  await page.mouse.up();
+  await page.waitForTimeout(300);
+  assert.deepEqual(await caretPosition(), { line: 1, column: 3 }, '反向拖选应停在标题源码起点');
+  assert.equal(await copyMarkdown(), crossBlockSample.slice(2, sourceOffset(anchorPosition)), '反向拖选复制同一源码区间');
+  const reverseMiddle = await crossBlockHighlight();
+  assert.ok(reverseMiddle.some(block => block.list) && reverseMiddle.some(block => block.code), '反向选区中间的列表和代码块必须保持渲染');
+  assert.equal(await page.locator('.cm-live-line').count(), 2, '反向选区只应展开两个端点块');
+  assert.equal(await page.locator('.md-widget').count(), 2, '反向选区中间块不得展开为源码');
+  console.log('STEP reverse cross-block drag selection');
+
+  // Keyboard extension uses the same source selection and the same split
+  // between endpoint blocks and rendered middle blocks.
+  await newCrossDoc();
+  const keyboardGeometry = await crossBlockGeometry();
+  await page.mouse.click(keyboardGeometry.heading.x + 1, keyboardGeometry.heading.y + keyboardGeometry.heading.height / 2);
+  await page.waitForTimeout(200);
+  for (let step = 0; step < 16; step++) await page.keyboard.press('Shift+ArrowDown');
+  await page.waitForTimeout(300);
+  const keyboardHead = await caretPosition();
+  assert.equal(keyboardHead.line, crossBlockLines.length, `Shift+Down 应扩选到文档末尾，实际 ${JSON.stringify(keyboardHead)}`);
+  assert.equal(await copyMarkdown(), crossBlockSample.slice(2), 'Shift 扩选复制必须覆盖完整源码区间');
+  const keyboardMiddle = await crossBlockHighlight();
+  assert.equal(keyboardMiddle.length, 3, '标题之外的三个渲染块都应保持排版并高亮');
+  assert.ok(keyboardMiddle.every(block => block.tint !== 'rgba(0, 0, 0, 0)'), '键盘扩选的渲染块高亮必须可见');
+  assert.equal(await page.locator('.cm-live-line').count(), 1, '键盘扩选只应展开锚点块');
+  await page.screenshot({ path: path.join(root, 'cross-block-keyboard.png') });
+  // Reverse keyboard: paragraph end → document start.
+  await newCrossDoc();
+  const reverseKeyboardGeometry = await crossBlockGeometry();
+  await page.mouse.click(reverseKeyboardGeometry.paragraphLast.x + reverseKeyboardGeometry.paragraphLast.width - 1, reverseKeyboardGeometry.paragraphLast.y + reverseKeyboardGeometry.paragraphLast.height / 2);
+  await page.waitForTimeout(200);
+  for (let step = 0; step < 16; step++) await page.keyboard.press('Shift+ArrowUp');
+  await page.waitForTimeout(300);
+  assert.deepEqual(await caretPosition(), { line: 1, column: 1 }, 'Shift+Up 应扩选到文档开头');
+  assert.equal(await copyMarkdown(), crossBlockSample.slice(0, sourceOffset(anchorPosition)), '反向 Shift 扩选复制必须覆盖完整源码区间');
+  assert.deepEqual((await crossBlockHighlight()).map(block => block.list || block.code), [true, true], '反向 Shift 扩选的两个中间块必须保持渲染');
+  console.log('STEP Shift keyboard cross-block extension (forward + reverse)');
   // A continuous typing burst is one undo step; redo restores it.
   await page.locator('[data-command="source"]').click();
   await page.keyboard.press(process.platform === 'darwin' ? 'Meta+End' : 'Control+End');
@@ -517,16 +893,111 @@ try {
   await page.keyboard.press('Shift+Tab');
   assert.match(await page.locator('#selection-status').textContent(), /已选 2 字/, 'Shift+Tab 应回到第一个单元格');
   console.log('STEP Tab / Shift+Tab table cell navigation');
-  // Beyond 200k characters the live renderer must stand down entirely.
-  page.setDefaultTimeout(90000);
-  await page.locator('.topbar [data-command="new"]').click();
+  // A 220k document stays on the live layout: the benchmark measured it well
+  // inside the 150 ms/key budget, so the old 200k fallback moved up. The
+  // fixture deliberately carries duplicate headings, a reference definition
+  // and a footnote definition at the end; document-wide state has to survive a
+  // parse this large and the active block must still be the only source line.
+  page.setDefaultTimeout(180000);
+  const big = (() => {
+    const fragment = n => `## 重复标题\n\n第 ${n} 段含 **粗体**、[引用链接][ref] 与脚注[^note]。\n\n- 列表项 ${n}\n\n`;
+    let text = '# 大文档\n\n';
+    for (let n = 1; text.length < 220000; n++) text += fragment(n);
+    return `${text}\n[ref]: https://example.com/ref\n\n[^note]: 脚注内容\n`;
+  })();
+  // The outline step above switches to source mode to read the reordered text.
+  // Large-document coverage is about the live layout, so return to it first.
+  if (await page.locator('[data-command="source"]').getAttribute('aria-pressed') === 'true') {
+    await page.locator('[data-command="source"]').click();
+  }
+  // Open a file instead of pasting 220k characters into the editor: pasting a
+  // live document would run the whole-document layout once per input chunk,
+  // which measures insertion, not the layout a user actually reads. File open
+  // is also the real path for a large document and is what test/perf.mjs does.
+  const bigPath = path.join(root, 'large-220k.md');
+  await fs.writeFile(bigPath, big);
+  const openedAt = Date.now();
+  await app.evaluate(({ dialog }, target) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [target] }); }, bigPath);
+  await page.locator('[data-command="open"]').click();
+  await page.waitForFunction(name => document.querySelector('#location').textContent.includes(name), path.basename(bigPath));
+  await page.waitForFunction(() => document.querySelector('.cm-editor')?.dataset.inkstoneLayout === 'typeset', null, { timeout: 120000 });
+  await page.locator('.md-widget').first().waitFor({ timeout: 120000 });
+  assert.equal(Number(await page.evaluate(() => document.querySelector('.cm-editor').dataset.inkstoneLength)), big.length,
+    '220k 文档必须完整进入实时排版');
+  assert.ok(await page.locator('.md-widget').count() > 0);
+  console.log(`STEP 220k characters stay typeset (open + first render ${Date.now() - openedAt} ms)`);
+  // Land on a blank line after the first heading so every visible block is
+  // typeset, then check the two duplicate anchors, the reference link and the
+  // footnote tooltip that all depend on definitions at the end of the file.
   await page.locator('.cm-content').click();
-  await page.keyboard.insertText(`# 大文档\n\n${'内容 '.repeat(70000)}`);
-  await page.waitForFunction(() => document.querySelectorAll('.md-widget').length === 0, null, { timeout: 30000 });
-  assert.equal(await page.locator('.cm-content').count(), 1);
-  assert.ok((await page.locator('.cm-content').textContent()).includes('内容'));
+  await page.keyboard.press(`${mod}+Home`);
+  await page.waitForFunction(() => /^行 1，/.test(document.querySelector('#position').textContent), null, { timeout: 60000 });
+  await page.keyboard.press('ArrowDown');
+  await page.waitForFunction(() => document.querySelectorAll('.md-widget h2').length >= 2, null, { timeout: 60000 });
+  const bigTop = await page.evaluate(() => ({
+    headings: [...document.querySelectorAll('.md-widget h2')].slice(0, 2).map(node => node.id),
+    reference: document.querySelector('.md-widget a[href="https://example.com/ref"]')?.textContent || '',
+    footnote: document.querySelector('.md-widget sup.footnote-ref a')?.getAttribute('title') || ''
+  }));
+  assert.deepEqual(bigTop.headings, ['重复标题', '重复标题-1'], `220k 文档的重复标题锚点必须保持编号，实际 ${JSON.stringify(bigTop.headings)}`);
+  assert.equal(bigTop.reference, '引用链接', '220k 文档必须解析文末的引用式链接定义');
+  assert.equal(bigTop.footnote, '脚注内容', '220k 文档的脚注提示必须带出文末定义');
+  // The end of the file must be reachable and still render blocks around the
+  // caret; a selection there must update the status bar from the same source.
+  const bottomAt = Date.now();
+  await page.keyboard.press(`${mod}+End`);
+  await page.waitForFunction(() => {
+    const editor = document.querySelector('.cm-editor');
+    const total = Number(editor?.dataset.inkstoneLines || 0);
+    const line = Number(/行 (\d+)/.exec(document.querySelector('#position')?.textContent || '')?.[1] || 0);
+    return total > 0 && line === total;
+  }, null, { timeout: 60000 });
+  const bottomVisible = await page.evaluate(() => {
+    const scroller = document.querySelector('.cm-scroller');
+    const last = [...document.querySelectorAll('.cm-line')].at(-1);
+    const view = scroller.getBoundingClientRect();
+    const rect = last?.getBoundingClientRect();
+    return !!rect && rect.top < view.bottom && rect.bottom > view.top;
+  });
+  assert.ok(bottomVisible, '220k 文档必须能滚动到最后一行');
+  const bottomMs = Date.now() - bottomAt;
+  await page.keyboard.press('Shift+ArrowUp');
+  assert.match(await page.locator('#selection-status').textContent(), /已选 \d+ 字/, '220k 文档中仍应能正常扩选');
+  const headAt = Date.now();
+  await page.keyboard.press(`${mod}+Home`);
+  await page.waitForFunction(() => /^行 1，/.test(document.querySelector('#position').textContent), null, { timeout: 60000 });
+  console.log(`STEP 220k typeset: duplicate headings, reference + footnote definitions, scroll and selection (bottom ${bottomMs} ms, head ${Date.now() - headAt} ms)`);
+  // Above the new limit the live renderer must stand down completely. The
+  // source remains a single CodeMirror document, still scrollable end to end;
+  // typing there must not build a widget or a live line.
+  const fallback = (() => {
+    let text = '# 大文档\n\n';
+    for (let n = 1; text.length < 275000; n++) text += `## 重复标题\n\n第 ${n} 段含 [引用链接][ref] 与脚注[^note]。\n\n`;
+    return `${text}\n[ref]: https://example.com/ref\n\n[^note]: 脚注内容\n`;
+  })();
+  const fallbackPath = path.join(root, 'large-275k.md');
+  await fs.writeFile(fallbackPath, fallback);
+  await app.evaluate(({ dialog }, target) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [target] }); }, fallbackPath);
+  await page.locator('[data-command="open"]').click();
+  await page.waitForFunction(name => document.querySelector('#location').textContent.includes(name), path.basename(fallbackPath));
+  await page.waitForFunction(() => document.querySelector('.cm-editor')?.dataset.inkstoneLayout === 'source-fallback', null, { timeout: 120000 });
+  await page.waitForFunction(() => document.querySelectorAll('.md-widget').length === 0, null, { timeout: 60000 });
+  assert.equal(await page.locator('.cm-live-line').count(), 0, '超过上限后不应保留排版行');
+  assert.equal(Number(await page.evaluate(() => document.querySelector('.cm-editor').dataset.inkstoneLength)), fallback.length,
+    '源码兜底文档必须完整保留');
+  await page.locator('.cm-content').click();
+  await page.keyboard.press(`${mod}+Home`);
+  await page.waitForFunction(() => /^行 1，/.test(document.querySelector('#position').textContent), null, { timeout: 60000 });
+  await page.keyboard.press(`${mod}+End`);
+  await page.waitForFunction(() => {
+    const total = Number(document.querySelector('.cm-editor')?.dataset.inkstoneLines || 0);
+    const line = Number(/行 (\d+)/.exec(document.querySelector('#position')?.textContent || '')?.[1] || 0);
+    return total > 0 && line === total;
+  }, null, { timeout: 60000 });
+  await page.keyboard.press('Shift+ArrowUp');
+  assert.match(await page.locator('#selection-status').textContent(), /已选 \d+ 字/, '源码兜底文档中仍应能正常扩选');
   page.setDefaultTimeout(15000);
-  console.log('STEP 200k+ character plain-source fallback');
+  console.log('STEP above-limit plain-source fallback: document intact, scrolls end to end, selection works');
   // A Typora-like toolbar-free layout is opt-in from preferences.
   await page.locator('[data-command="settings"]').click();
   await page.locator('[name="showFormatbar"]').uncheck();
@@ -536,7 +1007,9 @@ try {
   console.log('STEP optional toolbar-free layout');
   // Hidden syntax must never corrupt the source: typing into a typeset active
   // block writes to the real Markdown characters.
-  await page.locator('[data-command="source"]').click();
+  if (await page.locator('[data-command="source"]').getAttribute('aria-pressed') === 'true') {
+    await page.locator('[data-command="source"]').click();
+  }
   await page.locator('.topbar [data-command="new"]').click();
   await page.locator('.cm-content').click();
   await page.keyboard.insertText('前缀 **加粗** 后缀。\n\n另一段。\n');
@@ -577,10 +1050,11 @@ try {
   console.log('STEP immediate typeset on closing delimiter + reveal only inside element');
   await fresh();
   await page.keyboard.type('# ', { delay: 25 });
-  await page.waitForFunction(() => document.querySelectorAll('.cm-hidden-mark').length >= 1);
-  assert.ok(await page.locator('.cm-lv-h1').count() >= 1, '输入 # 加空格后应立即成为标题');
+  assert.equal(await page.locator('.cm-lv-h1').count(), 0, '输入 # 加空格时保持普通字号');
   await page.keyboard.type('标题', { delay: 25 });
-  assert.ok(!(await page.locator('.cm-content').textContent()).includes('# '), '标题前缀应立即隐藏');
+  assert.ok((await page.locator('.cm-content').textContent()).includes('# '), '当前标题行保留前缀');
+  await page.keyboard.press('Enter');
+  await page.locator('.md-widget h1').waitFor();
   await fresh();
   await page.keyboard.type('- ', { delay: 25 });
   await page.locator('.cm-prefix-bullet').waitFor();
@@ -594,28 +1068,170 @@ try {
   await page.waitForFunction(() => document.querySelectorAll('.cm-hidden-mark').length >= 2);
   assert.ok(await page.locator('.cm-lv-code').count() >= 1, '闭合反引号后应立即显示行内代码样式');
   assert.ok(!(await page.locator('.cm-content').textContent()).includes('`'), '闭合反引号后不应裸露反引号');
-  console.log('STEP immediate heading, bullet, ordered list and code span typesetting');
-  // Content-free block prefixes used to stay raw until item text was typed:
-  // `-`, `- [ ]` and `>` must typeset on the last keystroke of the marker.
+  console.log('STEP heading typesetting after Enter; immediate bullet, ordered list and code span typesetting');
+  // Typing the separator activates each block prefix, even without body text.
+  for (const [marker, widget] of [
+    ['-', '.cm-prefix-bullet'], ['*', '.cm-prefix-bullet'], ['+', '.cm-prefix-bullet'],
+    ['1.', '.cm-prefix-ordered'], ['1)', '.cm-prefix-ordered'],
+    ['>', '.cm-lv-quote'], ['>>', '.cm-lv-quote'], ['- [ ]', '.cm-prefix-task']
+  ]) {
+    await fresh();
+    await page.keyboard.type(marker, { delay: 25 });
+    assert.equal(await page.locator(widget).count(), 0, `${marker} 在空格前不应排版`);
+    await page.keyboard.type(' ');
+    await page.locator(widget).waitFor();
+  }
+  console.log('STEP list, task and quote prefixes wait for the separator');
+  // Nested containers must typeset every layer, not only the outermost marker.
+  // The same line may mix an already typeset outer quote with an inner bullet,
+  // ordered marker or task box.
+  const nestedPrefixes = [
+    ['> - 项目', '•项目', { quotes: 1, bullets: 1 }],
+    ['- > 引用', '•引用', { quotes: 1, bullets: 1 }],
+    ['> > 引用', '引用', { quotes: 2 }],
+    ['>> 引用', '引用', { quotes: 2 }],
+    ['> 1. 项目', '1.项目', { quotes: 1, ordered: '1.' }],
+    ['> - [ ] 任务', '☐任务', { quotes: 1, tasks: 1 }]
+  ];
+  for (const [sample, visible, expected] of nestedPrefixes) {
+    await fresh();
+    await page.keyboard.type(sample, { delay: 20 });
+    const line = page.locator('.cm-live-line').first();
+    assert.equal(await line.textContent(), visible, `${sample}: 可见正文`);
+    assert.equal(await line.locator('.cm-prefix-quote').count(), expected.quotes || 0, `${sample}: 引用层`);
+    assert.equal(await line.locator('.cm-prefix-bullet').count(), expected.bullets || 0, `${sample}: 项目符号层`);
+    assert.equal(await line.locator('.cm-prefix-task').count(), expected.tasks || 0, `${sample}: 任务框层`);
+    if (expected.ordered) assert.equal(await line.locator('.cm-prefix-ordered').textContent(), expected.ordered);
+    assert.equal(await line.locator('.cm-md-mark').count(), 0, `${sample}: 不应残留前缀源码`);
+  }
+  // The outer quote typesets first; the inner marker stays raw until its own
+  // separator is typed. Enter on the empty inner item exits only that layer.
   await fresh();
-  await page.keyboard.type('-', { delay: 25 });
+  await page.keyboard.type('> -', { delay: 20 });
+  assert.equal(await page.locator('.cm-prefix-quote').count(), 1, '外层引用应在空格后立即排版');
+  assert.equal(await page.locator('.cm-prefix-bullet').count(), 0, '内层项目符号仍在等待空格');
+  assert.ok((await page.locator('.cm-live-line').first().textContent()).includes('-'), '缺少空格的内层标记应保持源码可见');
+  await page.keyboard.type(' ', { delay: 20 });
   await page.locator('.cm-prefix-bullet').waitFor();
-  assert.ok(!(await page.locator('.cm-content').textContent()).includes('-'), '单独一个 - 应立即显示项目符号');
+  assert.equal(await page.locator('.cm-live-line').first().textContent(), '•', '空格后内层项目符号排版');
+  await page.keyboard.press('Enter');
+  assert.equal(await page.locator('.cm-prefix-bullet').count(), 0, '空项 Enter 只退出内层列表');
+  assert.equal(await page.locator('.cm-prefix-quote').count(), 1, '退出列表后外层引用仍保留');
+  // A task checkbox nested under quote and list toggles only the checkbox.
   await fresh();
-  await page.keyboard.type('- [ ]', { delay: 25 });
-  await page.locator('.cm-prefix-task').waitFor();
-  assert.equal(await page.locator('.cm-prefix-task').textContent(), '☐', '无正文的 - [ ] 应立即显示复选框');
-  assert.ok(!(await page.locator('.cm-content').textContent()).includes('[ ]'), '任务标记不应裸露');
-  await page.keyboard.type(' 待办', { delay: 25 });
-  assert.equal(await page.locator('.cm-prefix-task').count(), 1, '继续输入正文后仍应是任务项');
+  await page.keyboard.type('> - [ ] 任务', { delay: 20 });
+  await page.locator('.cm-prefix-task').click();
+  assert.equal(await page.locator('.cm-prefix-task').getAttribute('aria-checked'), 'true', '嵌套任务框应可勾选');
+  assert.equal(await page.locator('.cm-prefix-quote').count(), 1, '勾选不得破坏外层引用');
+  assert.equal(await page.locator('.cm-prefix-task').count(), 1, '任务框仍是单一复选框');
+  assert.equal(await page.locator('.cm-prefix-bullet').count(), 0, '任务框不得再残留直属项目符号');
+  console.log('STEP nested quote/list/task prefixes typeset by layer and exit one level');
+  // A thematic break is whatever the parse says it is: the spaced spellings
+  // and rules nested in a quote or list typeset, every container layer stays
+  // visible, and the rule source is one ArrowLeft away from editing.
+  const ruleSamples = [
+    ['* * *', 0],
+    ['___', 0],
+    ['- - -', 0],
+    ['> ---', 1],
+    ['> > * * *', 2]
+  ];
+  for (const [sample, quotes] of ruleSamples) {
+    await fresh();
+    await page.keyboard.type(sample, { delay: 20 });
+    const ruleLine = page.locator('.cm-live-line').first();
+    await ruleLine.locator('.cm-prefix-hr').waitFor();
+    assert.equal(await ruleLine.locator('.cm-prefix-hr').count(), 1, `${sample}: 应显示分隔线`);
+    assert.equal(await ruleLine.locator('.cm-prefix-quote').count(), quotes, `${sample}: 引用层级`);
+    assert.equal(await ruleLine.locator('.cm-md-mark').count(), 0, `${sample}: 分隔线源码应隐藏`);
+    // Entering the rule brings its Markdown source back, leaving re-typesets.
+    await page.keyboard.press('ArrowLeft');
+    await page.waitForFunction(() => document.querySelectorAll('.cm-live-line .cm-prefix-hr').length === 0);
+    const ruleSource = sample.replace(/^(?:> )+/, '');
+    assert.ok((await ruleLine.textContent()).endsWith(ruleSource),
+      `${sample}: 光标进入后应显示分隔线源码，实际 ${JSON.stringify(await ruleLine.textContent())}`);
+    await page.keyboard.press('ArrowRight');
+    await ruleLine.locator('.cm-prefix-hr').waitFor();
+    // Rendering never rewrites the source: a rule keeps its original spelling.
+    await page.locator('[data-command="source"]').click();
+    assert.equal((await sourceText()).trim(), sample, `${sample}: 源码必须原样保留`);
+    await page.locator('[data-command="source"]').click();
+  }
+  // Typing inside the revealed rule writes real Markdown characters at the
+  // caret the user actually has. ArrowLeft crosses the hidden syntax as one
+  // atomic step, so the caret lands left of the last `*` — the assertion is
+  // derived from the reported caret position instead of assuming an offset.
   await fresh();
-  await page.keyboard.type('>', { delay: 25 });
-  await page.locator('.cm-lv-quote').waitFor();
-  assert.equal(await page.locator('.cm-hidden-mark').count(), 1, '引用前缀应立即隐藏');
-  assert.ok(!(await page.locator('.cm-content').textContent()).includes('>'), '引用标记不应裸露');
-  await page.keyboard.type(' 引用文字', { delay: 25 });
-  assert.ok((await page.locator('.cm-content').textContent()).includes('引用文字'), '引用正文应可见');
-  console.log('STEP immediate typesetting for empty list, task and quote prefixes');
+  const ruleText = '* * *';
+  await page.keyboard.type(ruleText, { delay: 20 });
+  await page.keyboard.press('ArrowLeft');
+  await page.waitForFunction(() => document.querySelectorAll('.cm-live-line .cm-prefix-hr').length === 0);
+  assert.equal(await page.locator('.cm-live-line').first().textContent(), ruleText, '光标进入后应显示分隔线源码以便编辑');
+  const ruleCaret = await caretPosition();
+  assert.equal(ruleCaret.line, 1, '分隔线仍在第一行');
+  const insertAt = ruleCaret.column - 1;
+  assert.ok(insertAt >= 0 && insertAt < ruleText.length, `光标必须落在分隔线源码内，实际 ${JSON.stringify(ruleCaret)}`);
+  await page.keyboard.type('X', { delay: 20 });
+  await page.locator('[data-command="source"]').click();
+  assert.equal((await sourceText()).trim(), ruleText.slice(0, insertAt) + 'X' + ruleText.slice(insertAt),
+    '在分隔线源码中输入的字符必须写回真实 Markdown 的光标位置');
+  await page.locator('[data-command="source"]').click();
+  // The block leaves the active state as a real `<hr>`, nested containers kept.
+  await fresh();
+  await page.keyboard.insertText('> > * * *\n\n尾段');
+  await page.locator('.md-widget hr').first().waitFor();
+  assert.equal(await page.locator('.md-widget blockquote blockquote hr').count(), 1, '渲染态应保留两层引用内的分隔线');
+  assert.equal(await page.locator('.cm-prefix-hr').count(), 0, '离开块后不应再有活跃分隔线');
+  // The same characters are a Setext underline when they follow a paragraph,
+  // and a table delimiter row or a fence line when the block says so.
+  await fresh();
+  await page.keyboard.insertText('标题\n---\n\n尾段');
+  await page.locator('.md-widget h2').first().waitFor();
+  assert.equal(await page.locator('.md-widget hr').count(), 0, 'Setext 必须渲染为标题');
+  await page.keyboard.press('ArrowUp');
+  await page.keyboard.press('ArrowUp');
+  await page.waitForFunction(() => document.querySelectorAll('.cm-live-line').length === 2);
+  assert.equal(await page.locator('.cm-live-line .cm-prefix-hr').count(), 0, 'Setext 下划线不得变成分隔线');
+  await fresh();
+  await page.keyboard.insertText('> 标题\n> ---\n\n尾段');
+  await page.locator('.md-widget h2').first().waitFor();
+  await page.keyboard.press('ArrowUp');
+  await page.keyboard.press('ArrowUp');
+  await page.waitForFunction(() => document.querySelectorAll('.cm-live-line').length === 2);
+  assert.equal(await page.locator('.cm-live-line .cm-prefix-hr').count(), 0, '引用内的 Setext 下划线不得变成分隔线');
+  await fresh();
+  await page.keyboard.insertText('| A | B |\n| --- | --- |\n\n尾段');
+  await page.locator('.md-widget table').first().waitFor();
+  assert.equal(await page.locator('.md-widget hr').count(), 0, '表格分隔行不得变成分隔线');
+  await page.keyboard.press('ArrowUp');
+  await page.keyboard.press('ArrowUp');
+  await page.waitForFunction(() => document.querySelectorAll('.cm-live-line').length === 2);
+  assert.equal(await page.locator('.cm-live-line .cm-prefix-hr').count(), 0, '活跃块内的表格分隔行不得变成分隔线');
+  await fresh();
+  await page.keyboard.insertText('```\n---\n```\n\n尾段');
+  await page.locator('.md-widget pre').first().waitFor();
+  assert.equal(await page.locator('.md-widget hr').count(), 0, '代码围栏内不得生成分隔线');
+  await page.keyboard.press('ArrowUp');
+  await page.keyboard.press('ArrowUp');
+  await page.waitForFunction(() => document.querySelectorAll('.cm-live-line').length === 3);
+  assert.equal(await page.locator('.cm-live-line .cm-prefix-hr').count(), 0, '代码围栏内的 --- 仍应为字面量');
+  assert.ok((await page.locator('.cm-live-line').allTextContents()).includes('---'), '代码围栏内容应完整可见');
+  await fresh();
+  await page.keyboard.insertText('---\ntitle: 墨页\n---\n\n尾段');
+  await page.locator('.md-widget .front-matter').first().waitFor();
+  assert.equal(await page.locator('.md-widget hr').count(), 0, 'front matter 不得变成分隔线');
+  await page.keyboard.press('ArrowUp');
+  await page.keyboard.press('ArrowUp');
+  await page.keyboard.press('ArrowUp');
+  await page.waitForFunction(() => document.querySelectorAll('.cm-live-line').length === 3);
+  assert.equal(await page.locator('.cm-live-line .cm-prefix-hr').count(), 0, '活跃块内的 front matter 不得变成分隔线');
+  // A rule nested in a list item keeps the list marker of its container.
+  await fresh();
+  await page.keyboard.insertText('- 项目\n\n  * * *');
+  await page.locator('.cm-prefix-hr').waitFor();
+  assert.equal(await page.locator('.cm-prefix-bullet').count(), 1, '列表内的分隔线应保留外层列表');
+  assert.equal(await page.locator('.cm-prefix-hr').count(), 1);
+  console.log('STEP parsed thematic breaks: spaced and nested rules typeset, setext/table/fence/front matter stay literal');
   // Ordinary characters are not syntax. These lines used to lose the `*`, the
   // `==`, the `~` and the `$` while the block was active, because the previous
   // layer matched delimiters with regular expressions instead of parsing.
@@ -952,9 +1568,10 @@ try {
   await fs.writeFile(cellPath, cellSource);
   await openFile(cellPath);
   await page.locator('.md-widget table th').first().click();
-  assert.equal(await page.locator('.md-widget table th').first().getAttribute('contenteditable'), 'plaintext-only');
+  await page.waitForFunction(() => !!document.querySelector('.md-widget table th.table-cell-editing .cm-content'));
   assert.equal(await page.locator('.md-widget table th').first().textContent(), 'a **b** c', '编辑时应显示单元格的 Markdown 源码');
   await page.locator('.md-widget table th').nth(1).click();
+  await page.waitForFunction(() => document.activeElement?.closest?.('td, th')?.textContent === '[链接](https://x.y)');
   await page.keyboard.press('Escape');
   assert.equal(await page.locator('.md-widget table strong').count(), 1, '未修改时应恢复原渲染 DOM');
   assert.equal(await page.locator('.md-widget table a').count(), 1);
@@ -967,11 +1584,12 @@ try {
   console.log('STEP clicking a rendered cell without editing leaves the file untouched');
   // Editing that cell keeps its inline Markdown syntax intact.
   await page.locator('.md-widget table th').first().click();
+  await page.waitForFunction(() => !!document.querySelector('.md-widget table th.table-cell-editing .cm-content'));
   await page.keyboard.press('End');
   await page.keyboard.type(' X');
   await page.keyboard.press('Tab');
   await page.waitForFunction(() => document.activeElement?.closest?.('td, th')?.textContent === '[链接](https://x.y)', { timeout: 8000 });
-  assert.equal(await page.locator('.md-widget table th').nth(1).getAttribute('contenteditable'), 'plaintext-only', 'Tab 提交后应进入下一格继续编辑');
+  assert.equal(await page.locator('.md-widget table th').nth(1).locator('.table-cell-editor .cm-content').count(), 1, 'Tab 提交后应进入下一格继续编辑');
   await page.keyboard.press('Escape');
   await page.locator('[data-command="source"]').click();
   assert.deepEqual(await sourceLines(), ['| a **b** c X | [链接](https://x.y) |', '| --- | --- |', '| 1 | 2 |', ''],
@@ -979,11 +1597,162 @@ try {
   await page.locator('[data-command="source"]').click();
   assert.equal(await page.locator('.md-widget table strong').first().textContent(), 'b');
   console.log('STEP editing a bold cell preserves its Markdown syntax');
+  // A cell keeps its inline Markdown typeset while it is edited: bold, italic,
+  // inline code and link text stay styled, the markers stay visible (dimmed) so
+  // they can be changed, and the commit writes only the cell's own source range.
+  // One undo reverts the whole edit; Escape and an empty commit add no history.
+  const richCellSource = '| 样式 | 说明 |\n| --- | --- |\n| **粗体** *斜体* `code` [链接](https://x.y) a \\| b | 普通 |\n\n结尾段落。\n';
+  const richCellPath = path.join(root, 'rich-cells.md');
+  await fs.writeFile(richCellPath, richCellSource);
+  await openFile(richCellPath);
+  await page.locator('.md-widget table tbody td').first().click();
+  await page.waitForFunction(() => !!document.querySelector('.table-cell-editing .cm-content'));
+  const richCell = await page.evaluate(() => {
+    const cell = document.querySelector('.table-cell-editing');
+    const text = selector => [...cell.querySelectorAll(selector)].map(node => node.textContent).join('');
+    return {
+      strong: text('.cm-lv-strong'), em: text('.cm-lv-em'), code: text('.cm-lv-code'),
+      link: text('.cm-lv-link'), marks: text('.cm-md-mark'),
+      source: cell.querySelector('.cm-content').textContent
+    };
+  });
+  assert.deepEqual(
+    { strong: richCell.strong, em: richCell.em, code: richCell.code, link: richCell.link },
+    { strong: '粗体', em: '斜体', code: 'code', link: '链接' },
+    '编辑单元格时必须保留粗体/斜体/行内代码/链接正文的可见样式'
+  );
+  assert.ok(richCell.marks.includes('**') && richCell.marks.includes('`') && richCell.marks.includes('\\'),
+    `语法标记必须可见以便修改：${richCell.marks}`);
+  assert.ok(richCell.source.includes('a \\| b'), `编辑内容必须是单元格的 Markdown 源码：${richCell.source}`);
+  assert.equal(await page.locator('.cm-live-line').count(), 0, '编辑单元格时整表不得展开成源码');
+  assert.equal(await page.locator('.md-widget table').count(), 1, '编辑单元格时其它单元格与整表必须保持排版');
+  await page.keyboard.press('End');
+  await page.keyboard.type(' 新增');
+  await page.keyboard.press('Tab');
+  await page.waitForFunction(() => document.activeElement?.closest?.('td, th')?.textContent === '普通', { timeout: 8000 });
+  await page.keyboard.press('Escape');
+  await page.locator('[data-command="source"]').click();
+  assert.deepEqual((await sourceLines()).slice(0, 3), [
+    '| 样式 | 说明 |',
+    '| --- | --- |',
+    '| **粗体** *斜体* `code` [链接](https://x.y) a \\| b 新增 | 普通 |'
+  ], '局部修改必须保留原有 Markdown 标记与转义竖线');
+  await page.locator('[data-command="source"]').click();
+  // Escape writes nothing, and the next undo still reverts the real commit.
+  await page.locator('.md-widget table tbody td').first().click();
+  await page.waitForFunction(() => !!document.querySelector('.table-cell-editing .cm-content'));
+  await page.keyboard.type('ZZZ');
+  await page.keyboard.press('Escape');
+  assert.equal(await page.locator('.table-cell-editing').count(), 0, 'Escape 必须关闭单元格编辑器');
+  assert.equal(await page.locator('.md-widget table strong').count(), 1, 'Escape 后必须恢复原渲染 DOM');
+  await page.locator('[data-command="source"]').click();
+  assert.ok(!(await sourceLines())[2].includes('ZZZ'), 'Escape 不得写入文档');
+  await page.locator('[data-command="source"]').click();
+  // Tab without typing is an empty commit: it must not consume the undo step.
+  await page.locator('.md-widget table tbody td').first().click();
+  await page.waitForFunction(() => !!document.querySelector('.table-cell-editing .cm-content'));
+  await page.keyboard.press('Tab');
+  await page.waitForFunction(() => document.activeElement?.closest?.('td, th')?.textContent === '普通', { timeout: 8000 });
+  await page.keyboard.press('Escape');
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+z' : 'Control+z');
+  await page.waitForTimeout(150);
+  await page.locator('[data-command="source"]').click();
+  assert.deepEqual(await sourceLines(), richCellSource.split('\n'), '一次撤销必须撤销整次单元格提交，Escape 与空提交不得增加历史');
+  await page.locator('[data-command="source"]').click();
+  console.log('STEP in-cell Markdown keeps inline styles, markers, single-step undo and empty history');
+  // GFM allows missing outer pipes, and a pipe preceded by a backslash is text
+  // for markdown-it (which looks at the character right before the pipe, not at
+  // the parity of a backslash run). Both must map the DOM column to the exact
+  // source range without touching the neighbouring cell.
+  const slash = '\\';
+  const optionalSource = 'A | B\r\n--- | ---\r\n| a ' + slash + slash + '| b | c\r\n';
+  const optionalPath = path.join(root, 'optional-pipes.md');
+  await fs.writeFile(optionalPath, optionalSource);
+  await openFile(optionalPath);
+  await page.locator('.md-widget table tbody td').first().click();
+  await page.waitForFunction(() => !!document.querySelector('.table-cell-editing .cm-content'));
+  assert.equal(await page.locator('.table-cell-editing .cm-content').textContent(), 'a ' + slash + slash + '| b',
+    '反斜杠后的竖线必须留在第一个单元格');
+  await page.keyboard.press('End');
+  await page.keyboard.type('X');
+  await page.keyboard.press('Tab');
+  await page.waitForFunction(() => document.activeElement?.closest?.('td, th')?.cellIndex === 1);
+  assert.equal(await page.locator('.table-cell-editing .cm-content').textContent(), 'c', 'Tab 必须进入真正渲染的第二列');
+  await page.keyboard.press('Escape');
+  await page.locator('[data-command="source"]').click();
+  assert.equal((await sourceLines())[2], '| a ' + slash + slash + '| bX | c', '写入位置不得越过转义竖线');
+  await page.locator('[data-command="source"]').click();
+  await saveOpenFile();
+  assert.equal(await fs.readFile(optionalPath, 'utf8'),
+    'A | B\r\n--- | ---\r\n| a ' + slash + slash + '| bX | c\r\n',
+    '缺省外侧竖线的 CRLF 表格只改目标单元格');
+  console.log('STEP optional outer pipes and consecutive backslashes map to the rendered cell');
+  // A quoted heading with a pipe is a separate block, not a row: Enter must be
+  // inserted before it. A raw HTML table in the same block makes the DOM and
+  // GFM index spaces ambiguous, so cell entry and the grid editor must refuse.
+  const headingSource = '> | A | B |\n> | --- | --- |\n> | x | y |\n> # H | Q\n';
+  const headingPath = path.join(root, 'heading-pipe.md');
+  await fs.writeFile(headingPath, headingSource);
+  await openFile(headingPath);
+  await page.locator('.md-widget blockquote table tbody td').first().click();
+  await page.waitForFunction(() => !!document.querySelector('.table-cell-editing .cm-content'));
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(() => document.querySelectorAll('.md-widget blockquote table tbody tr').length === 2);
+  await page.keyboard.press('Escape');
+  await page.locator('[data-command="source"]').click();
+  assert.deepEqual((await sourceLines()).slice(0, 5), ['> | A | B |', '> | --- | --- |', '> | x | y |', '> |  |  |', '> # H | Q'],
+    '新增行必须在表格内、标题前');
+  await page.locator('[data-command="source"]').click();
+  const mixedSource = [
+    '> <table><tbody><tr><td>html</td></tr></tbody></table>', '>',
+    '> | A | B |', '> | --- | --- |', '> | x | y |', '>',
+    '> | C | D |', '> | --- | --- |', '> | p | q |', ''
+  ].join('\n');
+  const mixedTablePath = path.join(root, 'mixed-tables.md');
+  await fs.writeFile(mixedTablePath, mixedSource);
+  await openFile(mixedTablePath);
+  await page.waitForFunction(() => document.querySelectorAll('.md-widget blockquote table').length === 3);
+  await page.locator('.md-widget blockquote table').nth(1).locator('tbody td').first().click();
+  await page.waitForTimeout(250);
+  assert.equal(await page.locator('.table-cell-editing').count(), 0, '混合 HTML/GFM 表格不得猜测单元格源码');
+  await page.locator('.md-widget blockquote table').nth(1).locator('tbody td').first().click({ button: 'right' });
+  await page.waitForTimeout(250);
+  assert.equal(await page.locator('#dialog[open] .table-editor').count(), 0, '混合表格不得打开相邻表格的图形化编辑器');
+  await saveOpenFile();
+  assert.equal(await fs.readFile(mixedTablePath, 'utf8'), mixedSource, '拒绝编辑后文件必须逐字节不变');
+  console.log('STEP quoted pipe heading and mixed HTML/GFM tables stay outside the cell range');
+  // IME candidate keys never append a row / close the cell, and an explicit
+  // native Save flushes the draft even though the cell never loses focus.
+  const saveDraftPath = path.join(root, 'save-draft.md');
+  await fs.writeFile(saveDraftPath, '| A | B |\n| --- | --- |\n| 1 | 2 |\n');
+  await openFile(saveDraftPath);
+  await page.locator('.md-widget table tbody td').first().click();
+  await page.waitForFunction(() => !!document.querySelector('.table-cell-editing .cm-content'));
+  for (const key of ['Enter', 'Tab', 'Escape']) {
+    await page.locator('.table-cell-editing .cm-content').evaluate((node, name) => {
+      node.dispatchEvent(new KeyboardEvent('keydown', { key: name, code: name, isComposing: true, keyCode: 229, bubbles: true, cancelable: true }));
+    }, key);
+  }
+  await page.waitForTimeout(150);
+  assert.equal(await page.locator('.md-widget table tbody tr').count(), 1, 'IME 候选按键不得追加表格行');
+  assert.equal(await page.locator('.table-cell-editing .cm-content').count(), 1, 'IME 候选按键不得提交或取消单元格');
+  await page.keyboard.press('End');
+  await page.keyboard.type('存');
+  await app.evaluate(({ BrowserWindow }) => {
+    // An independent second window from an earlier step may own index 0.
+    const win = BrowserWindow.getAllWindows().find(window => window.webContents.getTitle().includes('save-draft.md'));
+    win?.webContents.send('inkstone:command', 'save');
+  });
+  await page.waitForFunction(() => !document.querySelector('.table-cell-editing'), null, { timeout: 8000 });
+  await page.waitForFunction(() => document.querySelector('#save-status').textContent === '已保存', null, { timeout: 8000 });
+  assert.match(await fs.readFile(saveDraftPath, 'utf8'), /\| 1存 \| 2 \|/, '原生命令保存必须提交活动单元格草稿');
+  console.log('STEP IME candidate keys are ignored and native Save commits the active cell');
   // Tab walks cells and Enter appends a row, both from the rendered table.
   await page.locator('.topbar [data-command="new"]').click();
   await page.locator('.cm-content').click();
   await page.keyboard.insertText('| 甲 | 乙 |\n| --- | --- |\n| 1 | 2 |\n');
   await page.locator('.md-widget table td').first().click();
+  await page.waitForFunction(() => !!document.querySelector('.md-widget table td.table-cell-editing .cm-content'));
   await page.keyboard.type('9');
   await page.keyboard.press('Tab');
   await page.waitForFunction(() => document.activeElement?.closest?.('td, th')?.textContent === '2', { timeout: 8000 });
@@ -992,7 +1761,7 @@ try {
   await page.waitForFunction(rows => document.querySelectorAll('.md-widget table tr').length === rows + 1, rowsBefore, { timeout: 8000 });
   const focusedCell = await page.evaluate(() => {
     const cell = document.activeElement?.closest?.('td, th');
-    return cell ? { editable: cell.isContentEditable, index: cell.cellIndex, last: cell.parentElement === cell.closest('table').rows[cell.closest('table').rows.length - 1] } : null;
+    return cell ? { editable: !!cell.querySelector('.table-cell-editing .cm-content'), index: cell.cellIndex, last: cell.parentElement === cell.closest('table').rows[cell.closest('table').rows.length - 1] } : null;
   });
   assert.deepEqual(focusedCell, { editable: true, index: 0, last: true }, 'Enter 提交后应追加一行并进入新行第一格');
   await page.keyboard.press('Escape');
@@ -1007,7 +1776,8 @@ try {
   await page.keyboard.insertText('> | a | b |\n> | --- | --- |\n> | 1 | 2 |\n');
   await page.locator('.md-widget blockquote table th').first().waitFor();
   await page.locator('.md-widget blockquote table th').first().click();
-  assert.equal(await page.locator('.md-widget blockquote table th').first().getAttribute('contenteditable'), 'plaintext-only', '引用内的表格也要能就地编辑');
+  await page.waitForFunction(() => !!document.querySelector('.md-widget blockquote table th.table-cell-editing .cm-content'));
+  assert.equal(await page.locator('.md-widget blockquote table th.table-cell-editing .cm-content').count(), 1, '引用内的表格也要能就地编辑');
   await page.keyboard.press('End');
   await page.keyboard.type('Q');
   await page.keyboard.press('Tab');
@@ -1106,7 +1876,8 @@ try {
   // back through the (now shifted) positions of their block.
   await ensureLive();
   await page.locator('#editor-host .md-widget table td').first().click();
-  assert.equal(await page.locator('#editor-host .md-widget table td').first().getAttribute('contenteditable'), 'plaintext-only');
+  await page.waitForFunction(() => !!document.querySelector('#editor-host .md-widget table td.table-cell-editing .cm-content'));
+  assert.equal(await page.locator('#editor-host .md-widget table td.table-cell-editing .cm-content').count(), 1);
   await page.keyboard.insertText('9');
   // Tab commits the cell and enters the next one; Escape leaves that edit
   // untouched, so the task checkbox below is clicked from a clean state.
@@ -1245,6 +2016,97 @@ try {
     assert.ok(!imageHtml.includes('inkstone-asset://'), '导出不得残留应用内部图片协议');
     assert.ok(imageHtml.includes(`http://127.0.0.1:${imagePort}/a.png`), 'http 图片在导出中保持原 URL');
     console.log('STEP image paths (encoded, angle-bracket, ../, absolute, http) render and export inlines local ones');
+    // ── typora-root-url: a local image root ──────────────────────────────
+    // `/…` is resolved against the document's front matter root, while a plain
+    // relative reference keeps its old meaning. Traversal and a symlink that
+    // leaves the configured folder are refused by the shared resolver; Save As
+    // rewrites a relative root so the copy keeps showing the same picture.
+    const rootedRoot = path.join(root, 'image-root');
+    const rootedDocs = path.join(rootedRoot, 'docs');
+    const rootedAssets = path.join(rootedDocs, '图片 root');
+    const rootedOutput = path.join(rootedRoot, 'elsewhere', 'nested');
+    const rootedReplacement = path.join(rootedOutput, 'replacement root');
+    await fs.mkdir(rootedAssets, { recursive: true });
+    await fs.mkdir(rootedReplacement, { recursive: true });
+    const rootedSvg = width => `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="12"><rect width="100%" height="100%" fill="#4183c4"/></svg>`;
+    await fs.writeFile(path.join(rootedAssets, '图片 one.svg'), rootedSvg(37));
+    await fs.writeFile(path.join(rootedDocs, '图片 one.svg'), rootedSvg(19));
+    await fs.writeFile(path.join(rootedDocs, 'outside.svg'), rootedSvg(61));
+    await fs.writeFile(path.join(rootedReplacement, '图片 one.svg'), rootedSvg(43));
+    await fs.symlink(path.join(rootedDocs, 'outside.svg'), path.join(rootedAssets, 'symlink.svg'));
+    const rootedSource = path.join(rootedDocs, 'source.md');
+    await fs.writeFile(rootedSource, [
+      '---', 'typora-root-url: "图片 root"', '---', '', '# 本地图片', '',
+      '![根目录](/%E5%9B%BE%E7%89%87%20one.svg)', '',
+      '![相对路径](<图片 one.svg>)', '', '![越界](/%2e%2e/outside.svg)', '', '![符号链接](/symlink.svg)', ''
+    ].join('\r\n'));
+    const rootedWidth = (alt, width) => page.waitForFunction(([name, expected]) =>
+      [...document.querySelectorAll('#editor-host .md-widget img')].some(image => image.alt === name && image.complete && image.naturalWidth === expected), [alt, width]);
+    await openFile(rootedSource);
+    await ensureLive();
+    await rootedWidth('根目录', 37);
+    await rootedWidth('相对路径', 19);
+    await rootedWidth('越界', 0);
+    await rootedWidth('符号链接', 0);
+    // The copy action goes through the same resolver and the same root hint as
+    // the preview: it must name the file under the configured folder.
+    await app.evaluate(async ({ clipboard }) => clipboard.clear());
+    await page.evaluate(() => {
+      const image = [...document.querySelectorAll('#editor-host .md-widget img')].find(node => node.alt === '根目录');
+      image.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 260, clientY: 260, button: 2 }));
+    });
+    await page.locator('#context-menu').waitFor({ state: 'visible' });
+    await page.locator('[data-image-action="copy-path"]').click();
+    const rootedAssetReal = await fs.realpath(path.join(rootedAssets, '图片 one.svg'));
+    await pollClipboard('text', new RegExp(rootedAssetReal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$'));
+    const rootedCopy = path.join(rootedOutput, 'copy.md');
+    await app.evaluate(({ dialog }, target) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath: target }); }, rootedCopy);
+    await page.locator('[data-command="document-menu"]').click();
+    await page.locator('[data-menu-command="save-as"]').click();
+    await page.waitForFunction(() => document.querySelector('#location').textContent.includes('copy.md'));
+    await rootedWidth('根目录', 37);
+    const rootedSaved = await fs.readFile(rootedCopy, 'utf8');
+    assert.match(rootedSaved, /typora-root-url: "\.\.\/\.\.\/docs\/图片 root"/, `另存为应重写相对图根：${rootedSaved}`);
+    assert.equal(onlyCrlf(rootedSaved), true, '图根重写不得改动换行');
+    // A later save must not put the pre-Save-As root back on disk: the editor
+    // buffer, the store and the new file all carry the rewritten line.
+    await page.waitForTimeout(300);
+    await page.locator('[data-command="save"]').click();
+    await page.waitForFunction(() => document.querySelector('#save-status').textContent === '已保存');
+    const rootedResaved = await fs.readFile(rootedCopy, 'utf8');
+    assert.match(rootedResaved, /typora-root-url: "\.\.\/\.\.\/docs\/图片 root"/, '再次保存不得写回旧图根');
+    assert.equal(rootedResaved.includes('typora-root-url: "图片 root"'), false);
+    const rootedHtmlPath = path.join(rootedOutput, 'copy.html');
+    await app.evaluate(({ dialog }, target) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath: target }); }, rootedHtmlPath);
+    await page.locator('[data-command="export"]').click();
+    await page.locator('[data-export="html"]').click();
+    for (let attempt = 0; attempt < 40; attempt++) {
+      try { await fs.access(rootedHtmlPath); break; } catch { await new Promise(resolve => setTimeout(resolve, 100)); }
+    }
+    const rootedHtml = await fs.readFile(rootedHtmlPath, 'utf8');
+    const rootedInline = await page.evaluate(source => {
+      const parsed = new DOMParser().parseFromString(source, 'text/html');
+      return [...parsed.querySelectorAll('article img')].find(node => node.alt === '根目录')?.getAttribute('src') || '';
+    }, rootedHtml);
+    assert.match(rootedInline, /^data:image\/svg\+xml;base64,/);
+    assert.equal(Buffer.from(rootedInline.split(',')[1], 'base64').toString(), rootedSvg(37), 'HTML 导出必须内联图根下的原图');
+    // Editing the front matter refreshes the preview: the asset URL carries the
+    // new root, which also prevents a stale decoded image from the cache.
+    const selectAllInEditor = process.platform === 'darwin' ? 'Meta+a' : 'Control+a';
+    await page.locator('[data-command="source"]').click();
+    await page.locator('.cm-content').click();
+    await page.keyboard.press(selectAllInEditor);
+    await page.keyboard.insertText(rootedSaved.replace(/^typora-root-url:.*$/m, 'typora-root-url: "replacement root"'));
+    await page.locator('[data-command="source"]').click();
+    await rootedWidth('根目录', 43);
+    // A network root is refused before the first filesystem call: no image.
+    await page.locator('[data-command="source"]').click();
+    await page.locator('.cm-content').click();
+    await page.keyboard.press(selectAllInEditor);
+    await page.keyboard.insertText(rootedSaved.replace(/^typora-root-url:.*$/m, 'typora-root-url: "file://192.0.2.1/share"'));
+    await page.locator('[data-command="source"]').click();
+    await rootedWidth('根目录', 0);
+    console.log('STEP typora-root-url image root: /-prefix, traversal/symlink refusal, Save As relocation, offline HTML, root refresh');
     // Document HTML must never reach the application's own click delegation.
     const injectedSource = [
       '# 注入检查', '',
@@ -1660,18 +2522,42 @@ try {
   }
   assert.equal(await page.locator('.history-item span').first().textContent(), '当前文件', '历史条目应说明版本来源而不是哈希目录');
   await page.locator('#dialog [data-dismiss]').first().click();
-  // Reveal from the native menu, with the shell call stubbed.
+  // Reveal from the native menu, with the shell call stubbed. A native menu
+  // command is routed by the main process to the focused window. A window this
+  // script drives never receives OS focus here (CI shells, and this suite keeps
+  // a second window open), so the test substitutes the focus lookup for exactly
+  // the synchronous interval of the menu click instead of trying to focus the OS
+  // window. The real menu item still runs, the main process still dispatches the
+  // command, the renderer still handles it and the shell stub still asserts the
+  // path; the original static method is restored in `finally`.
   await app.evaluate(({ shell }) => {
     globalThis.__revealed = [];
     globalThis.__originalReveal = shell.showItemInFolder;
     shell.showItemInFolder = item => { globalThis.__revealed.push(item); };
   });
-  await app.evaluate(({ Menu }) => {
-    const file = Menu.getApplicationMenu().items.find(item => item.label === '文件');
-    file.submenu.items.find(entry => entry.label === '在文件夹中显示').click();
-  });
-  await page.waitForTimeout(300);
-  assert.deepEqual(await app.evaluate(() => globalThis.__revealed), [await fs.realpath(actionFile)], '“在文件夹中显示”必须调用 shell.showItemInFolder');
+  const drivenWindow = await app.browserWindow(page);
+  const drivenWindowId = await drivenWindow.evaluate(win => win.webContents.id);
+  const clickNativeMenu = async (label, startsWith = false) => {
+    await app.evaluate(({ Menu, BrowserWindow }, { id, text, prefix }) => {
+      const target = BrowserWindow.getAllWindows().find(win => !win.isDestroyed() && win.webContents.id === id);
+      if (!target) throw new Error(`被测试窗口 ${id} 不存在`);
+      const original = Object.getOwnPropertyDescriptor(BrowserWindow, 'getFocusedWindow');
+      BrowserWindow.getFocusedWindow = () => target;
+      try {
+        const file = Menu.getApplicationMenu().items.find(item => item.label === '文件');
+        const entry = file.submenu.items.find(item => prefix ? item.label.startsWith(text) : item.label === text);
+        if (!entry) throw new Error(`未找到菜单项 ${text}`);
+        entry.click();
+      } finally {
+        if (original) Object.defineProperty(BrowserWindow, 'getFocusedWindow', original);
+        else delete BrowserWindow.getFocusedWindow;
+      }
+    }, { id: drivenWindowId, text: label, prefix: startsWith });
+  };
+  await clickNativeMenu('在文件夹中显示');
+  const revealedPaths = () => app.evaluate(() => globalThis.__revealed);
+  for (let attempt = 0; attempt < 50 && (await revealedPaths()).length === 0; attempt++) await page.waitForTimeout(100);
+  assert.deepEqual(await revealedPaths(), [await fs.realpath(actionFile)], '“在文件夹中显示”必须调用 shell.showItemInFolder');
   // Rename / move through the palette.
   const renamedPath = path.join(root, 'action-renamed.md');
   await app.evaluate(({ dialog, shell }, target) => {
@@ -1689,10 +2575,7 @@ try {
     globalThis.__originalMessageBox = dialog.showMessageBox;
     dialog.showMessageBox = async (_window, options) => { globalThis.__trashPrompts.push(options); return { response: 1, checkboxChecked: false }; };
   });
-  await app.evaluate(({ Menu }) => {
-    const file = Menu.getApplicationMenu().items.find(item => item.label === '文件');
-    file.submenu.items.find(entry => entry.label.startsWith('移到')).click();
-  });
+  await clickNativeMenu('移到', true);
   await page.waitForFunction(() => document.querySelector('#save-status').textContent === '有未保存的更改', null, { timeout: 15000 });
   const trashPrompt = await app.evaluate(() => globalThis.__trashPrompts.at(-1));
   assert.match(trashPrompt.message, new RegExp(`移到${trashLabel}`), `确认框应使用“${trashLabel}”`);
@@ -1790,6 +2673,290 @@ try {
     await argvClosed;
     await argvApp.close().catch(() => {});
     await fs.rm(argvRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+  // 7a2) A file opened while no folder is open adopts its own directory as the
+  //      file tree root (Typora's single-file habit) without opening the sidebar,
+  //      and an existing workspace is never replaced by a file from elsewhere.
+  const singleRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'inkstone-single-'));
+  const singleFolder = path.join(singleRoot, '单文件');
+  const otherFolder = path.join(singleRoot, '其它');
+  const singleFile = path.join(singleFolder, '甲.md');
+  const otherFile = path.join(otherFolder, '丙.md');
+  const singleEnv = { ...process.env, INKSTONE_TEST_USER_DATA: path.join(singleRoot, 'profile') };
+  delete singleEnv.ELECTRON_RUN_AS_NODE;
+  const fileTreeNames = target => target.evaluate(() => [...document.querySelectorAll('.file-item span')].map(node => node.textContent).sort());
+  const folderTitle = target => target.evaluate(() => document.querySelector('#side-title').textContent);
+  try {
+    await fs.mkdir(singleFolder, { recursive: true });
+    await fs.mkdir(otherFolder, { recursive: true });
+    await fs.writeFile(singleFile, '# 甲\n\n同一目录的第一份。\n');
+    await fs.writeFile(path.join(singleFolder, '乙.md'), '# 乙\n\n同一目录的第二份。\n');
+    await fs.writeFile(otherFile, '# 丙\n\n另一个目录。\n');
+      const singleRun = await electron.launch({ args: [project, singleFile, '--no-sandbox', '--disable-gpu'], env: singleEnv });
+      let singlePage;
+      try {
+        singlePage = await singleRun.firstWindow();
+        singlePage.setDefaultTimeout(20000);
+        await singlePage.locator('.cm-content').waitFor();
+        await singlePage.waitForFunction(() => document.querySelector('#location').textContent === '甲.md');
+        // Adopting a folder must not pop the default hidden sidebar open.
+        assert.equal(await singlePage.locator('.sidebar').isVisible(), false, '打开单个文件不应强制展开侧栏');
+        // The native menu really carries Typora's key map: ⌘⇧O is quick open on
+        // macOS, Ctrl+P / Ctrl+Shift+O stay put on Windows / Linux.
+        const menuState = await singleRun.evaluate(({ Menu }) => {
+          const file = Menu.getApplicationMenu()?.items.find(item => item.label === '文件');
+          const items = file?.submenu.items || [];
+          const find = label => items.find(item => item.label === label);
+          const probe = accelerator => Menu.buildFromTemplate([{ label: 'probe', accelerator }]).items[0].accelerator;
+          return {
+            quickOpen: find('命令面板 / 快速打开…')?.accelerator ?? null,
+            folder: find('打开文件夹…')?.accelerator ?? null,
+            ctrlP: probe('CmdOrCtrl+P'), macQuickOpen: probe('Cmd+Shift+O'), ctrlShiftO: probe('CmdOrCtrl+Shift+O')
+          };
+        });
+        if (process.platform === 'darwin') {
+          assert.equal(menuState.quickOpen, menuState.macQuickOpen, `macOS 的快速打开应注册为 ⌘⇧O，实际 ${menuState.quickOpen}`);
+          assert.ok(!menuState.folder, `macOS 的 ⌘⇧O 已归快速打开，打开文件夹不应再占用它，实际 ${menuState.folder}`);
+        } else {
+          assert.equal(menuState.quickOpen, menuState.ctrlP, `Windows / Linux 的快速打开应保持 Ctrl+P，实际 ${menuState.quickOpen}`);
+          assert.equal(menuState.folder, menuState.ctrlShiftO, `Windows / Linux 打开文件夹应保持 Ctrl+Shift+O，实际 ${menuState.folder}`);
+        }
+        // macOS keeps ⌘P as an editor binding (the menu item now owns ⌘⇧O).
+        if (process.platform === 'darwin') {
+          await singlePage.locator('.cm-content').click();
+          await singlePage.keyboard.press('Meta+p');
+          await singlePage.locator('#quick-filter').waitFor();
+          await singlePage.keyboard.press('Escape');
+          await singlePage.waitForFunction(() => !document.querySelector('#dialog').open);
+        }
+        // Clicking the registered native menu item opens the palette, which lists
+        // the neighbour of the file that adopted the folder.
+        const clickedQuickOpen = await singleRun.evaluate(({ Menu }) => {
+          const file = Menu.getApplicationMenu()?.items.find(item => item.label === '文件');
+          const item = file?.submenu.items.find(entry => entry.label === '命令面板 / 快速打开…');
+          if (!item) return false;
+          item.click();
+          return true;
+        });
+        assert.equal(clickedQuickOpen, true, '文件菜单必须提供快速打开');
+        await singlePage.locator('#quick-filter').waitFor();
+        await singlePage.waitForFunction(() => [...document.querySelectorAll('#quick-results .quick-item strong')].some(node => node.textContent === '乙.md'), null, { timeout: 15000 });
+        await singlePage.locator('#quick-results .quick-item').filter({ hasText: '乙.md' }).first().click();
+        await singlePage.waitForFunction(() => document.querySelector('#location').textContent === '乙.md');
+        // The file tree shows both files of the adopted directory, and the
+        // sidebar's visibility is unchanged until the user asks for it.
+        await singlePage.evaluate(() => {
+          if (document.body.classList.contains('sidebar-hidden')) document.querySelector('.topbar [data-command="sidebar"]').click();
+          document.querySelector('[data-side="files"]').click();
+        });
+        await singlePage.waitForFunction(() => document.querySelectorAll('.file-item').length >= 2, null, { timeout: 15000 });
+        assert.deepEqual(await fileTreeNames(singlePage), ['乙.md', '甲.md'], '文件树应列出打开文件所在的目录');
+        assert.equal(await folderTitle(singlePage), '单文件', '文件树标题应为打开文件所在的目录');
+        console.log('STEP a single file adopts its directory: file tree, quick open, hidden sidebar');
+        // A file from another directory opens without replacing the workspace.
+        await singleRun.evaluate(({ dialog }, target) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [target] }); }, otherFile);
+        await singlePage.evaluate(() => document.querySelector('.topbar [data-command="open"]').click());
+        await singlePage.waitForFunction(() => document.querySelector('#location').textContent === '丙.md', null, { timeout: 15000 });
+        assert.equal(await folderTitle(singlePage), '单文件', '打开其它目录的文件后必须保留原有工作区');
+        assert.deepEqual(await fileTreeNames(singlePage), ['乙.md', '甲.md'], '原有工作区的文件树不得被替换');
+        console.log('STEP opening a file from another directory keeps the existing workspace');
+        await singlePage.waitForTimeout(1500);
+      } finally {
+        const closed = singleRun.waitForEvent('close').catch(() => {});
+        await singleRun.evaluate(({ app }) => app.exit(0)).catch(() => {});
+        await closed;
+        await singleRun.close().catch(() => {});
+      }
+      // A restored session keeps the adopted folder and every document.
+      const restoredRun = await electron.launch({ args: [project, '--no-sandbox', '--disable-gpu'], env: singleEnv });
+      try {
+        const restoredPage = await restoredRun.firstWindow();
+        restoredPage.setDefaultTimeout(25000);
+        await restoredPage.locator('.cm-content').waitFor();
+        await restoredPage.waitForFunction(() => document.querySelector('#location').textContent === '丙.md', null, { timeout: 25000 });
+        const restored = await restoredPage.evaluate(() => {
+          document.querySelector('[data-side="files"]').click();
+          return {
+            title: document.querySelector('#side-title').textContent,
+            documents: [...document.querySelectorAll('#open-documents .open-document-name span')].map(node => node.textContent).sort(),
+            tree: [...document.querySelectorAll('.file-item span')].map(node => node.textContent).sort()
+          };
+        });
+        assert.equal(restored.title, '单文件', '恢复会话后仍应记得打开文件时采用的文件夹');
+        assert.deepEqual(restored.tree, ['乙.md', '甲.md'], `恢复会话应重新列出该文件夹的文件，实际 ${JSON.stringify(restored.tree)}`);
+        assert.deepEqual(restored.documents, ['丙.md', '乙.md', '甲.md'], `恢复会话应重开全部文档，实际 ${JSON.stringify(restored.documents)}`);
+        console.log('STEP a session that adopted a directory restores that folder and its documents');
+      } finally {
+        const closed = restoredRun.waitForEvent('close').catch(() => {});
+        await restoredRun.evaluate(({ app }) => app.exit(0)).catch(() => {});
+        await closed;
+        await restoredRun.close().catch(() => {});
+      }
+      // 7a2b) Folder scans belong to their request: a slow explicit scan may
+      //       neither replace a newer folder nor report that newer folder's name
+      //       with its own entries. The first readdir of the older folder is
+      //       held until the newer choice has been committed.
+      const raceProfile = path.join(singleRoot, 'race-profile');
+      const raceEnv = { ...process.env, INKSTONE_TEST_USER_DATA: raceProfile };
+      delete raceEnv.ELECTRON_RUN_AS_NODE;
+      const slowRoot = await fs.realpath(singleFolder);
+      const fastRoot = await fs.realpath(otherFolder);
+      const raceRun = await electron.launch({ args: [project, '--no-sandbox', '--disable-gpu'], env: raceEnv });
+      try {
+        const racePage = await raceRun.firstWindow();
+        racePage.setDefaultTimeout(20000);
+        await racePage.locator('.cm-content').waitFor();
+        await raceRun.evaluate((_, target) => {
+          const filesystem = process.getBuiltinModule('node:fs/promises');
+          const original = filesystem.readdir;
+          let first = true;
+          filesystem.readdir = async function (directory, ...rest) {
+            if (first && directory === target) {
+              first = false;
+              await new Promise(resolve => { globalThis.inkstoneResumeRead = resolve; });
+            }
+            return original.call(filesystem, directory, ...rest);
+          };
+        }, slowRoot);
+        // Start the older scan, then make the newer choice while it is blocked.
+        await racePage.evaluate(target => { window.slowFolder = window.desktop.openFolderPath(target); }, slowRoot);
+        let blocked = false;
+        for (let attempt = 0; attempt < 100 && !blocked; attempt++) {
+          blocked = await raceRun.evaluate(() => !!globalThis.inkstoneResumeRead);
+          if (!blocked) await new Promise(resolve => setTimeout(resolve, 50));
+        }
+        assert.equal(blocked, true, '延迟的目录读取应被触发');
+        const fast = await racePage.evaluate(target => window.desktop.openFolderPath(target), fastRoot);
+        assert.equal(fast.value?.path, fastRoot, '较新的目录选择必须立即生效');
+        await raceRun.evaluate(() => globalThis.inkstoneResumeRead());
+        const slow = await racePage.evaluate(() => window.slowFolder);
+        assert.equal(slow.value, null, '被取代的慢扫描结果必须丢弃，而不是拼出新目录名 + 旧目录 entries');
+        const refreshed = await racePage.evaluate(() => window.desktop.refreshFolder());
+        assert.equal(refreshed.value?.path, fastRoot, '刷新必须返回当前工作区');
+        assert.deepEqual(refreshed.value.entries.map(entry => entry.name), ['丙.md'], 'entries 必须属于返回值里的那个目录');
+        // The newer choice really owns the window, and its baseline still works.
+        const recentFolders = await racePage.evaluate(async () => (await window.desktop.recentFiles()).value);
+        assert.ok(Array.isArray(recentFolders), '最近文件列表仍可读取');
+        // A later normal folder open is not blocked by the dropped ticket.
+        await raceRun.evaluate(({ dialog }, target) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [target] }); }, slowRoot);
+        await racePage.evaluate(() => document.querySelector('[data-command="folder"]').click());
+        await racePage.waitForFunction(() => document.querySelector('#side-title').textContent === '单文件', null, { timeout: 15000 });
+        await racePage.waitForFunction(() => [...document.querySelectorAll('.file-item span')].some(node => node.textContent === '乙.md'), null, { timeout: 15000 });
+        console.log('STEP a slow folder scan is dropped instead of replacing a newer root');
+        // 7a2c) The same ordering rule covers path resolution: the ticket is taken
+        //       when a request starts, so a choice whose realpath is answered late
+        //       cannot take the workspace back from the newer one.
+        await raceRun.evaluate((_, target) => {
+          const filesystem = process.getBuiltinModule('node:fs/promises');
+          const original = filesystem.realpath;
+          let first = true;
+          filesystem.realpath = async function (file, ...rest) {
+            if (first && file === target) {
+              first = false;
+              await new Promise(resolve => { globalThis.inkstoneResumeResolve = resolve; });
+            }
+            return original.call(filesystem, file, ...rest);
+          };
+        }, slowRoot);
+        await racePage.evaluate(target => { window.slowResolve = window.desktop.openFolderPath(target); }, slowRoot);
+        let resolveBlocked = false;
+        for (let attempt = 0; attempt < 100 && !resolveBlocked; attempt++) {
+          resolveBlocked = await raceRun.evaluate(() => !!globalThis.inkstoneResumeResolve);
+          if (!resolveBlocked) await new Promise(resolve => setTimeout(resolve, 50));
+        }
+        assert.equal(resolveBlocked, true, '延迟的路径解析应被触发');
+        const resolvedFast = await racePage.evaluate(target => window.desktop.openFolderPath(target), fastRoot);
+        assert.equal(resolvedFast.value?.path, fastRoot, '较新的目录选择必须立即生效');
+        await raceRun.evaluate(() => globalThis.inkstoneResumeResolve());
+        const lateResolve = await racePage.evaluate(() => window.slowResolve);
+        assert.equal(lateResolve.value, null, '路径解析晚到的旧选择必须丢弃，不能夺回工作区');
+        const afterResolve = await racePage.evaluate(() => window.desktop.refreshFolder());
+        assert.equal(afterResolve.value?.path, fastRoot, '晚到的路径解析不得改变当前工作区');
+        assert.deepEqual(afterResolve.value.entries.map(entry => entry.name), ['丙.md'], '工作区仍是较新的那个目录');
+        console.log('STEP a slow folder path resolution cannot outrank a newer choice');
+      } finally {
+        const closed = raceRun.waitForEvent('close').catch(() => {});
+        await raceRun.evaluate(({ app }) => app.exit(0)).catch(() => {});
+        await closed;
+        await raceRun.close().catch(() => {});
+      }
+    // 7a3) The recent-files entry (a path open, not a dialog) adopts the folder
+    //      too, and a file handed over by Finder never replaces that workspace.
+    const recentProfile = path.join(singleRoot, 'recent-profile');
+    const recentEnv = { ...process.env, INKSTONE_TEST_USER_DATA: recentProfile };
+    delete recentEnv.ELECTRON_RUN_AS_NODE;
+    await fs.mkdir(recentProfile, { recursive: true });
+    await fs.writeFile(path.join(recentProfile, 'recent.json'), JSON.stringify({ files: [singleFile], folders: [] }));
+    const recentRun = await electron.launch({ args: [project, '--no-sandbox', '--disable-gpu'], env: recentEnv });
+    try {
+      const recentPage = await recentRun.firstWindow();
+      recentPage.setDefaultTimeout(20000);
+      await recentPage.locator('.cm-content').waitFor();
+      const openedRecent = await recentRun.evaluate(({ Menu }) => {
+        const file = Menu.getApplicationMenu()?.items.find(item => item.label === '文件');
+        const item = file?.submenu.items.find(entry => entry.label === '最近打开')?.submenu.items.find(entry => entry.label === '甲.md');
+        if (!item) return false;
+        item.click();
+        return true;
+      });
+      assert.equal(openedRecent, true, '最近打开菜单必须列出预置的最近文件');
+      await recentPage.waitForFunction(() => document.querySelector('#location').textContent === '甲.md', null, { timeout: 15000 });
+      await recentPage.waitForFunction(() => document.querySelectorAll('.file-item').length >= 2, null, { timeout: 15000 });
+      assert.equal(await folderTitle(recentPage), '单文件', '最近打开的文件也应在没有工作区时采用其父目录');
+      // Finder / «open with» arrives on the same queue while a workspace is open.
+      await recentRun.evaluate(({ app }, target) => { app.emit('open-file', { preventDefault() {} }, target); }, otherFile);
+      await recentPage.waitForFunction(() => document.querySelector('#location').textContent === '丙.md', null, { timeout: 15000 });
+      assert.equal(await folderTitle(recentPage), '单文件', 'Finder 打开其它目录的文件不得替换工作区');
+      assert.deepEqual(await fileTreeNames(recentPage), ['乙.md', '甲.md'], 'Finder 打开文件后文件树保持不变');
+      console.log('STEP recent files and Finder adopt a folder once and never replace it');
+    } finally {
+      const closed = recentRun.waitForEvent('close').catch(() => {});
+      await recentRun.evaluate(({ app }) => app.exit(0)).catch(() => {});
+      await closed;
+      await recentRun.close().catch(() => {});
+    }
+    // 7a4) A directory that cannot be listed must not take the document with it:
+    //      the file stays editable and the window simply has no workspace.
+    if (process.platform !== 'win32' && process.getuid?.() !== 0) {
+      const blockedRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'inkstone-blocked-'));
+      const blockedFolder = path.join(blockedRoot, '无法读取');
+      const blockedFile = path.join(blockedFolder, '独.md');
+      const blockedEnv = { ...process.env, INKSTONE_TEST_USER_DATA: path.join(blockedRoot, 'profile') };
+      delete blockedEnv.ELECTRON_RUN_AS_NODE;
+      try {
+        await fs.mkdir(blockedFolder, { recursive: true });
+        await fs.writeFile(blockedFile, '# 独\n\n父目录不可列出。\n');
+        // Execute-only: the file is readable and traversable, the directory is not listable.
+        await fs.chmod(blockedFolder, 0o111);
+        const blockedRun = await electron.launch({ args: [project, blockedFile, '--no-sandbox', '--disable-gpu'], env: blockedEnv });
+        try {
+          const blockedPage = await blockedRun.firstWindow();
+          blockedPage.setDefaultTimeout(20000);
+          await blockedPage.locator('.cm-content').waitFor();
+          await blockedPage.waitForFunction(() => document.querySelector('#location').textContent === '独.md', null, { timeout: 20000 });
+          await blockedPage.locator('.cm-content').click();
+          await blockedPage.keyboard.type('可以编辑');
+          await blockedPage.waitForFunction(() => document.querySelector('.cm-content').textContent.includes('可以编辑'), null, { timeout: 15000 });
+          const blockedTitle = await blockedPage.evaluate(() => {
+            if (document.body.classList.contains('sidebar-hidden')) document.querySelector('.topbar [data-command="sidebar"]').click();
+            document.querySelector('[data-side="files"]').click();
+            return document.querySelector('#side-title').textContent;
+          });
+          assert.equal(blockedTitle, '文件工作空间', '目录读取失败时不应把该目录设为工作区');
+          console.log('STEP an unlistable directory leaves the document editable without a workspace');
+        } finally {
+          const closed = blockedRun.waitForEvent('close').catch(() => {});
+          await blockedRun.evaluate(({ app }) => app.exit(0)).catch(() => {});
+          await closed;
+          await blockedRun.close().catch(() => {});
+        }
+      } finally {
+        await fs.chmod(blockedFolder, 0o755).catch(() => {});
+        await fs.rm(blockedRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      }
+    }
+  } finally {
+    await fs.rm(singleRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
   // 7b) Temporary image folders are pruned at startup once they are 7 days old,
   //     but never when a recovery copy still names that document id.
@@ -2494,7 +3661,7 @@ try {
     await fs.rm(sessionRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
   assert.deepEqual(errors, []);
-  console.log('PASS: native startup, editing, undo/redo, character-level click positioning, source mode, save, math, Mermaid labels, task toggle, external conflict + live notification, self-contained fonts in HTML, PDF, version history, preferences, custom CSS theme + themed HTML export, typewriter, dark mode, cross-block rendering parity, graphical table editing, clipboard HTML/Markdown, command palette, persisted zoom, cross-block drag selection, typeset live preview + syntax reveal, grouped undo, frameless chrome, code copy, article panel, resizable sidebar, heading numbering, version diff, outline drag reorder, window bounds, table Tab navigation, 200k+ source fallback, toolbar-free layout, typing in typeset mode, in-place table cells, Enter rows, draggable columns, emoji autocomplete + picker, Pandoc gating, image context menu, independent new window, narrow desktop viewport, immediate typeset on closing delimiter, immediate heading/bullet/ordered/code typesetting, immediate empty list/task/quote prefixes, rendered empty task checkbox, IME composition keeps whole-document typesetting, CRLF blocks stay CRLF, CRLF column widths, incremental block rendering keeps widget DOM and click positions, mixed newline round-trip, cell click without edit, bold cell edit, rendered cell Tab/Enter, quoted table editing, reload keeps a discarded copy, keep-local unblocks saving with a history backup, queued external prompts for two files, silent reload of a clean document, external deletion prompt with Save As / unsaved document, one-at-a-time reopen, cold start with an argv document, renderer crash prompts and still closes, Save As keeps rewritten asset references, local image paths (percent-encoded / angle brackets / ../ / absolute / http) and their HTML inlining, document-injected data-* attributes staying inert, chrome-free export and copy-as-HTML, unsaved-document image insert + Save As migration + temp cleanup, startup pruning of stale unsaved image folders, UNC / network image references never contacted, case-variant and SVG/MathML reserved attributes stripped by DOMPurify alone, crash recovery keeping pasted images, quit save prompt may outlive the 5s fallback, a pristine welcome page that the first opened file replaces, the file menu and command palette exposing rename / reveal / trash / diagram, readable version-history names, the sidebar open-document list with keyboard switching and close prompts, palette switching between open documents without a folder, the Chinese find / replace panel, the Windows / Linux single-row title bar with a native menu popup and a theme-aware window-button overlay, folder-wide search (grouped results, unsaved content, caret placement), the recent-files menu, file-tree create / rename / trash / external refresh, local .md links with cross-document anchors and network-link refusal, active code block syntax tokens with an on-demand haskell grammar, formula + diagram live previews with Chinese syntax errors, folder rename / trash keeping open documents in sync, the workspace root refusing rename and trash, network paths refused by openPath / openLocalFile / openFolderPath, executable links refused before the shell, and session restore across two launches.');
+  console.log('PASS: native startup, editing, undo/redo, character-level click positioning, source mode, save, math, Mermaid labels, task toggle, external conflict + live notification, self-contained fonts in HTML, PDF, version history, preferences, custom CSS theme + themed HTML export, typewriter, dark mode, cross-block rendering parity, graphical table editing, clipboard HTML/Markdown, command palette, persisted zoom, cross-block drag selection, typeset live preview + syntax reveal, grouped undo, frameless chrome, code copy, article panel, resizable sidebar, heading numbering, version diff, outline drag reorder, window bounds, table Tab navigation, 200k+ source fallback, toolbar-free layout, typing in typeset mode, in-place table cells, in-cell Markdown with visible inline styles and markers, optional outer pipes, escaped-pipe source mapping, mixed-table refusal, IME candidate keys, native-save drafts, Enter rows, draggable columns, emoji autocomplete + picker, Pandoc gating, image context menu, independent new window, narrow desktop viewport, immediate typeset on closing delimiter, immediate heading/bullet/ordered/code typesetting, list/task/quote prefixes wait for a separator, nested quote/list/task prefixes typeset by layer, parsed thematic breaks (spaced and nested rules, Setext kept), rendered empty task checkbox, IME composition keeps whole-document typesetting, CRLF blocks stay CRLF, CRLF column widths, incremental block rendering keeps widget DOM and click positions, mixed newline round-trip, cell click without edit, bold cell edit, rendered cell Tab/Enter, quoted table editing, reload keeps a discarded copy, keep-local unblocks saving with a history backup, queued external prompts for two files, silent reload of a clean document, external deletion prompt with Save As / unsaved document, one-at-a-time reopen, cold start with an argv document, renderer crash prompts and still closes, Save As keeps rewritten asset references, local image paths (percent-encoded / angle brackets / ../ / absolute / http) and their HTML inlining, a typora-root-url image root (/-prefix, traversal/symlink refusal, copy path, Save As relocation, offline HTML, live root edit), document-injected data-* attributes staying inert, chrome-free export and copy-as-HTML, unsaved-document image insert + Save As migration + temp cleanup, startup pruning of stale unsaved image folders, UNC / network image references never contacted, case-variant and SVG/MathML reserved attributes stripped by DOMPurify alone, crash recovery keeping pasted images, quit save prompt may outlive the 5s fallback, a pristine welcome page that the first opened file replaces, the file menu and command palette exposing rename / reveal / trash / diagram, readable version-history names, the sidebar open-document list with keyboard switching and close prompts, palette switching between open documents without a folder, the Chinese find / replace panel, the Windows / Linux single-row title bar with a native menu popup and a theme-aware window-button overlay, folder-wide search (grouped results, unsaved content, caret placement), the recent-files menu, file-tree create / rename / trash / external refresh, local .md links with cross-document anchors and network-link refusal, active code block syntax tokens with an on-demand haskell grammar, formula + diagram live previews with Chinese syntax errors, folder rename / trash keeping open documents in sync, the workspace root refusing rename and trash, network paths refused by openPath / openLocalFile / openFolderPath, executable links refused before the shell, a single file adopting its own directory as the file tree (menu / recent / Finder / argv, ⌘⇧O quick open with ⌘P still bound in the editor, an unlistable directory keeping the file editable), and session restore across two launches.');
   if (process.env.INKSTONE_SCREENSHOT) await page.screenshot({ path: process.env.INKSTONE_SCREENSHOT });
 } finally {
   const closed = app.waitForEvent('close');
