@@ -20,6 +20,13 @@ jobs:
   test:
     name: unit tests + build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # push 与 pull_request 会各排一个 macos-latest。两个作业同时等 arm64
+    # runner 时，约 15 分钟没被接单的那个会被 GitHub 取消（测试一步都没跑）。
+    # 只把 macOS 放进同一个并发组、且不取消正在跑的作业，后一个就停在并发队列里，
+    # 等前一个结束再去要 runner。Windows / Ubuntu 仍按各自的 run 并行。
+    concurrency:
+      group: ${{ matrix.os == 'macos-latest' && 'inkstone-hosted-macos' || format('inkstone-{0}-{1}', matrix.os, github.run_id) }}
+      cancel-in-progress: false
     strategy:
       fail-fast: false
       matrix:
