@@ -7,7 +7,7 @@ const { promisify } = require('node:util');
 const crypto = require('node:crypto');
 const { AsyncLocalStorage } = require('node:async_hooks');
 const { DocumentStore, atomicWrite, inside, listMarkdown, syncAssets, frontMatterImageRoot } = require('./store.cjs');
-const { parseAssetURL, resolveAssetFile, resolveDocumentLink, imageMime, unsavedAssetsDirectory, isNetworkPath, isExecutableExtension } = require('./assets.cjs');
+const { parseAssetURL, resolveAssetFile, resolveDocumentLink, imageMime, unsavedAssetsDirectory, isNetworkPath, isNetworkFileURL, isExecutableExtension } = require('./assets.cjs');
 const { searchFolder, validateEntryName, isMarkdownFile } = require('./search.cjs');
 const { WorkspaceState } = require('./session.cjs');
 const { parseDocumentPaths } = require('./argv.cjs');
@@ -1344,7 +1344,9 @@ function registerHandlers() {
         const root = typeof value === 'string' ? value.trim() : '';
         if (root.length > 4096 || root.includes('\0') || isNetworkPath(root)) continue;
         if (/^file:/i.test(root)) {
-          try { if (new URL(root).hostname && new URL(root).hostname.toLowerCase() !== 'localhost') continue; } catch { continue; }
+          // Same classification as resolveImageRoot: a host-ful file URL and an
+          // empty-host UNC spelling (`file:///\\server\share`) are both shares.
+          try { if (isNetworkFileURL(new URL(root))) continue; } catch { continue; }
         }
         preferences.imageRoot = root;
         continue;

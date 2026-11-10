@@ -74,5 +74,5 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Desktop end-to-end (103 steps)
+      - name: Desktop end-to-end (123 steps)
         run: node test/desktop.mjs

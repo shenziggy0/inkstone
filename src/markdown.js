@@ -70,17 +70,21 @@ export const SANITIZE_CONFIG = {
 /**
  * True when an image reference points at another machine: UNC / device paths
  * (`\\host\share`, `//host/share`, `\\?\UNC\…`, `\\.\…`) or a `file://` URL whose
- * host is neither empty nor localhost. The main process refuses these before it
- * touches the filesystem; the renderer drops them too, so no asset URL is ever
- * built for them.
+ * host is neither empty nor localhost. `file:///\\server\share` has an empty
+ * host after WHATWG parsing (backslashes become slashes) but its pathname still
+ * starts with `//`; that is the same UNC location. Keep this in step with
+ * `isNetworkFileURL` in electron/assets.cjs. The main process refuses these
+ * before it touches the filesystem; the renderer drops them too, so no asset
+ * URL is ever built for them.
  */
 export function isNetworkReference(src) {
   const text = decodeAssetReference(src);
   if (/^[\\/]{2}/.test(text)) return true;
   if (!/^file:/i.test(text)) return false;
   try {
-    const host = new URL(text).hostname.toLowerCase();
-    return host !== '' && host !== 'localhost';
+    const url = new URL(text);
+    const host = url.hostname.toLowerCase();
+    return (host !== '' && host !== 'localhost') || /^[\\/]{2}/.test(url.pathname);
   } catch { return true; }
 }
 
