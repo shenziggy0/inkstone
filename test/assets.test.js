@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import assets from '../electron/assets.cjs';
 import storeModule from '../electron/store.cjs';
 import { frontMatterImageRoot as sharedImageRoot, replaceFrontMatterImageRoot } from '../electron/front-matter.mjs';
@@ -45,7 +45,7 @@ test('DOMPurify is configured with every reserved attribute (no string pre-pass)
 });
 
 test('network references are recognised without any filesystem access', () => {
-  const network = ['\\\\attacker\\share\\x.png', '//attacker/share/x.png', '\\\\?\\UNC\\attacker\\share\\x.png', '\\\\.\\C:\\x.png', 'file://attacker/x.png', 'file://192.0.2.1/share/x.png', 'FILE://ATTACKER/x.png'];
+  const network = ['\\\\attacker\\share\\x.png', '//attacker/share/x.png', '\\\\?\\UNC\\attacker\\share\\x.png', '\\\\.\\C:\\x.png', 'file://attacker/x.png', 'file://192.0.2.1/share/x.png', 'FILE://ATTACKER/x.png', 'file:///\\\\attacker/share/x.png', 'file:////attacker/share/x.png', 'file://localhost//attacker/share/x.png'];
   for (const reference of network) assert.equal(isNetworkReference(reference), true, `应认定为网络引用：${reference}`);
   const local = ['assets/a.png', '../shared/a.png', 'C:/Users/a.png', 'C:\\Users\\a.png', 'file:///C:/a.png', 'file://localhost/C:/a.png', 'https://example.com/a.png', 'data:image/png;base64,AA'];
   for (const reference of local) assert.equal(isNetworkReference(reference), false, `不应误判为网络引用：${reference}`);
@@ -61,7 +61,13 @@ test('the resolver refuses UNC, device and host-ful file URLs without touching t
     '\\\\?\\UNC\\192.0.2.1\\share\\x.png',
     '\\\\.\\PIPE\\x.png',
     'file://192.0.2.1/share/x.png',
-    'file://attacker/x.png'
+    'file://attacker/x.png',
+    // WHATWG parsing leaves these with an empty host and a `//…` pathname.
+    // Windows `fileURLToPath` then throws "must be absolute" instead of
+    // returning a UNC path; they are still network locations.
+    'file:///\\\\attacker/share/x.png',
+    'file:////attacker/share/x.png',
+    'file://localhost//attacker/share/x.png'
   ];
   for (const reference of network) {
     const started = Date.now();
@@ -97,6 +103,13 @@ test('the resolver refuses UNC, device and host-ful file URLs without touching t
   assert.equal(assets.isNetworkFileURL(new URL('file://192.0.2.1/share/x.png')), true);
   assert.equal(assets.isNetworkFileURL(new URL('file:///C:/x.png')), false);
   assert.equal(assets.isNetworkFileURL(new URL('file://localhost/C:/x.png')), false);
+  assert.equal(assets.isNetworkFileURL(new URL('file:///\\\\attacker/share')), true, '空 host 的 UNC file URL');
+  assert.equal(assets.isNetworkFileURL(new URL('file:////attacker/share')), true, '四斜杠 UNC file URL');
+  // Windows converts a host-ful file URL into a UNC path (POSIX refuses the
+  // host instead). The empty-host spelling throws there, which is why the
+  // resolver classifies the URL before `fileURLToPath` and not in its catch.
+  assert.equal(fileURLToPath(new URL('file://attacker/share'), { windows: true }), '\\\\attacker\\share');
+  assert.throws(() => fileURLToPath(new URL('file:///\\\\attacker/share'), { windows: true }), { code: 'ERR_INVALID_FILE_URL_PATH' });
 });
 
 test('a share as the relative base is refused without any filesystem call', async t => {
@@ -235,6 +248,8 @@ test('document links resolve relative references and reuse the network refusal',
   await assert.rejects(resolveDocumentLink(uncPath, { documentPath }), /不支持指向网络位置的链接/);
   await assert.rejects(resolveDocumentLink('//host/share/a.md', { documentPath }), /不支持指向网络位置的链接/);
   await assert.rejects(resolveDocumentLink('file://server/share/a.md', { documentPath }), /不支持指向网络位置的链接/);
+  await assert.rejects(resolveDocumentLink('file:///\\\\server/share/a.md', { documentPath }), /不支持指向网络位置的链接/);
+  await assert.rejects(resolveDocumentLink('file:////server/share/a.md', { documentPath }), /不支持指向网络位置的链接/);
   await assert.rejects(resolveDocumentLink('https://example.com/a.md', { documentPath }), /仅支持文档中的本地链接/);
   // A relative link of an unsaved document has no base folder to resolve against.
   await assert.rejects(resolveDocumentLink('./other.md', {}), /请先保存文档/);
@@ -308,7 +323,7 @@ test('a network image root is refused before any filesystem call', async t => {
   const originalRealpath = fs.realpath;
   fs.realpath = async () => { throw new Error('文件系统访问不应发生'); };
   try {
-    for (const imageRoot of ['\\\\attacker\\share', '//attacker/share', 'file://attacker/share', 'file://192.0.2.1/share', 'file:///\\\\attacker/share']) {
+    for (const imageRoot of ['\\\\attacker\\share', '//attacker/share', 'file://attacker/share', 'file://192.0.2.1/share', 'file:///\\\\attacker/share', 'file:////attacker/share', 'file://localhost//attacker/share']) {
       await assert.rejects(resolveAssetFile('/a.png', { documentPath, imageRoot }), /网络位置/, `${imageRoot} 必须在文件系统调用前被拒绝`);
       await assert.rejects(resolveImageRoot(imageRoot, { documentPath }), /网络位置/, `${imageRoot} 作为图根本身必须被拒绝`);
     }

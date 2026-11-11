@@ -21,7 +21,7 @@ npm run build
 node test/desktop.mjs
 ```
 
-`npm test` 覆盖存储与恢复、行尾（BOM/CRLF/混排）、命令行路径、资源路径安全、Markdown 渲染、表格、行内标记、排版态纯函数、按块渲染缓存、文件夹搜索、会话与最近文件、链接分类、按需代码高亮、源码映射、版本 diff 与大纲重排，共 **16 个测试文件 / 140 项**（`node --test test/*.test.js`）。`test/desktop.mjs` 通过 Playwright 启动 Electron，使用独立的临时用户目录并模拟保存对话框，覆盖编辑/撤销、字符级定位、跨块拖选、连续撤销、外部变更、导出、历史与逐行 diff、主题、跨块语法、表格就地输入与列宽、剪贴板、命令面板、文章列表、大纲重排、缩放与窗口状态、表情、Pandoc 降级、独立新窗口、窄屏、20 万字回退、逐字符输入即排版（含 `-` / `- [ ]` / `>` 与空任务项渲染一致性）、CDP 模拟 IME 组合输入、默认 Typora 极简外观与工作台切换、Windows 单行标题栏、欢迎页状态、CRLF 与混排换行、按块增量渲染、未保存文档图片迁移与崩溃恢复、外部变更与退出流程、文件树新建/重命名/回收站/刷新、文件夹搜索、最近文件、会话恢复、本地链接与锚点、按需代码高亮、公式与图表实时预览，共 **103 个 STEP**（Windows 11 实测约 2 分钟，含真实剪贴板断言与像素拖动）。`test/perf.mjs` 是排版态输入延迟基准（5k / 30k / 100k 字符；目标值只报告，平均延迟超过目标 3 倍或图表被输入重建时退出码为 1）。`test/visual-check.mjs` 额外生成初始界面、侧栏、浅色、深色、「刚输入完」与「三类空前缀」、IME 组合中、工作台对照八张真实桌面截图供人工视觉验收。若宿主环境注入了 `ELECTRON_RUN_AS_NODE=1`，测试会在派生应用进程时剔除它，并加 `--no-sandbox --disable-gpu` 以免渲染进程在托管 shell 中崩溃；`npm start` 不受影响。像素拖动用例必须先复位缩放、关闭打字机模式并等待布局稳定，否则 CDP 坐标与页面 CSS 坐标不一致。浏览器界面调试可运行 `npm run dev`，用 ego-lite 查看终端输出的地址。浏览器预览使用简化的文件桥接，不具备桌面文件系统能力。桌面用例需要真实显示环境与剪贴板，因此**不在 CI 的必过流程里**：CI 只跑 `npm test` + `npm run build`，桌面用例是手动触发的独立 job（见 `.github/workflows/ci.yml`）。
+`npm test` 覆盖存储与恢复、行尾（BOM/CRLF/混排）、命令行路径、资源路径安全、Markdown 渲染、表格、行内标记、排版态纯函数、按块渲染缓存、文件夹搜索、会话与最近文件、链接分类、按需代码高亮、源码映射、版本 diff、大纲重排、公式编号、原生图表、导出设置、主题 CSS、Pandoc AST 与工作台，共 **22 个测试文件 / 242 项**（`node --test test/*.test.js`）。`test/desktop.mjs` 通过 Playwright 启动 Electron，使用独立的临时用户目录并模拟保存对话框，覆盖编辑/撤销、字符级定位、跨块拖选、连续撤销、外部变更、导出、历史与逐行 diff、主题、跨块语法、表格就地输入与列宽、剪贴板、命令面板、文章列表、大纲重排、缩放与窗口状态、表情、Pandoc 降级、独立新窗口、窄屏、20 万字回退、逐字符输入即排版（含 `-` / `- [ ]` / `>` 与空任务项渲染一致性）、CDP 模拟 IME 组合输入、默认 Typora 极简外观与工作台切换、Windows 单行标题栏、欢迎页状态、CRLF 与混排换行、按块增量渲染、未保存文档图片迁移与崩溃恢复、外部变更与退出流程、文件树新建/重命名/回收站/刷新、文件夹搜索、最近文件、会话恢复、本地链接与锚点、按需代码高亮、公式与图表实时预览，共 **123 个 STEP**（macOS；Windows 与 Linux 另运行标题栏一步。Windows 11 实测约 2 分钟，含真实剪贴板断言与像素拖动）。`test/perf.mjs` 是排版态输入延迟基准（5k / 30k / 100k 字符；目标值只报告，平均延迟超过目标 3 倍或图表被输入重建时退出码为 1）。`test/visual-check.mjs` 额外生成初始界面、侧栏、浅色、深色、「刚输入完」与「三类空前缀」、IME 组合中、工作台对照八张真实桌面截图供人工视觉验收。若宿主环境注入了 `ELECTRON_RUN_AS_NODE=1`，测试会在派生应用进程时剔除它，并加 `--no-sandbox --disable-gpu` 以免渲染进程在托管 shell 中崩溃；`npm start` 不受影响。像素拖动用例必须先复位缩放、关闭打字机模式并等待布局稳定，否则 CDP 坐标与页面 CSS 坐标不一致。浏览器界面调试可运行 `npm run dev`，用 ego-lite 查看终端输出的地址。浏览器预览使用简化的文件桥接，不具备桌面文件系统能力。桌面用例需要真实显示环境与剪贴板，因此**不在 CI 的必过流程里**：CI 只跑 `npm test` + `npm run build`，桌面用例是手动触发的独立 job（见 `.github/workflows/ci.yml`）。
 
 ## 目录与构建产物
 
@@ -51,13 +51,13 @@ node test/desktop.mjs
 | `electron/search.cjs` | 文件夹全文搜索（逐行匹配、片段窗口、单文件/总量上限、跳过 `node_modules` 等目录、可取消）与文件名/工作区边界校验 |
 | `electron/session.cjs` | 最近文件/文件夹与会话状态（去重、上限、缺失剔除、网络位置直接丢弃） |
 | `electron/argv.cjs` | 命令行文档路径解析（冷启动「打开方式」，忽略 Electron 开关与应用目录） |
-| `test/*.test.js` | 16 个测试文件、140 项单元测试：存储与恢复、行尾、命令行路径、资源路径安全、Markdown 渲染、表格、行内标记、排版态、渲染缓存、搜索、会话、链接、按需高亮、字符映射、版本 diff 与大纲重排 |
-| `test/desktop.mjs`、`test/perf.mjs`、`test/visual-check.mjs`、`docs/evidence/` | 桌面端到端回归（103 步骤）、输入延迟基准、真实界面截图脚本、构建日志与视觉证据 |
+| `test/*.test.js` | 22 个测试文件、242 项单元测试：存储与恢复、行尾、命令行路径、资源路径安全、Markdown 渲染、表格、行内标记、排版态、渲染缓存、搜索、会话、链接、按需高亮、字符映射、版本 diff、大纲重排、公式编号、原生图表、导出设置、主题 CSS、Pandoc AST、工作台 |
+| `test/desktop.mjs`、`test/perf.mjs`、`test/visual-check.mjs`、`docs/evidence/` | 桌面端到端回归（123 步骤；Windows 与 Linux 另含标题栏一步）、输入延迟基准、真实界面截图脚本、构建日志与视觉证据 |
 | `docs/parity-baseline.md` | 固定 Typora 1.14.15 的双平台对等基准与逐项用例矩阵 |
 | `docs/parity/fixtures/parity-sample.md` | 两平台共用的冻结 Markdown 回归语料 |
 | `docs/regression-map.md` | 第 1～6A 批修复项 → 单测 / 桌面 STEP 的映射表与无覆盖清单 |
 | `README.md` | 中文说明：环境要求、安装运行、四类测试、打包、目录结构、安全说明与已知限制 |
-| `.github/workflows/ci.yml` | CI：push/PR 在 Windows 与 macOS 上跑 `npm test` + `npm run build`；桌面用例手动触发且不阻塞 |
+| `.github/workflows/ci.yml` | CI：push/PR 在 Windows、macOS 与 Ubuntu 上跑 `npm test` + `npm run build`；桌面用例手动触发且不阻塞 |
 | `dist/` | 目前通过桌面测试的前端构建 |
 | `release/mac-arm64/Inkstone.app` | Apple Silicon 开发包，未做发行签名和公证。包内 `app.asar` 仍是十轮改动之前的旧构建，**按用户要求暂不重新打包**；本地验收请用 `npm start`（加载当前 `dist/`） |
 | `release/win-unpacked/` | Windows x64 解包目录，同为旧构建。本轮在 Windows 11 上用 `npm start`（当前源码 + 当前 `dist/`）完成验收，**没有使用这个解包目录**；NSIS 安装器仍未生成 |
@@ -73,7 +73,7 @@ node test/desktop.mjs
 | 技术语法 | 整篇一次解析、共享 `env` 逐块渲染：重复标题锚点、脚注、引用式链接、`[TOC]` 文内目录、YAML 属性卡片、GitHub 五类警示块、`\(…\)` / `\[…\]` 公式分隔符、公式与标题自动编号、Mermaid 错误可见与主题重绘。表格**单击单元格就地输入**、Enter 追加行、Tab/Shift+Tab 走单元格、拖动表头右边缘调整列宽（写文档末尾不可见注释，重开与导出保持），Alt+单击/右键仍开图形化编辑器（改值、增删行列、逐列对齐） |
 | 图片与导出 | 文件选择、粘贴、拖放插图，本地图片写入 `assets/`，双击渲染图片可放大、右键可复制 Markdown/HTML/图片路径。HTML/PDF 直接导出；HTML 内嵌公式字体、本地图片与全部样式（含自定义主题），PDF 生成文档大纲；复制为 Markdown / HTML、粘贴纯文本、代码块一键复制（Electron 45 W3C 剪贴板 API）；**HTML 无依赖导入**、Pandoc 能力探测（未安装时导出按钮禁用并明确提示）。窗口尺寸/位置/最大化状态与缩放级别持久化。导出分页视觉与 PDF 书签、Pandoc 全格式未验收 |
 | 界面 | **默认 Typora 极简外观**：38px 单一标题栏（居中文件名 + 未保存圆点、淡图标）、无品牌栏/标签栏/排版工具栏、侧栏默认隐藏可一键开合、24px 右下字数状态栏、macOS 红绿灯跟随标题栏高度；默认主题为纯白纸面 + 16px/1.6 正文 + 860px 列宽 + 标题细线 + 浅灰代码块，深色为 Night 风格；**工作台外观**可在偏好设置或命令面板一键切回，保留全部标签/工具/状态栏。另有命令面板（`⌘/Ctrl+P` 搜命令与文件）、大纲/文件/文章三面板、可拖拽侧栏宽度、浅色/深色/纸张 + 自定义 CSS 主题、专注与打字机模式、表情短代码补全与选择器、独立新窗口 |
-| 双平台 | **Windows 11 x64 实测**：`npm test` **140 项通过**；`npm run build` 通过（主包 952.98 kB / gzip 308.02 kB）；`node test/desktop.mjs` **103 步骤全部通过**（含真实剪贴板断言与像素拖动）；`node test/perf.mjs` 通过（100k 字符平均 81.7 ms/键，目标 150 ms）；`node test/visual-check.mjs` 可生成八张真实桌面截图，视觉结论仍靠人工检查。**macOS 本轮未复测**；真实中文输入法实机、签名与安装仍待验收 |
+| 双平台 | 当前单测为 **22 个测试文件 / 242 项**，`node test/desktop.mjs` 为 **123 个 STEP**（macOS；Windows 与 Linux 另含标题栏一步）。CI 在 Windows、macOS、Ubuntu 上跑 `npm test` 与 `npm run build`。2026-11 审计时 Windows 11 实测为 140 项单测、103 步桌面回归、主包 952.98 kB / gzip 308.02 kB，`node test/perf.mjs` 100k 字符平均 81.7 ms/键；RFC 0001 在 macOS 上复测了当前的 242 项与 123 步。真实中文输入法实机、签名与安装仍待验收 |
 
 ## 接手顺序（原始顺序，供追溯；当前完成度见文末推进记录与 `docs/parity-baseline.md`）
 
@@ -192,7 +192,7 @@ node test/desktop.mjs
 - `node test/desktop.mjs`：**103 个 STEP 全部通过**（约 1 分 54 秒），含真实剪贴板断言与像素拖动，覆盖六个回归点与第 6～10 轮、第 1～6A 批新增用例。
 - `node test/perf.mjs`：通过（5k 平均 21.8 ms/键、30k 37.9 ms、100k 81.7 ms；目标 50 / 50 / 150 ms 只报告；超过目标 3 倍或图表被重建时退出码为 1）。
 - `node test/visual-check.mjs`：生成八张真实桌面截图，视觉结论仍需人工检查。
-- **macOS 本轮未复测**；真实系统中文 IME 实机、签名公证与 NSIS/DMG 发行包仍未验收。CI（`.github/workflows/ci.yml`）尚未在 GitHub 上实际运行过。
+- **macOS 本轮未复测**；真实系统中文 IME 实机、签名公证与 NSIS/DMG 发行包仍未验收。CI（`.github/workflows/ci.yml`）已在 GitHub Actions 上运行：每次 push 与 pull_request 都在 Windows、macOS、Ubuntu 上执行 `npm test` 与 `npm run build`。标签 0.1.0（`da5d6ea`）的 macOS 与 Ubuntu 通过，Windows 因把空 host 的 UNC file URL（`file:///\\server/share`）报成「图片路径无效」而失败；该写法现与其它网络位置一样，在任何文件系统调用之前拒绝。当前单测为 22 个文件 / 242 项，`test/desktop.mjs` 为 123 步（macOS）。
 
 ### 已知边界（十轮后仍未根治）
 

@@ -33,10 +33,22 @@ const LINK_MISSING = '链接指向的文件不存在。';
  */
 const isNetworkPath = value => /^[\\/]{2}/.test(String(value ?? ''));
 
-/** `file://` URLs are only accepted without a host, or with `localhost`. */
+/**
+ * `file://` URLs are only accepted without a host, or with `localhost`.
+ *
+ * A pathname that still starts with `//` is a UNC share written as
+ * `file:///\\server\share` or `file:////server/share`. WHATWG parsing folds
+ * each backslash into a slash and leaves the host empty, so Windows
+ * `fileURLToPath` throws "must be absolute" instead of returning `\\server\…`.
+ * That throw is still a network location: a host-ful `file://server/share`
+ * is the form Windows *does* convert into a UNC path, and merely calling
+ * `realpath` on the result opens an SMB session. Classify both before
+ * `fileURLToPath` runs, on every OS.
+ */
 function isNetworkFileURL(url) {
   const host = url.hostname.toLowerCase();
-  return host !== '' && host !== 'localhost';
+  if (host !== '' && host !== 'localhost') return true;
+  return /^[\\/]{2}/.test(url.pathname);
 }
 
 /** The reference an author typed, recovered from markdown-it's encoding. */
