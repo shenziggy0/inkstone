@@ -44,6 +44,13 @@ try {
   await command('previous-document');
   await active(page, 'one.md');
   await quit();
+  const sessionPath = path.join(env.INKSTONE_TEST_USER_DATA, 'session.json');
+  const snapshot = JSON.parse(await fs.readFile(sessionPath, 'utf8'));
+  assert.deepEqual(snapshot.files.map(file => path.basename(file)), ['one.md', 'two.md']);
+  assert.equal(path.basename(snapshot.active), 'one.md');
+  // Recent versions adopt the first file's parent on a command-line launch.
+  // Retain the actual quit snapshot and exercise a session without a folder.
+  await fs.writeFile(sessionPath, JSON.stringify({ ...snapshot, folder: null }));
   page = await launch();
   assert.deepEqual(await tabs(page).allTextContents(), ['one.md', 'two.md']);
   await active(page, 'one.md');

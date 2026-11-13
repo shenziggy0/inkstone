@@ -133,11 +133,16 @@ class WorkspaceState {
   schedule() {
     // Writes are coalesced: window bounds also persist through settings.json,
     // and typing does not touch either file, so a short delay is enough.
-    this.writing = this.writing.then(() => new Promise(resolve => setTimeout(resolve, 120))).then(() => this.flush()).catch(() => {});
+    this.writing = this.writing.then(() => new Promise(resolve => setTimeout(resolve, 120))).then(() => this.writeState()).catch(() => {});
     return this.writing;
   }
 
-  async flush() {
+  flush() {
+    this.writing = this.writing.then(() => this.writeState());
+    return this.writing;
+  }
+
+  async writeState() {
     await atomicWrite(this.recentFile, JSON.stringify(this.data, null, 2)).catch(() => {});
     await atomicWrite(this.sessionFile, JSON.stringify(this.session, null, 2)).catch(() => {});
   }

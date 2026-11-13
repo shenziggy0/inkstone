@@ -111,7 +111,6 @@ summary[data-tree-path] { user-select: none; }
 .cm-line.cm-live-line.cm-heading-1 { font-family: var(--font-display); font-size: 2.25em; font-weight: 700; line-height: 1.2; }
 .cm-line.cm-live-line.cm-heading-2 { font-family: var(--font-display); font-size: 1.75em; font-weight: 700; line-height: 1.225; }
 .cm-line.cm-live-line.cm-heading-3 { font-family: var(--font-display); font-size: 1.5em; font-weight: 700; line-height: 1.4; }
-.cm-line.cm-live-quote { box-shadow: inset 3px 0 var(--color-rule); padding-left: 1em !important; }
 .cm-editor .cm-md-mark { color: var(--color-muted) !important; opacity: .58; font-family: var(--font-code); font-size: .86em; font-weight: 400; letter-spacing: 0; }
 .cm-editor.cm-focused .cm-md-mark { opacity: .72; }
 /* Live preview: syntax disappears from the layout, content is typeset. */
@@ -121,13 +120,24 @@ summary[data-tree-path] { user-select: none; }
 .cm-prefix-ordered { width: 2em; text-align: right; padding-right: .7em; margin-right: .1em; font-variant-numeric: tabular-nums; }
 .cm-prefix-task { width: 1.6em; color: var(--color-focus); cursor: pointer; }
 .cm-prefix-hr { display: block; width: 100%; height: 1px; margin: .8em 0; background: var(--color-rule); }
-.cm-line.cm-lv-h1 { font-size: 2.25em; font-weight: 700; line-height: 1.2; box-shadow: inset 0 -1px var(--color-rule); }
-.cm-line.cm-lv-h2 { font-size: 1.75em; font-weight: 700; line-height: 1.225; box-shadow: inset 0 -1px var(--color-rule); }
+.cm-prefix-quote { width: 1em; height: 1.35em; vertical-align: -.2em; box-shadow: inset 3px 0 var(--color-rule); }
+/* A rule that shares its line with a quote or list marker keeps those layers:
+   the line is laid out as one row and the rule fills the remaining width,
+   instead of pushing a block below the marker widgets. The row layout only
+   applies while the rule is typeset; revealing its source brings back the
+   normal text line. */
+.cm-line:has(> .cm-prefix-hr):has(> .cm-prefix-quote),
+.cm-line:has(> .cm-prefix-hr):has(> .cm-prefix-bullet),
+.cm-line:has(> .cm-prefix-hr):has(> .cm-prefix-ordered),
+.cm-line:has(> .cm-prefix-hr):has(> .cm-prefix-task) { display: flex; align-items: center; }
+.cm-line:has(> .cm-prefix-hr) > .cm-prefix-hr { flex: 1 1 auto; width: auto; }
+.cm-line.cm-lv-h1 { font-size: 2.25em; font-weight: 700; line-height: 1.2; }
+.cm-line.cm-lv-h2 { font-size: 1.75em; font-weight: 700; line-height: 1.225; }
 .cm-line.cm-lv-h3 { font-size: 1.5em; font-weight: 700; line-height: 1.4; }
 .cm-line.cm-lv-h4 { font-size: 1.25em; }
 .cm-line.cm-lv-h5, .cm-line.cm-lv-h6 { font-size: 1em; }
 .cm-line.cm-lv-h4, .cm-line.cm-lv-h5, .cm-line.cm-lv-h6 { font-weight: 700; }
-.cm-line.cm-lv-quote { box-shadow: inset 4px 0 var(--color-rule); padding-left: 1em !important; color: var(--color-muted); min-height: 1.6em; }
+.cm-line.cm-lv-quote { color: var(--color-muted); min-height: 1.6em; }
 .cm-line.cm-lv-list { padding-left: .15em !important; }
 .cm-line.cm-lv-table, .cm-line.cm-lv-fence { font-family: var(--font-code); font-size: .9em; }
 .cm-editor .cm-lv-strong { font-weight: 700; }
@@ -147,10 +157,10 @@ summary[data-tree-path] { user-select: none; }
 .prose { color: var(--color-ink); font-size: var(--editor-size); font-family: var(--font-body); line-height: var(--editor-leading); }
 .prose > :first-child { margin-top: 0; }
 .prose > :last-child { margin-bottom: 0; }
-/* Typora's default theme: bold headings, hairline under h1/h2, no letterspacing. */
+/* Heading hierarchy is expressed through size and weight, without underlines. */
 .prose h1, .prose h2, .prose h3, .prose h4, .prose h5, .prose h6 { font-family: var(--font-display); font-weight: 700; line-height: 1.4; overflow-wrap: anywhere; }
-.prose h1 { font-size: 2.25em; line-height: 1.2; margin: 0 0 .8em; padding-bottom: .3em; border-bottom: 1px solid var(--color-rule); }
-.prose h2 { font-size: 1.75em; line-height: 1.225; margin: 1.2em 0 .8em; padding-bottom: .3em; border-bottom: 1px solid var(--color-rule); }
+.prose h1 { font-size: 2.25em; line-height: 1.2; margin: 0 0 .8em; padding-bottom: .3em; }
+.prose h2 { font-size: 1.75em; line-height: 1.225; margin: 1.2em 0 .8em; padding-bottom: .3em; }
 .prose h3 { font-size: 1.5em; margin: 1em 0 .8em; }
 .prose h4 { font-size: 1.25em; margin: 1em 0 .8em; }
 .prose h5 { font-size: 1em; margin: 1em 0 .8em; }
@@ -177,17 +187,40 @@ summary[data-tree-path] { user-select: none; }
 .prose .task-list-item-checkbox:checked::after { content: ''; position: absolute; left: 4px; top: 1px; width: 4px; height: 8px; border: solid var(--color-on-accent); border-width: 0 2px 2px 0; transform: rotate(45deg); }
 .prose table { border-collapse: collapse; width: 100%; margin: .8em 0; font-size: .9em; }
 .prose .table-cell-editing { outline: 2px solid var(--color-focus); outline-offset: -2px; background: var(--color-paper); cursor: text; }
+/* The in-cell editor is a nested CodeMirror instance: it must read as cell
+   text, not as the document editor (no page padding, no code line font). The
+   selector is more specific than the Typora `:root[data-ui]` page padding,
+   which is also `!important`. */
+.md-widget.prose .table-cell-editing .cm-editor { height: auto; min-height: 0; background: transparent; color: inherit; font: inherit; }
+.md-widget.prose .table-cell-editing .cm-editor.cm-focused { outline: none; }
+.md-widget.prose .table-cell-editing .cm-editor .cm-scroller { height: auto !important; min-height: 0; overflow: visible !important; font-family: inherit !important; line-height: inherit !important; }
+.md-widget.prose .table-cell-editing .cm-editor .cm-content { min-height: 0; max-width: none; width: auto; margin: 0; padding: 0 !important; font-family: inherit; font-size: inherit; caret-color: var(--color-ink); }
+.md-widget.prose .table-cell-editing .cm-editor .cm-line { font-family: var(--font-body); font-size: 1em; line-height: var(--editor-leading); }
 .prose th, .prose td { padding: 6px 13px; border: 1px solid var(--color-rule); text-align: left; }
+.prose td { position: relative; }
 .prose th { background: var(--color-code); font-weight: 600; position: relative; }
 .table-column-resizer { position: absolute; top: 0; right: -4px; width: 9px; height: 100%; cursor: col-resize; z-index: 2; pointer-events: none; }
 .table-column-resizer::after { content: ''; position: absolute; inset: 0 3px; background: var(--color-focus); opacity: 0; transition: opacity var(--dur-micro) var(--ease-out); }
 .md-widget th:hover > .table-column-resizer::after { opacity: .5; }
+/* Reorder grips: a vertical bar in a body row's first cell, a horizontal bar at
+   the top of a header cell. Both stay invisible until their row / cell is
+   hovered, and neither covers the right edge reserved for width dragging. */
+.table-row-handle, .table-column-handle { position: absolute; z-index: 3; opacity: 0; border-radius: 2px; background: var(--color-muted); cursor: grab; transition: opacity var(--dur-micro) var(--ease-out); }
+.table-row-handle { left: 3px; top: 50%; width: 4px; height: 16px; transform: translateY(-50%); }
+.table-column-handle { left: 50%; top: 2px; width: 20px; height: 4px; transform: translateX(-50%); }
+.md-widget tr:hover > td > .table-row-handle, .md-widget th:hover > .table-column-handle { opacity: .4; }
+.md-widget .table-row-handle:hover, .md-widget .table-column-handle:hover { opacity: .9; }
+.md-widget.table-reorder-active, .md-widget.table-reorder-active * { cursor: grabbing !important; }
+.md-widget tr.table-drop-before > td, .md-widget tr.table-drop-before > th { box-shadow: inset 0 2px 0 var(--color-focus); }
+.md-widget tr.table-drop-after > td { box-shadow: inset 0 -2px 0 var(--color-focus); }
+.md-widget th.table-drop-before { box-shadow: inset 3px 0 0 var(--color-focus); }
+.md-widget th.table-drop-after { box-shadow: inset -3px 0 0 var(--color-focus); }
 .prose hr { border: 0; height: 2px; background: var(--color-rule); margin: 16px 0; }
 .prose img { display: block; max-width: 100%; height: auto; margin: 1em auto; }
 .prose mark { background: var(--color-highlight); color: inherit; }
 .prose .katex-display { overflow-x: auto; overflow-y: hidden; padding: .5em 0; }
-.prose pre.mermaid { background: transparent; border: 0; text-align: center; padding: var(--space-lg); white-space: normal; }
-.prose pre.mermaid svg { max-width: 100%; height: auto; }
+.prose pre.mermaid, .prose pre.diagram { background: transparent; border: 0; text-align: center; padding: var(--space-lg); white-space: normal; }
+.prose pre.mermaid svg, .prose pre.diagram svg { max-width: 100%; height: auto; }
 .prose pre.diagram-error { color: var(--color-error); white-space: pre-wrap; border: 1px solid var(--color-rule); text-align: left; }
 .prose .toc ul { list-style: none; padding-left: 0; }
 .hljs-keyword, .hljs-selector-tag, .hljs-literal { color: var(--color-syntax-keyword); }
@@ -249,9 +282,9 @@ kbd { font: .9em var(--font-code); color: var(--color-ink); }
 .prose blockquote.alert-important .alert-label { color: #7c3aed; }
 .prose blockquote.alert-warning .alert-label { color: #b45309; }
 .prose blockquote.alert-caution .alert-label { color: #b91c1c; }
-.math-numbering .prose { counter-reset: math-eq; }
-.math-numbering .prose .katex-display { counter-increment: math-eq; position: relative; padding-right: 3.2em; }
-.math-numbering .prose .katex-display::after { content: '(' counter(math-eq) ')'; position: absolute; right: 0; top: 50%; transform: translateY(-50%); color: var(--color-muted); font: .8em var(--font-code); }
+/* Equation numbers are rendered inside the KaTeX tree (\tag), not by CSS
+   counters: a counter cannot be referenced from \ref or survive the HTML
+   export. The body class stays as the preference marker. */
 .diagram-error-message { color: var(--color-error); text-align: left; white-space: pre-wrap; font: 12px/1.6 var(--font-code); border-bottom: 1px solid var(--color-rule); padding-bottom: var(--space-sm); margin-bottom: var(--space-sm); }
 .history-list { max-height: 240px; overflow: auto; display: flex; flex-direction: column; gap: var(--space-xs); }
 .history-item { display: flex; flex-direction: column; gap: 2px; padding: var(--space-md); border: 1px solid var(--color-rule); text-align: left; }
@@ -279,6 +312,21 @@ kbd { font: .9em var(--font-code); color: var(--color-ink); }
 .context-menu button { padding: var(--space-sm) var(--space-md); text-align: left; font-size: var(--text-sm); border-radius: var(--radius-sm); background: transparent; }
 .context-menu button:hover { background: var(--color-hover); }
 .export-options button[disabled] { opacity: .45; cursor: not-allowed; }
+#dialog:has(.pdf-export-options) { width: min(660px, calc(100vw - 32px)); overflow: auto; }
+.pdf-export-options { margin-top: var(--space-xl); padding-top: var(--space-lg); border-top: 1px solid var(--color-rule); display: flex; flex-direction: column; gap: var(--space-md); }
+.pdf-export-heading { display: flex; flex-direction: column; gap: 4px; }
+.pdf-export-heading span { color: var(--color-muted); font-size: var(--text-xs); line-height: 1.6; }
+.pdf-export-options label { display: flex; align-items: center; justify-content: space-between; gap: var(--space-lg); font-size: var(--text-sm); }
+.pdf-export-options input[type="text"], .pdf-export-options select { width: min(360px, 60%); }
+.pdf-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-sm) var(--space-lg); }
+.pdf-grid label { flex-direction: column; align-items: stretch; gap: 4px; }
+.pdf-grid input[type="text"], .pdf-grid select { width: 100%; }
+.pdf-export-options .checkbox-label { justify-content: flex-start; gap: var(--space-sm); }
+.pdf-export-options .checkbox-label input { width: 16px; }
+.pdf-preset-row { display: flex; gap: var(--space-sm); align-items: center; }
+.pdf-preset-row input { flex: 1; min-width: 0; }
+.pdf-preset-row button { border: 1px solid var(--color-rule); padding: 7px 12px; font-size: var(--text-xs); white-space: nowrap; }
+.pdf-preset-row button:hover { background: var(--color-hover); }
 .emoji-grid { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: var(--space-xs); max-height: 340px; overflow: auto; margin-top: var(--space-md); }
 .emoji-item { aspect-ratio: 1; display: grid; place-items: center; font-size: 22px; border: 1px solid transparent; border-radius: var(--radius-sm); background: transparent; }
 .emoji-item:hover { border-color: var(--color-rule); background: var(--color-hover); }
@@ -319,6 +367,11 @@ kbd { font: .9em var(--font-code); color: var(--color-ink); }
 .prose .code-language { right: 76px; }
 /* Typora keeps the page clean: no anchor glyphs or hover rails on blocks. */
 .md-widget { position: relative; }
+/* A typeset block between the two selection endpoints is tinted, not revealed:
+   its Markdown stays hidden and its layout does not move. The overlay paints
+   above surfaces that carry their own background (code fences, tables) while
+   `pointer-events: none` keeps clicks, links and the code copy button working. */
+.md-widget.cm-block-selected::after { content: ''; position: absolute; inset: 0; z-index: 1; pointer-events: none; border-radius: var(--radius-sm); background: var(--color-selected); background: color-mix(in srgb, var(--color-focus) 22%, transparent); }
 .heading-numbering .prose { counter-reset: ink-h1 ink-h2 ink-h3 ink-h4 ink-h5 ink-h6; }
 .heading-numbering .prose h1 { counter-reset: ink-h2 ink-h3 ink-h4 ink-h5 ink-h6; counter-increment: ink-h1; }
 .heading-numbering .prose h2 { counter-reset: ink-h3 ink-h4 ink-h5 ink-h6; counter-increment: ink-h2; }

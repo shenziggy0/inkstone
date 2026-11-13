@@ -23,6 +23,7 @@ import markdown from 'highlight.js/lib/languages/markdown';
 import yaml from 'highlight.js/lib/languages/yaml';
 import sql from 'highlight.js/lib/languages/sql';
 import diff from 'highlight.js/lib/languages/diff';
+import { DIAGRAM_FENCE_LANGUAGES } from './diagrams.js';
 
 /**
  * Languages that are registered with the core at startup. Keeping this list
@@ -194,7 +195,7 @@ export function fenceLanguages(source) {
   const names = new Set();
   for (const match of String(source ?? '').matchAll(/^[ \t]*(?:`{3,}|~{3,})[ \t]*([^\s`~]+)/gm)) {
     const name = match[1].toLowerCase();
-    if (name && name !== 'mermaid') names.add(name);
+    if (name && !DIAGRAM_FENCE_LANGUAGES.has(name)) names.add(name);
   }
   return [...names];
 }

@@ -1,22 +1,25 @@
 const { app, BrowserWindow, Menu, dialog, ipcMain, shell, protocol, net, session, clipboard, ClipboardItem, nativeImage, screen } = require('electron');
 const fs = require('node:fs/promises');
 const path = require('node:path');
-const { pathToFileURL } = require('node:url');
+const { pathToFileURL, fileURLToPath } = require('node:url');
 const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const crypto = require('node:crypto');
 const { AsyncLocalStorage } = require('node:async_hooks');
-const { DocumentStore, atomicWrite, inside, listMarkdown } = require('./store.cjs');
-const { parseAssetURL, resolveAssetFile, resolveDocumentLink, imageMime, unsavedAssetsDirectory, isNetworkPath, isExecutableExtension } = require('./assets.cjs');
+const { DocumentStore, atomicWrite, inside, listMarkdown, frontMatterImageRoot } = require('./store.cjs');
+const { parseAssetURL, resolveAssetFile, resolveDocumentLink, imageMime, unsavedAssetsDirectory, isNetworkPath, isNetworkFileURL, isExecutableExtension } = require('./assets.cjs');
 const { searchFolder, validateEntryName, isMarkdownFile } = require('./search.cjs');
 const { WorkspaceState } = require('./session.cjs');
 const { parseDocumentPaths } = require('./argv.cjs');
+const { DEFAULT_PDF_EXPORT, normalizePdfExport, normalizePdfPresets, buildPdfPrintOptions, pdfPageCSS, checkPngSize, PNG_LIMITS } = require('./export-settings.cjs');
+const { hasConfiguredImageRoot, rewriteRootImages } = require('./pandoc-ast.cjs');
+const { readThemeCSS } = require('./theme-css.cjs');
 const run = promisify(execFile);
 const digest = data => crypto.createHash('sha256').update(data).digest('hex');
 if (process.env.INKSTONE_TEST_USER_DATA) app.setPath('userData', process.env.INKSTONE_TEST_USER_DATA);
 protocol.registerSchemesAsPrivileged([{ scheme: 'inkstone-asset', privileges: { standard: true, secure: true, supportFetchAPI: true } }]);
 
-let preferences = { theme: 'light', fontSize: 16, lineWidth: 860, autoSave: false, focus: false, typewriter: false, spellcheck: true, mathNumbering: false, headingNumbering: false, sidebarWidth: 240, zoomLevel: 0, windowBounds: null, windowMaximized: false, showFormatbar: true, uiMode: 'typora', sidebarVisible: false, restoreSession: true, uiDefaultsMigrated: false };
+let preferences = { theme: 'light', fontSize: 16, lineWidth: 860, autoSave: false, focus: false, typewriter: false, spellcheck: true, mathNumbering: false, headingNumbering: false, sidebarWidth: 240, zoomLevel: 0, windowBounds: null, windowMaximized: false, showFormatbar: true, uiMode: 'typora', sidebarVisible: false, restoreSession: true, uiDefaultsMigrated: false, imageRoot: '', pdfExport: { ...DEFAULT_PDF_EXPORT }, pdfPresets: [] };
 // Recent documents / folders and the session restored at startup.
 const workspace = new WorkspaceState(app.getPath('userData'));
 const pendingFiles = [];
@@ -127,11 +130,29 @@ function htmlToMarkdown(html) {
  */
 const unsavedAssetsFor = id => unsavedAssetsDirectory(app.getPath('userData'), id);
 const resourcePath = doc => doc.path || doc.sourcePath;
-const assetOptions = doc => ({ documentPath: resourcePath(doc), unsavedDirectory: unsavedAssetsFor(doc.id) });
+// The document's own `typora-root-url` wins; the optional preference is only a
+// fallback for documents that configure none. Both are re-validated by the
+// shared resolver, and the renderer's asset URL carries the document's current
+// value as a hint so editing the front matter cannot serve a stale rooted image.
+const assetOptions = doc => ({
+  documentPath: resourcePath(doc),
+  unsavedDirectory: unsavedAssetsFor(doc.id),
+  imageRoot: frontMatterImageRoot(doc.content),
+  globalImageRoot: preferences.imageRoot || null
+});
 
 /** Resolve a document image reference through the shared resolver. */
-async function resolveAsset(doc, src) {
-  return resolveAssetFile(src, assetOptions(doc));
+async function resolveAsset(doc, src, imageRoot = undefined, decoded = false) {
+  const options = { ...assetOptions(doc), decoded };
+  if (typeof imageRoot === 'string') {
+    // The URL is the renderer's current document state, including an empty
+    // `?root=` when the author just removed the line. It has already applied
+    // the document → global precedence, so it wins over the possibly 500 ms
+    // stale store copy and over the main-process preference.
+    options.imageRoot = imageRoot || null;
+    options.globalImageRoot = null;
+  }
+  return resolveAssetFile(src, options);
 }
 
 /** Delete the temporary image folder of one document, if it exists. */
@@ -185,14 +206,141 @@ function visibleBounds(bounds) {
 const flattenPaths = entries => entries.flatMap(entry => entry.children ? [entry.path, ...flattenPaths(entry.children)] : [entry.path]);
 
 /**
- * Remember the tree the renderer has just been given. Without this the first
- * background scan would take a file created right after opening the folder as
- * its baseline and never report it.
+ * Remember the tree the renderer has just been given for `resolved`. Without
+ * this the first background scan would take a file created right after opening
+ * the folder as its baseline and never report it.
+ *
+ * The baseline belongs to one folder: a slow scan that finishes after the user
+ * picked another folder must not overwrite the signature of the folder that is
+ * current now, or the change scan would compare against a foreign tree.
  */
-function rememberFolderEntries(entries) {
+function rememberFolderEntries(resolved, entries) {
   const context = contextStorage.getStore() || primary;
-  if (context) context.folderSignature = flattenPaths(entries || []).join('\n');
+  if (context && resolved && context.root === resolved) context.folderSignature = flattenPaths(entries || []).join('\n');
   return entries;
+}
+
+/**
+ * Scan the folder that is current right now. The path is snapshotted before the
+ * read, so the entries always belong to the folder they are reported for and the
+ * baseline is only recorded while that folder is still the current one.
+ */
+async function currentFolderEntries() {
+  const target = root;
+  if (!target) return [];
+  return rememberFolderEntries(target, await listMarkdown(target));
+}
+
+/**
+ * Make `resolved` this window's folder. The caller has already scanned it for
+ * exactly this path and decided that the scan is still the newest request.
+ */
+function commitFolder(resolved) {
+  root = resolved;
+  workspace.recordFolder(resolved);
+  refreshMenuSoon();
+  const context = contextStorage.getStore() || primary;
+  if (context) {
+    // A folder search belongs to the folder it was started in, and an adoption
+    // payload for a folder that is no longer current can never be handed out.
+    context.searchToken = null;
+    context.pendingFolder = null;
+  }
+  return resolved;
+}
+
+/**
+ * The payload the renderer needs to draw the file tree of `resolved`. The path
+ * comes from the request, never from the global root, so a scan that finishes
+ * late can not pair its entries with another folder's name.
+ */
+function folderInfo(resolved, entries) {
+  rememberFolderEntries(resolved, entries);
+  return { path: resolved, name: path.basename(resolved), entries };
+}
+
+/**
+ * Ticket for an explicit folder choice. Only the newest ticket may commit its
+ * scan, so a slowly scanned older choice can never replace the folder the user
+ * picked afterwards. The same counter tells the automatic parent-folder
+ * adoption that a manual choice was made while it was scanning.
+ *
+ * A ticket has to be taken when the request *starts* — before any asynchronous
+ * path resolution — otherwise the order would follow the filesystem's answer
+ * time instead of the user's choices.
+ */
+function beginFolderChoice() {
+  const context = contextStorage.getStore() || primary;
+  const ticket = (context?.folderChoice ?? 0) + 1;
+  if (context) context.folderChoice = ticket;
+  return ticket;
+}
+const folderChoiceUnchanged = ticket => {
+  const context = contextStorage.getStore() || primary;
+  return !context || (context.folderChoice ?? 0) === ticket;
+};
+
+/**
+ * Scan `resolved` and make it the window's folder, unless a newer choice was
+ * taken while the directory was being read. `ticket` belongs to the request that
+ * resolved this path, so path resolution, scan and commit share one order.
+ * A superseded choice is dropped (`null`), which leaves the renderer with the
+ * workspace it already shows instead of a tree whose path and entries disagree.
+ */
+async function selectFolder(resolved, ticket) {
+  const entries = await listMarkdown(resolved);
+  if (!folderChoiceUnchanged(ticket)) return null;
+  commitFolder(resolved);
+  return folderInfo(resolved, entries);
+}
+
+/**
+ * The file tree of whichever folder is current when the scan finishes. A folder
+ * the user opened while the directory was being read wins: the stale scan is
+ * discarded and the new folder is read instead, so a refresh always answers for
+ * the workspace the window actually has (and never with a mixed payload). The
+ * loop only repeats when a folder choice landed during the read.
+ */
+async function currentFolderInfo() {
+  for (;;) {
+    const target = root;
+    if (!target) return null;
+    const entries = await listMarkdown(target);
+    if (root === target) return folderInfo(target, entries);
+  }
+}
+
+/**
+ * A document opened while this window has no folder makes its own directory the
+ * file tree root: reading one file in Finder should show its neighbours without
+ * opening the folder first. The parent is `path.dirname` of the canonical path
+ * the store recorded, never a string the renderer guessed.
+ *
+ * The directory is read *before* the root is committed and the result is thrown
+ * away if another folder became current meanwhile, so a folder the user picks
+ * while the scan runs always wins and is never replaced by a stale scan — a
+ * manual choice, even one that is still scanning, wins as well. An unreadable
+ * directory simply leaves the document open without a workspace.
+ */
+async function adoptParentFolder(record) {
+  if (!record?.path || root) return null;
+  const parent = path.dirname(record.path);
+  if (!parent || parent === record.path) return null;
+  // A share is never adopted: scanning it alone would open an SMB session, the
+  // same rule resolveLocalTarget enforces for a user-chosen folder.
+  if (isNetworkPath(record.path) || isNetworkPath(parent)) return null;
+  const context = contextStorage.getStore() || primary;
+  const choice = context?.folderChoice ?? 0;
+  const entries = await listMarkdown(parent).catch(() => null);
+  if (!entries || root) return null;
+  // A manual folder choice (even one still scanning) outranks this automatic
+  // adoption: give up without committing or rescanning anything.
+  if ((context?.folderChoice ?? 0) !== choice) return null;
+  commitFolder(parent);
+  const info = folderInfo(parent, entries);
+  // Handed to the renderer once; bootstrap forwards it through the session.
+  if (context) context.pendingFolder = info;
+  return info;
 }
 
 /** Resolve a pending quit request made to a window's renderer. */
@@ -275,6 +423,11 @@ function createWindow() {
     // image folder of the id it was saved under.
     store: new DocumentStore(recovery, { historyDirectory: path.join(userData, 'history'), legacyHistoryRoot: path.join(userData, 'recovery'), unsavedAssetsDirectory: path.join(userData, 'unsaved-assets') }),
     root: null, allowClose: false, recentlyClosed: [], misses: new Map(),
+    // The folder this window adopted from an opened file, until the renderer
+    // has drawn it once (see `activeFolder`).
+    pendingFolder: null,
+    // Newest explicit folder choice; a scan whose ticket is older is dropped.
+    folderChoice: 0,
     // Folder search state: the newest query cancels the one before it.
     searchToken: null, folderSignature: null,
     rendererGone: false, unresponsive: false, quitting: false,
@@ -380,10 +533,14 @@ function menuTemplate() {
       item('新建标签', macKey('Cmd+T', 'CmdOrCtrl+Alt+N'), 'new'),
       item('新建窗口', 'CmdOrCtrl+Shift+N', 'new-window'),
       item('打开文档…', 'CmdOrCtrl+O', 'open'),
-      item('打开文件夹…', 'CmdOrCtrl+Shift+O', 'folder'),
+      // Typora's macOS key map gives ⌘⇧O to quick open, so opening a folder keeps
+      // its explicit menu item (and the sidebar button) without stealing a key.
+      item('打开文件夹…', mac ? null : 'CmdOrCtrl+Shift+O', 'folder'),
       item('在文件夹中搜索…', 'CmdOrCtrl+Shift+F', 'folder-search'),
       { label: '最近打开', submenu: recentMenuTemplate() },
-      item('命令面板 / 快速打开…', 'CmdOrCtrl+P', 'quick-open'),
+      // Quick open is ⌘⇧O on macOS and Ctrl+P on Windows / Linux; ⌘P stays
+      // available through the editor's own key binding.
+      item('命令面板 / 快速打开…', macKey('Cmd+Shift+O', 'CmdOrCtrl+P'), 'quick-open'),
       item('重新打开已关闭文件', 'CmdOrCtrl+Shift+T', 'reopen-closed'),
       { type: 'separator' },
       item('保存', 'CmdOrCtrl+S', 'save'), item('另存为…', 'CmdOrCtrl+Shift+S', 'save-as'), item('关闭文档', 'CmdOrCtrl+W', 'close'),
@@ -430,7 +587,8 @@ function menuTemplate() {
       item('无序列表', macKey('Cmd+Alt+U', 'CmdOrCtrl+Shift+]'), 'unordered-list'),
       item('任务列表', null, 'task'),
       item('增加缩进', 'CmdOrCtrl+]', 'indent'), item('减少缩进', 'CmdOrCtrl+[', 'outdent'),
-      item('插入图片…', macKey('Cmd+Ctrl+I', 'CmdOrCtrl+Shift+I'), 'image')
+      item('插入图片…', macKey('Cmd+Ctrl+I', 'CmdOrCtrl+Shift+I'), 'image'),
+      item('设置文档图片根目录…', null, 'image-root')
     ] },
     { label: '格式', submenu: [
       item('粗体', 'CmdOrCtrl+B', 'bold'), item('斜体', 'CmdOrCtrl+I', 'italic'),
@@ -533,11 +691,17 @@ async function chooseOpen(candidate) {
   if (!candidate) {
     const result = await dialog.showOpenDialog(win, { properties: ['openFile', 'multiSelections'], filters });
     if (result.canceled) return [];
-    return Promise.all(result.filePaths.map(file => store.open(file).then(record => rememberFile(record))));
+    const records = await Promise.all(result.filePaths.map(file => store.open(file)));
+    // The last file is the one the renderer activates, so it decides which
+    // directory a window without a folder adopts.
+    await adoptParentFolder(records.at(-1));
+    return records.map(record => rememberFile(record));
   }
   const resolved = await resolveLocalTarget(candidate, '不支持指向网络位置的文件。');
   if (!resolved) throw new Error('文件不存在。');
   if (!root || !inside(root, resolved)) throw new Error('该文件不在已打开的文件夹中。');
+  // A folder is already open here (checked above), so this path never needs the
+  // parent-folder adoption the dialog branch above may trigger.
   return [rememberFile(await store.open(resolved))];
 }
 
@@ -588,7 +752,10 @@ async function openPath(file) {
   if (typeof file !== 'string' || !file) throw new Error('文件路径无效。');
   const resolved = await resolveLocalTarget(file, '不支持指向网络位置的文件。');
   if (!resolved) throw new Error('文件不存在。');
-  return rememberFile(await store.open(resolved));
+  const record = rememberFile(await store.open(resolved));
+  // A recent file opened with no workspace open shows its own folder.
+  await adoptParentFolder(record);
+  return record;
 }
 
 /**
@@ -663,6 +830,210 @@ async function trashDocumentFor(doc) {
   await store.recover(doc);
   return store.public(doc);
 }
+// ── Export helpers ─────────────────────────────────────────────────────────
+// Format names are the renderer's contract; `html-unstyled` shares `.html` but
+// deliberately omits every application/theme style sheet.
+const EXPORT_FORMATS = Object.freeze({
+  html: { extension: 'html', label: 'HTML' },
+  'html-unstyled': { extension: 'html', label: 'HTML（无样式）' },
+  png: { extension: 'png', label: 'PNG' },
+  pdf: { extension: 'pdf', label: 'PDF' },
+  docx: { extension: 'docx', label: 'DOCX' },
+  odt: { extension: 'odt', label: 'ODT' },
+  epub: { extension: 'epub', label: 'EPUB' },
+  tex: { extension: 'tex', label: 'LaTeX' },
+  rst: { extension: 'rst', label: 'reStructuredText' }
+});
+
+/** A save-dialog file name cannot carry a path or a Windows-invalid character. */
+function exportFileName(name, extension) {
+  const base = path.basename(String(name || '未命名'))
+    .replace(/\.[^.]+$/, '')
+    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, '-')
+    .trim() || '未命名';
+  return `${base}.${extension}`;
+}
+
+/**
+ * Inline the bytes an export is allowed to read: bundled math fonts and local
+ * images reached through the same asset resolver as the preview. This never
+ * touches the network; an unresolved image stays a visible link.
+ */
+async function inlineExportAssets(html, id, doc, { fonts = true } = {}) {
+  if (fonts) {
+    for (const match of [...html.matchAll(/url\(["']?([^)'"\s]+)["']?\)/g)]) {
+      const ref = match[1];
+      if (ref.startsWith('data:')) continue;
+      const name = path.basename(ref.split(/[?#]/)[0]);
+      if (!/\.(woff2?|ttf)$/.test(name)) continue;
+      try {
+        const bytes = await fs.readFile(path.join(__dirname, '../dist/assets', name));
+        const mime = name.endsWith('woff2') ? 'font/woff2' : name.endsWith('woff') ? 'font/woff' : 'font/ttf';
+        html = html.replaceAll(ref, `data:${mime};base64,${bytes.toString('base64')}`);
+      } catch { /* Keep an unresolved URL visible to the HTML reader. */ }
+    }
+  }
+  for (const match of [...html.matchAll(/src="(inkstone-asset:\/\/[^"<>]+)"/g)]) {
+    try {
+      const { documentId, reference, imageRoot } = parseAssetURL(match[1]);
+      if (documentId !== id) continue;
+      // The same resolver as the protocol handler: export inlines exactly the
+      // files the editor is allowed to display. The URL carries the reference
+      // decoded once and the root its image was rendered with.
+      const file = await resolveAsset(doc, reference, imageRoot, true);
+      html = html.replaceAll(match[1], `data:${imageMime(file)};base64,${(await fs.readFile(file)).toString('base64')}`);
+    } catch { /* An unresolved image stays a visible link in the export. */ }
+  }
+  return html;
+}
+
+/**
+ * Append the generated @page override after the document style sheet. Chromium
+ * resolves CSS @page margins after printToPDF's margins option, so the page box
+ * has to be part of the document to make the selected paper/margins reliable.
+ */
+function injectPdfPageCSS(html, pageCSS) {
+  if (!pageCSS) return html;
+  const marker = '</style>';
+  const index = html.indexOf(marker);
+  if (index < 0) throw new Error('PDF 导出模板无效。');
+  const at = index + marker.length;
+  return `${html.slice(0, at)}<style>${pageCSS}</style>${html.slice(at)}`;
+}
+
+function pngLimitError(check) {
+  const limits = check.limits || PNG_LIMITS;
+  if (check.reason === 'invalid') return 'PNG 导出失败：正文没有可捕获的尺寸。';
+  if (check.reason === 'width') return `PNG 导出失败：图片宽度 ${check.width}px 超过 ${limits.maxWidth}px 上限。请缩小正文宽度或减少图片尺寸。`;
+  if (check.reason === 'height') return `PNG 导出失败：图片高度 ${check.height}px 超过 ${limits.maxHeight}px 上限。请缩短文档或减少图片尺寸。`;
+  return `PNG 导出失败：图片共 ${check.width}×${check.height}（${check.width * check.height} 像素）超过 ${limits.maxPixels} 总像素上限。请缩短文档或减少图片尺寸。`;
+}
+
+/**
+ * One fixed in-memory session is shared by every export window. Each window's
+ * webContents id is mapped to the one temporary file it may load, so concurrent
+ * exports stay isolated and repeated exports do not accumulate sessions.
+ */
+const EXPORT_SESSION_PARTITION = 'inkstone-export';
+const normalizeExportPath = value => {
+  const resolved = path.resolve(value);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+};
+let exportSessionState = null;
+function exportSessionFor() {
+  if (exportSessionState) return exportSessionState;
+  const exportSession = session.fromPartition(EXPORT_SESSION_PARTITION, { cache: false });
+  const targets = new Map();
+  exportSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
+  // Assets and fonts are data: URLs. A window may only load its own generated
+  // document; every remote request and every other local file is refused.
+  exportSession.webRequest.onBeforeRequest(
+    { urls: ['http://*/*', 'https://*/*', 'ws://*/*', 'wss://*/*', 'ftp://*/*', 'file://*/*', 'inkstone-asset://*/*'] },
+    (details, callback) => {
+      const target = targets.get(details.webContentsId);
+      if (!target) return callback({ cancel: true });
+      if (details.url === target.pageURL) return callback({});
+      try { if (normalizeExportPath(fileURLToPath(details.url)) === target.documentPath) return callback({}); } catch { /* not a file URL */ }
+      callback({ cancel: true });
+    }
+  );
+  exportSessionState = { exportSession, targets };
+  return exportSessionState;
+}
+
+/**
+ * Load one already-self-contained HTML document in a hidden, sandboxed window.
+ * Remote and local-file requests are refused because every asset and font is a
+ * data: URL by this point. The whole temporary-file/window lifetime is guarded,
+ * and the callback decides whether it captures a PNG or prints a PDF.
+ */
+async function withExportWindow(html, width, task) {
+  const { exportSession, targets } = exportSessionFor();
+  let directory = null;
+  let hidden = null;
+  let contentsId = null;
+  try {
+    directory = await fs.mkdtemp(path.join(app.getPath('temp'), 'inkstone-export-'));
+    const file = path.join(directory, 'document.html');
+    await fs.writeFile(file, html);
+    hidden = new BrowserWindow({
+      show: false, frame: false, useContentSize: true, width: Math.max(320, Math.round(width)), height: 800,
+      resizable: false, movable: false, minimizable: false, maximizable: false, skipTaskbar: true, focusable: false,
+      webPreferences: {
+        session: exportSession, sandbox: true, contextIsolation: true, nodeIntegration: false,
+        webSecurity: true, allowRunningInsecureContent: false, spellcheck: false, backgroundThrottling: false
+      }
+    });
+    contentsId = hidden.webContents.id;
+    targets.set(contentsId, { pageURL: pathToFileURL(file).href, documentPath: normalizeExportPath(file) });
+    hidden.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    hidden.webContents.on('will-navigate', event => event.preventDefault());
+    await hidden.loadFile(file);
+    await hidden.webContents.executeJavaScript(`(async () => {
+      window.scrollTo(0, 0);
+      const images = [...document.images];
+      for (const image of images) image.loading = 'eager';
+      await Promise.all(images.map(image => new Promise(resolve => {
+        if (image.complete) { image.decode?.().catch(() => {}).finally(resolve); return; }
+        image.addEventListener('load', resolve, { once: true });
+        image.addEventListener('error', resolve, { once: true });
+        setTimeout(resolve, 10000);
+      })));
+      await document.fonts.ready;
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      return true;
+    })()`);
+    return await task(hidden);
+  } finally {
+    if (contentsId !== null) targets.delete(contentsId);
+    if (hidden && !hidden.isDestroyed()) hidden.destroy();
+    if (directory) await fs.rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }).catch(() => {});
+  }
+}
+
+/**
+ * Capture the full article at the display pixel ratio. The size limits are
+ * checked against the final pixel dimensions before any screenshot is
+ * requested, so callers can never save a truncated image.
+ */
+async function capturePng(html, width) {
+  return withExportWindow(html, width, async hidden => {
+    let attached = false;
+    try {
+      const pixelRatio = await hidden.webContents.executeJavaScript('window.devicePixelRatio || 1');
+      hidden.webContents.debugger.attach('1.3');
+      attached = true;
+      await hidden.webContents.debugger.sendCommand('Page.enable');
+      const metrics = await hidden.webContents.debugger.sendCommand('Page.getLayoutMetrics');
+      const cssWidth = Math.ceil(Number(metrics.cssContentSize?.width) || width);
+      const cssHeight = Math.ceil(Number(metrics.cssContentSize?.height) || 0);
+      const check = checkPngSize(cssWidth, cssHeight, pixelRatio);
+      if (!check.ok) throw new Error(pngLimitError(check));
+      // Chromium applies the display scale factor itself. Do not pass clip.scale
+      // as well: on a Retina display that would multiply the dimensions twice.
+      const shot = await hidden.webContents.debugger.sendCommand('Page.captureScreenshot', {
+        format: 'png', captureBeyondViewport: true, fromSurface: true,
+        clip: { x: 0, y: 0, width: cssWidth, height: cssHeight, scale: 1 }
+      });
+      const buffer = Buffer.from(shot.data, 'base64');
+      const image = nativeImage.createFromBuffer(buffer);
+      const size = image.getSize();
+      if (!size.width || !size.height) throw new Error('PNG 导出失败：截图没有产生有效图片。');
+      if (Math.abs(size.width - check.width) > 1 || Math.abs(size.height - check.height) > 1) {
+        throw new Error(`PNG 导出失败：截图尺寸 ${size.width}×${size.height} 与预期 ${check.width}×${check.height} 不一致。`);
+      }
+      return { buffer, width: size.width, height: size.height, pixelRatio, cssWidth, cssHeight };
+    } finally {
+      if (attached) { try { hidden.webContents.debugger.detach(); } catch { /* already gone */ } }
+    }
+  });
+}
+
+/** Print a self-contained article in an isolated window, so a modal export dialog cannot suppress the outline. */
+async function printPdf(html, options) {
+  return withExportWindow(html, 1200, hidden => hidden.webContents.printToPDF(options));
+}
+
 function registerHandlers() {
   handle('bootstrap', async () => {
     // The first window also collects recovery files left by secondary windows
@@ -692,13 +1063,21 @@ function registerHandlers() {
     }
     const opened = [];
     for (const file of pendingFiles.splice(0)) { try { opened.push(rememberFile(await store.open(file))); } catch {} }
+    // A cold start file (Finder / command line) with no restored workspace shows
+    // the directory it came from; the payload travels with the session so the
+    // renderer draws the tree on its first paint. Reading the pending folder
+    // here would consume it twice, so it is cleared instead.
+    const adopted = await adoptParentFolder(opened.at(-1));
+    if (adopted) context.pendingFolder = null;
     return {
       documents: [...recovered, ...(restored.documents || []), ...opened], preferences, platform: process.platform, recoveryCount: recovered.length,
       // A document named on the command line / by a double click is activated
       // after the session has been restored.
       session: {
-        path: restored.folder, name: restored.folder ? path.basename(restored.folder) : null,
-        entries: restored.entries, activePath: opened.at(-1)?.path || restored.active || null
+        path: adopted?.path || restored.folder,
+        name: adopted?.name || (restored.folder ? path.basename(restored.folder) : null),
+        entries: adopted?.entries || restored.entries,
+        activePath: opened.at(-1)?.path || restored.active || null
       },
       // The renderer sizes the topbar and keeps its controls clear of the
       // native window buttons (Windows / Linux overlay) or the traffic lights.
@@ -721,29 +1100,37 @@ function registerHandlers() {
   handle('openFolder', async () => {
     const result = await dialog.showOpenDialog(win, { properties: ['openDirectory'] });
     if (result.canceled) return null;
-    root = await fs.realpath(result.filePaths[0]);
-    workspace.recordFolder(root);
-    refreshMenuSoon();
-    const context = contextStorage.getStore() || primary;
-    if (context) context.searchToken = null;
-    return { path: root, name: path.basename(root), entries: rememberFolderEntries(await listMarkdown(root)) };
+    // The ticket is taken as soon as the user picked a directory, before the
+    // realpath below, so a slower filesystem answer cannot outrank a newer
+    // choice.
+    const ticket = beginFolderChoice();
+    return selectFolder(await fs.realpath(result.filePaths[0]), ticket);
   });
   handle('openFolderPath', async folder => {
+    // Ordering is decided here, not by the filesystem: realpath / stat below are
+    // asynchronous and a choice that arrives later must win even if this one is
+    // answered last.
+    const ticket = beginFolderChoice();
     const resolved = await resolveLocalTarget(folder, '不支持打开网络位置的文件夹。');
     if (!resolved) throw new Error('该文件夹已不存在。');
+    // A newer choice already owns the window: nothing to validate or scan here.
+    if (!folderChoiceUnchanged(ticket)) return null;
     const stat = await fs.stat(resolved);
     if (!stat.isDirectory()) throw new Error('该路径不是文件夹。');
-    root = resolved;
-    workspace.recordFolder(root);
-    refreshMenuSoon();
+    // Path and entries are bound to this request, and a newer choice makes this
+    // one stale instead of letting its late scan replace the newer folder.
+    return selectFolder(resolved, ticket);
+  });
+  // The folder a document just adopted from its own directory, handed to the
+  // renderer once so it can draw the file tree. Reading it clears it, and a
+  // folder that is no longer current is never handed out.
+  handle('activeFolder', () => {
     const context = contextStorage.getStore() || primary;
-    if (context) context.searchToken = null;
-    return { path: root, name: path.basename(root), entries: rememberFolderEntries(await listMarkdown(root)) };
+    const info = context?.pendingFolder || null;
+    if (context) context.pendingFolder = null;
+    return info && root === info.path ? info : null;
   });
-  handle('refreshFolder', async () => {
-    if (!root) return null;
-    return { path: root, name: path.basename(root), entries: rememberFolderEntries(await listMarkdown(root)) };
-  });
+  handle('refreshFolder', () => currentFolderInfo());
   // ── Folder-wide search ──
   handle('searchFolder', async (query, options = {}) => {
     if (!root) throw new Error('请先打开文件夹。');
@@ -787,7 +1174,7 @@ function registerHandlers() {
     if (await fs.stat(target).then(() => true).catch(() => false)) throw new Error(`“${checked.name}” 已存在。`);
     if (kind === 'folder') await fs.mkdir(target);
     else await atomicWrite(target, '');
-    return { path: target, name: checked.name, kind: kind === 'folder' ? 'folder' : 'file', entries: rememberFolderEntries(await listMarkdown(root)) };
+    return { path: target, name: checked.name, kind: kind === 'folder' ? 'folder' : 'file', entries: await currentFolderEntries() };
   });
   handle('renameEntry', async (target, name) => {
     const resolved = await pathInsideRoot(target, { allowRoot: false });
@@ -798,13 +1185,13 @@ function registerHandlers() {
     if (!checked.ok) throw new Error(checked.error);
     const next = path.join(path.dirname(resolved), checked.name);
     if (!inside(root, next)) throw new Error('该位置不在已打开的文件夹中。');
-    if (next === resolved) return { kind: stat.isDirectory() ? 'folder' : 'file', path: resolved, entries: rememberFolderEntries(await listMarkdown(root)) };
+    if (next === resolved) return { kind: stat.isDirectory() ? 'folder' : 'file', path: resolved, entries: await currentFolderEntries() };
     if (await fs.stat(next).then(() => true).catch(() => false)) throw new Error(`“${checked.name}” 已存在。`);
     // An open document is moved through the store so its path, tab name and
     // history follow the rename; anything else is a plain filesystem rename.
     if (!stat.isDirectory()) {
       const doc = findDocumentByPath(resolved);
-      if (doc) return { kind: 'document', document: await moveDocumentFile(doc, next), entries: rememberFolderEntries(await listMarkdown(root)) };
+      if (doc) return { kind: 'document', document: await moveDocumentFile(doc, next), entries: await currentFolderEntries() };
     }
     const historyKeys = new Set(await fs.readdir(historyDirectory()).catch(error => {
       if (error.code === 'ENOENT') return [];
@@ -837,7 +1224,7 @@ function registerHandlers() {
         warnings.push(`“${path.basename(entry.source)}”的保存历史未迁移：${error.message}`);
       }
     }
-    return { kind: stat.isDirectory() ? 'folder' : 'file', from: resolved, to: next, documents, warnings, entries: rememberFolderEntries(await listMarkdown(root)) };
+    return { kind: stat.isDirectory() ? 'folder' : 'file', from: resolved, to: next, documents, warnings, entries: await currentFolderEntries() };
   });
   handle('trashEntry', async target => {
     const resolved = await pathInsideRoot(target, { allowRoot: false });
@@ -845,7 +1232,7 @@ function registerHandlers() {
     if (doc) {
       const document = await trashDocumentFor(doc);
       if (!document) return null;
-      return { kind: 'document', document, entries: rememberFolderEntries(await listMarkdown(root)) };
+      return { kind: 'document', document, entries: await currentFolderEntries() };
     }
     const stat = await fs.stat(resolved);
     const { response } = await dialog.showMessageBox(win, {
@@ -867,7 +1254,7 @@ function registerHandlers() {
         documents.push(store.public(open));
       }
     }
-    return { kind: stat.isDirectory() ? 'folder' : 'file', path: resolved, documents, entries: rememberFolderEntries(await listMarkdown(root)) };
+    return { kind: stat.isDirectory() ? 'folder' : 'file', path: resolved, documents, entries: await currentFolderEntries() };
   });
   handle('revealPath', async target => {
     const resolved = await pathInsideRoot(target);
@@ -953,6 +1340,29 @@ function registerHandlers() {
       if (key === 'fontSize' && (!Number.isFinite(value) || value < 12 || value > 30)) continue;
       if (key === 'lineWidth' && (!Number.isFinite(value) || value < 560 || value > 1100)) continue;
       if (key === 'sidebarWidth' && (!Number.isFinite(value) || value < 180 || value > 480)) continue;
+      if (key === 'imageRoot') {
+        // Optional app-wide fallback. Keep it a local path: a share or a
+        // host-ful file URL must never be stored as an image root.
+        const root = typeof value === 'string' ? value.trim() : '';
+        if (root.length > 4096 || root.includes('\0') || isNetworkPath(root)) continue;
+        if (/^file:/i.test(root)) {
+          // Same classification as resolveImageRoot: a host-ful file URL and an
+          // empty-host UNC spelling (`file:///\\server\share`) are both shares.
+          try { if (isNetworkFileURL(new URL(root))) continue; } catch { continue; }
+        }
+        preferences.imageRoot = root;
+        continue;
+      }
+      if (key === 'pdfExport') {
+        // Optional export settings are replaced field by field against the
+        // current values. Missing fields stay valid, invalid fields are ignored.
+        preferences.pdfExport = normalizePdfExport(value, preferences.pdfExport);
+        continue;
+      }
+      if (key === 'pdfPresets') {
+        preferences.pdfPresets = normalizePdfPresets(value);
+        continue;
+      }
       if (key === 'windowBounds') {
         if (!value || typeof value !== 'object') continue;
         const bounds = {};
@@ -981,6 +1391,25 @@ function registerHandlers() {
     await atomicWrite(settingsPath(), JSON.stringify(preferences, null, 2));
     return preferences;
   });
+  // The explicit local entry for an image root. Without an id it only picks a
+  // folder (used by the preferences fallback); with an id it also returns the
+  // value to write into that document's `typora-root-url`, relative when the
+  // document already has a save location so the pair can move together.
+  handle('chooseImageRoot', async id => {
+    const result = await dialog.showOpenDialog(win, { properties: ['openDirectory', 'createDirectory'], title: '选择图片根目录' });
+    if (result.canceled || !result.filePaths[0]) return null;
+    const directory = await resolveLocalTarget(result.filePaths[0], '不支持选择网络位置作为图片根目录。');
+    if (!directory) throw new Error('该文件夹不存在。');
+    if (!(await fs.stat(directory)).isDirectory()) throw new Error('请选择文件夹作为图片根目录。');
+    if (!id) return { directory };
+    const doc = store.get(id);
+    let value = directory.split(path.sep).join('/');
+    if (doc.path) {
+      const relative = path.relative(path.dirname(doc.path), directory) || '.';
+      value = path.sep === '\\' ? relative.split('\\').join('/') : relative;
+    }
+    return { directory, value };
+  });
   handle('openExternal', async url => {
     const parsed = new URL(url);
     if (!['https:', 'http:', 'mailto:'].includes(parsed.protocol)) throw new Error('不支持打开此类链接。');
@@ -1005,10 +1434,10 @@ function registerHandlers() {
     return (await fs.readdir(themesDirectory())).filter(name => name.endsWith('.css')).sort();
   });
   handle('readTheme', async name => {
-    if (!safeName(name) || !name.endsWith('.css')) throw new Error('主题文件名无效。');
-    const css = await fs.readFile(path.join(themesDirectory(), name), 'utf8');
-    // Custom themes are local-only; never let them pull remote resources.
-    return css.slice(0, 1024 * 1024).replace(/@import[^;]*;/gi, '');
+    // Typora compatibility is handled in one local-only loader: relative
+    // imports and fonts/images are inlined, while network, UNC, absolute and
+    // symlink escapes become an empty resource instead of reaching disk.
+    return readThemeCSS(name, themesDirectory());
   });
   handle('openThemesFolder', async () => {
     await fs.mkdir(themesDirectory(), { recursive: true });
@@ -1049,17 +1478,19 @@ function registerHandlers() {
     return true;
   });
   handle('readClipboardText', () => clipboard.readText());
-  handle('copyImage', async (id, src) => {
+  handle('copyImage', async (id, src, imageRoot) => {
     const doc = store.get(id);
-    // Unsaved documents resolve `assets/…` inside their temporary folder.
-    const image = nativeImage.createFromBuffer(await fs.readFile(await resolveAsset(doc, src)));
+    // Unsaved documents resolve `assets/…` inside their temporary folder. The
+    // root hint is the value the rendered URL was built with, so a just-edited
+    // front matter is honoured before the 500 ms document flush.
+    const image = nativeImage.createFromBuffer(await fs.readFile(await resolveAsset(doc, src, imageRoot)));
     if (image.isEmpty()) throw new Error('无法读取该图片。');
     clipboard.writeImage(image);
     return true;
   });
-  handle('copyImagePath', async (id, src) => {
+  handle('copyImagePath', async (id, src, imageRoot) => {
     const doc = store.get(id);
-    const file = await resolveAsset(doc, src);
+    const file = await resolveAsset(doc, src, imageRoot);
     clipboard.writeText(file);
     return file;
   });
@@ -1123,15 +1554,20 @@ function registerHandlers() {
     scanning = true;
     try {
       for (const context of liveContexts()) {
-        if (!context.root) continue;
-        const entries = await listMarkdown(context.root).catch(() => null);
+        const target = context.root;
+        if (!target) continue;
+        const entries = await listMarkdown(target).catch(() => null);
         if (!entries) continue;
+        // The user opened another folder while this scan ran. The tree belongs
+        // to a folder that is no longer current, so it must never become the
+        // baseline — or the reported tree — of the newer one.
+        if (context.root !== target) continue;
         const signature = flattenPaths(entries).join('\n');
         // The first scan only records the baseline of a freshly opened folder.
         if (context.folderSignature === null) { context.folderSignature = signature; continue; }
         if (context.folderSignature === signature) continue;
         context.folderSignature = signature;
-        if (!context.win.isDestroyed()) context.win.webContents.send('inkstone:folder-changed', { path: context.root, name: path.basename(context.root), entries });
+        if (!context.win.isDestroyed()) context.win.webContents.send('inkstone:folder-changed', { path: target, name: path.basename(target), entries });
       }
     } finally { scanning = false; }
   }, 4000);
@@ -1178,51 +1614,111 @@ function registerHandlers() {
       throw error;
     }
   });
-  handle('exportDocument', async (id, format, html) => {
+  handle('exportDocument', async (id, format, payload) => {
     const doc = store.get(id);
-    if (!['html', 'pdf', 'docx', 'odt', 'epub', 'tex', 'rst'].includes(format)) throw new Error('不支持的导出格式。');
-    const result = await dialog.showSaveDialog(win, { defaultPath: doc.name.replace(/\.[^.]+$/, '') + '.' + format, filters: [{ name: format.toUpperCase(), extensions: [format] }] });
-    if (result.canceled) return null;
-    if (format === 'html') {
-      if (typeof html !== 'string' || html.length > 50 * 1024 * 1024) throw new Error('导出内容无效。');
-      // Export bundled math fonts and local image assets into the HTML itself.
-      for (const match of [...html.matchAll(/url\(["']?([^)'"\s]+)["']?\)/g)]) {
-        const ref = match[1];
-        if (ref.startsWith('data:')) continue;
-        const name = path.basename(ref.split(/[?#]/)[0]);
-        if (!/\.(woff2?|ttf)$/.test(name)) continue;
-        try {
-          const bytes = await fs.readFile(path.join(__dirname, '../dist/assets', name));
-          const mime = name.endsWith('woff2') ? 'font/woff2' : name.endsWith('woff') ? 'font/woff' : 'font/ttf';
-          html = html.replaceAll(ref, `data:${mime};base64,${bytes.toString('base64')}`);
-        } catch { /* Keep an unresolved URL visible to the HTML reader. */ }
-      }
-      for (const match of [...html.matchAll(/src="(inkstone-asset:\/\/[^"<>]+)"/g)]) {
-        try {
-          const { documentId, reference } = parseAssetURL(match[1]);
-          if (documentId !== id) continue;
-          // The same resolver as the protocol handler: export inlines exactly
-          // the files the editor is allowed to display.
-          const file = await resolveAssetFile(reference, assetOptions(doc));
-          html = html.replaceAll(match[1], `data:${imageMime(file)};base64,${(await fs.readFile(file)).toString('base64')}`);
-        } catch { /* An unresolved image stays a visible link in the export. */ }
-      }
+    const spec = Object.prototype.hasOwnProperty.call(EXPORT_FORMATS, format) ? EXPORT_FORMATS[format] : null;
+    if (!spec) throw new Error('不支持的导出格式。');
+
+    // The IPC signature stays backwards-compatible: a bare string is the old
+    // HTML payload. Everything new travels in an optional object.
+    const request = typeof payload === 'string' ? { html: payload } : (payload && typeof payload === 'object' ? payload : {});
+    let html = typeof request.html === 'string' ? request.html : null;
+    if ((format === 'html' || format === 'html-unstyled' || format === 'png' || format === 'pdf') && (!html || html.length > 50 * 1024 * 1024)) throw new Error('导出内容无效或超过 50 MB。');
+
+    const result = await dialog.showSaveDialog(win, {
+      defaultPath: exportFileName(doc.name, spec.extension),
+      filters: [{ name: spec.label, extensions: [spec.extension] }]
+    });
+    if (result.canceled || !result.filePath) return null;
+
+    if (format === 'html' || format === 'html-unstyled') {
+      // The styled variant keeps its embedded fonts; the no-style variant has
+      // no CSS at all, but still inlines every local image the document shows.
+      html = await inlineExportAssets(html, id, doc, { fonts: format === 'html' });
       await atomicWrite(result.filePath, html);
+    } else if (format === 'png') {
+      const width = Number(request.width);
+      if (!Number.isFinite(width) || width < 320 || width > 4096) throw new Error('PNG 导出宽度无效。');
+      const resolved = await inlineExportAssets(html, id, doc);
+      if (resolved.length > 200 * 1024 * 1024) throw new Error('PNG 导出内容超过 200 MB。请减少嵌入图片的尺寸。');
+      const shot = await capturePng(resolved, width);
+      await atomicWrite(result.filePath, shot.buffer);
     } else if (format === 'pdf') {
-      const pdf = await win.webContents.printToPDF({ printBackground: true, preferCSSPageSize: true, generateDocumentOutline: true, generateTaggedPDF: true });
+      // Printing happens in an isolated window: the modal export dialog in the
+      // editor window suppresses Chromium's document outline/tagging. Defaults
+      // still mean the same printToPDF options plus the document's own @page.
+      const printHTML = injectPdfPageCSS(await inlineExportAssets(html, id, doc), pdfPageCSS(request.pdf));
+      const pdf = await printPdf(printHTML, buildPdfPrintOptions(request.pdf));
       await atomicWrite(result.filePath, pdf);
     } else {
-      const temporary = path.join(app.getPath('temp'), `inkstone-${require('node:crypto').randomUUID()}`);
-      await fs.mkdir(temporary);
+      // mkdtemp creates the directory with mode 0700: the staged root images
+      // and the intermediate JSON are private to this export.
+      const temporary = await fs.mkdtemp(path.join(app.getPath('temp'), 'inkstone-'));
       const source = path.join(temporary, 'source.md');
-      const output = path.join(temporary, `output.${format}`);
+      const astOutput = path.join(temporary, 'source.json');
+      const rewritten = path.join(temporary, 'rewritten.json');
+      const output = path.join(temporary, `output.${spec.extension}`);
+      const resource = resourcePath(doc);
+      const exportResourcePath = resource ? path.dirname(resource) : unsavedAssetsFor(id);
+      const runPandoc = async args => {
+        try { return await run('pandoc', args, { timeout: 60000, maxBuffer: 4 * 1024 * 1024 }); }
+        catch (error) {
+          if (error.code === 'ENOENT') throw new Error('导出此格式需要安装 Pandoc（https://pandoc.org/installing.html）。HTML、HTML（无样式）、PNG 和 PDF 可直接导出。');
+          throw error;
+        }
+      };
       try {
         await fs.writeFile(source, doc.content);
-        const resource = resourcePath(doc);
-        await run('pandoc', [source, '-f', 'markdown+tex_math_dollars', '--standalone', '--resource-path', resource ? path.dirname(resource) : unsavedAssetsFor(id), '-o', output], { timeout: 60000, maxBuffer: 4 * 1024 * 1024 });
+        // Documents that configure an image root need one extra parse: the same
+        // Markdown reader produces JSON, only `/` image destinations are
+        // resolved through the shared local-asset resolver, and the JSON is
+        // handed back to the same writer. Everything else in the AST is kept.
+        if (hasConfiguredImageRoot(frontMatterImageRoot(doc.content), preferences.imageRoot)) {
+          await runPandoc([source, '-f', 'markdown+tex_math_dollars', '-t', 'json', '-o', astOutput]);
+          // JSON is written to a file (never captured through execFile's
+          // maxBuffer); this guard only rejects a pathological AST before it is
+          // materialised as one string in the main process.
+          const astSize = (await fs.stat(astOutput)).size;
+          if (astSize > 256 * 1024 * 1024) throw new Error('文档结构过大，设置图片根目录时无法导出。请拆分文档或暂时移除图片根目录。');
+          let ast;
+          try { ast = JSON.parse(await fs.readFile(astOutput, 'utf8')); }
+          catch { throw new Error('Pandoc 结构化输出无效，无法导出。'); }
+          // Root images are copied into the export's temporary folder under
+          // ASCII names instead of handing their absolute path to Pandoc. The
+          // DOCX writer records an image destination in the picture metadata,
+          // and a host path there would leak the user's directory layout (and
+          // would also make the output machine-specific). One copy per real
+          // file keeps repeated references from duplicating media. The random
+          // staging directory prevents a same-named file in the document's own
+          // folder from winning Pandoc's resource-path lookup.
+          const stagingDirectory = `.inkstone-pandoc-${crypto.randomUUID()}`;
+          const assetsDirectory = path.join(temporary, stagingDirectory);
+          const copies = new Map();
+          await rewriteRootImages(ast, async src => {
+            const file = await resolveAsset(doc, src);
+            // resolveAssetFile proves the realpath stays inside the configured
+            // root and looks like an image. A directory or unreadable file is
+            // still not something Pandoc can embed, so it falls back to alt
+            // text just like a missing file.
+            if (!(await fs.stat(file)).isFile()) throw new Error('图片路径无效。');
+            await fs.access(file, fs.constants.R_OK);
+            const known = copies.get(file);
+            if (known) return known;
+            await fs.mkdir(assetsDirectory, { recursive: true, mode: 0o700 });
+            const fileName = `${copies.size}${path.extname(file).toLowerCase()}`;
+            const name = `${stagingDirectory}/${fileName}`;
+            await fs.copyFile(file, path.join(assetsDirectory, fileName));
+            copies.set(file, name);
+            return name;
+          });
+          await fs.writeFile(rewritten, JSON.stringify(ast));
+          const searchPath = [...new Set([exportResourcePath, temporary])].join(path.delimiter);
+          await runPandoc([rewritten, '-f', 'json', '--standalone', '--resource-path', searchPath, '-o', output]);
+        } else {
+          await runPandoc([source, '-f', 'markdown+tex_math_dollars', '--standalone', '--resource-path', exportResourcePath, '-o', output]);
+        }
         await atomicWrite(result.filePath, await fs.readFile(output));
-      } catch (error) { if (error.code === 'ENOENT') throw new Error('导出此格式需要安装 Pandoc（https://pandoc.org/installing.html）。HTML 和 PDF 可直接导出。'); throw error; }
-      finally { await fs.rm(temporary, { recursive: true, force: true }); }
+      } finally { await fs.rm(temporary, { recursive: true, force: true }); }
     }
     return result.filePath;
   });
@@ -1243,7 +1739,17 @@ else {
     if (first) { first.win.show(); first.win.focus(); command('system-open'); }
   });
   app.whenReady().then(async () => {
-    try { preferences = { ...preferences, ...JSON.parse(await fs.readFile(settingsPath(), 'utf8')) }; } catch {}
+    try {
+      const stored = JSON.parse(await fs.readFile(settingsPath(), 'utf8'));
+      preferences = {
+        ...preferences,
+        ...stored,
+        // Older files have no export keys; tolerate partial or invalid values
+        // without discarding the rest of the settings.
+        pdfExport: normalizePdfExport(stored.pdfExport),
+        pdfPresets: normalizePdfPresets(stored.pdfPresets)
+      };
+    } catch {}
     // Recent documents / folders and the previous session, before any window
     // asks for its bootstrap payload.
     await workspace.load();
@@ -1256,7 +1762,7 @@ else {
     }
     protocol.handle('inkstone-asset', async request => {
       try {
-        const { documentId, reference } = parseAssetURL(request.url);
+        const { documentId, reference, imageRoot } = parseAssetURL(request.url);
         // The document id must belong to a live window of this application; the
         // URL alone never grants access to an arbitrary file.
         const context = liveContexts().find(candidate => {
@@ -1264,14 +1770,21 @@ else {
         });
         if (!context) return new Response('', { status: 404 });
         const doc = context.store.get(documentId);
-        const file = await resolveAssetFile(reference, assetOptions(doc));
+        const file = await resolveAsset(doc, reference, imageRoot, true);
         return net.fetch(pathToFileURL(file).href);
       } catch { return new Response('', { status: 404 }); }
     });
     pruneUnsavedAssets().catch(() => {});
     session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
     registerHandlers(); installMenu();
-    handle('drainPending', async () => Promise.all(pendingFiles.splice(0).map(file => store.open(file).then(record => rememberFile(record)))));
+    handle('drainPending', async () => {
+      // Opened one by one so the newest file answers for the whole batch, and so
+      // a file from Finder can adopt its folder exactly like a cold start.
+      const opened = [];
+      for (const file of pendingFiles.splice(0)) { try { opened.push(rememberFile(await store.open(file))); } catch { /* file may be gone */ } }
+      await adoptParentFolder(opened.at(-1));
+      return opened;
+    });
     handle('finishQuit', async () => {
       // Only this window is finished. Closing it triggers window-all-closed
       // when it was the last one, so other windows keep their save prompts.

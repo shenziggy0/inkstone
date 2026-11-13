@@ -21,7 +21,7 @@ npm run build
 node test/desktop.mjs
 ```
 
-`npm test` 覆盖存储与恢复、行尾（BOM/CRLF/混排）、命令行路径、资源路径安全、Markdown 渲染、表格、行内标记、排版态纯函数、按块渲染缓存、文件夹搜索、会话与最近文件、链接分类、按需代码高亮、源码映射、版本 diff 与大纲重排，共 **16 个测试文件 / 140 项**（`node --test test/*.test.js`）。`test/desktop.mjs` 通过 Playwright 启动 Electron，使用独立的临时用户目录并模拟保存对话框，覆盖编辑/撤销、字符级定位、跨块拖选、连续撤销、外部变更、导出、历史与逐行 diff、主题、跨块语法、表格就地输入与列宽、剪贴板、命令面板、文章列表、大纲重排、缩放与窗口状态、表情、Pandoc 降级、独立新窗口、窄屏、20 万字回退、逐字符输入即排版（含 `-` / `- [ ]` / `>` 与空任务项渲染一致性）、CDP 模拟 IME 组合输入、默认 Typora 极简外观与工作台切换、Windows 单行标题栏、欢迎页状态、CRLF 与混排换行、按块增量渲染、未保存文档图片迁移与崩溃恢复、外部变更与退出流程、文件树新建/重命名/回收站/刷新、文件夹搜索、最近文件、会话恢复、本地链接与锚点、按需代码高亮、公式与图表实时预览，共 **103 个 STEP**（Windows 11 实测约 2 分钟，含真实剪贴板断言与像素拖动）。`test/perf.mjs` 是排版态输入延迟基准（5k / 30k / 100k 字符；目标值只报告，平均延迟超过目标 3 倍或图表被输入重建时退出码为 1）。`test/visual-check.mjs` 额外生成初始界面、侧栏、浅色、深色、「刚输入完」与「三类空前缀」、IME 组合中、工作台对照八张真实桌面截图供人工视觉验收。若宿主环境注入了 `ELECTRON_RUN_AS_NODE=1`，测试会在派生应用进程时剔除它，并加 `--no-sandbox --disable-gpu` 以免渲染进程在托管 shell 中崩溃；`npm start` 不受影响。像素拖动用例必须先复位缩放、关闭打字机模式并等待布局稳定，否则 CDP 坐标与页面 CSS 坐标不一致。浏览器界面调试可运行 `npm run dev`，用 ego-lite 查看终端输出的地址。浏览器预览使用简化的文件桥接，不具备桌面文件系统能力。桌面用例需要真实显示环境与剪贴板，因此**不在 CI 的必过流程里**：CI 只跑 `npm test` + `npm run build`，桌面用例是手动触发的独立 job（见 `.github/workflows/ci.yml`）。
+`npm test` 覆盖存储与恢复、行尾（BOM/CRLF/混排）、命令行路径、资源路径安全、Markdown 渲染、表格、行内标记、排版态纯函数、按块渲染缓存、文件夹搜索、会话与最近文件、链接分类、按需代码高亮、源码映射、版本 diff、大纲重排、公式编号、原生图表、导出设置、主题 CSS、Pandoc AST 与工作台，共 **22 个测试文件 / 242 项**（`node --test test/*.test.js`）。`test/desktop.mjs` 通过 Playwright 启动 Electron，使用独立的临时用户目录并模拟保存对话框，覆盖编辑/撤销、字符级定位、跨块拖选、连续撤销、外部变更、导出、历史与逐行 diff、主题、跨块语法、表格就地输入与列宽、剪贴板、命令面板、文章列表、大纲重排、缩放与窗口状态、表情、Pandoc 降级、独立新窗口、窄屏、20 万字回退、逐字符输入即排版（含 `-` / `- [ ]` / `>` 与空任务项渲染一致性）、CDP 模拟 IME 组合输入、默认 Typora 极简外观与工作台切换、Windows 单行标题栏、欢迎页状态、CRLF 与混排换行、按块增量渲染、未保存文档图片迁移与崩溃恢复、外部变更与退出流程、文件树新建/重命名/回收站/刷新、文件夹搜索、最近文件、会话恢复、本地链接与锚点、按需代码高亮、公式与图表实时预览，共 **123 个 STEP**（macOS；Windows 与 Linux 另运行标题栏一步。Windows 11 实测约 2 分钟，含真实剪贴板断言与像素拖动）。`test/perf.mjs` 是排版态输入延迟基准（5k / 30k / 100k 字符；目标值只报告，平均延迟超过目标 3 倍或图表被输入重建时退出码为 1）。`test/visual-check.mjs` 额外生成初始界面、侧栏、浅色、深色、「刚输入完」与「三类空前缀」、IME 组合中、工作台对照八张真实桌面截图供人工视觉验收。若宿主环境注入了 `ELECTRON_RUN_AS_NODE=1`，测试会在派生应用进程时剔除它，并加 `--no-sandbox --disable-gpu` 以免渲染进程在托管 shell 中崩溃；`npm start` 不受影响。像素拖动用例必须先复位缩放、关闭打字机模式并等待布局稳定，否则 CDP 坐标与页面 CSS 坐标不一致。浏览器界面调试可运行 `npm run dev`，用 ego-lite 查看终端输出的地址。浏览器预览使用简化的文件桥接，不具备桌面文件系统能力。桌面用例需要真实显示环境与剪贴板，因此**不在 CI 的必过流程里**：CI 只跑 `npm test` + `npm run build`，桌面用例是手动触发的独立 job（见 `.github/workflows/ci.yml`）。
 
 ## 目录与构建产物
 
@@ -45,18 +45,19 @@ node test/desktop.mjs
 | `tokens.css`、`src/styles.css` | Typora 默认主题色板与排版（纯白纸面、16px/1.6、860px 列宽、标题下细线、浅灰代码块、蓝色链接）、深色 Night 风格、极简 chrome 与工作台两套外观 |
 | `src/browser.js` | 浏览器开发预览用的桌面接口替身 |
 | `electron/main.cjs`、`electron/preload.cjs` | 原生菜单与快捷键矩阵、沉浸式标题栏、对话框、**按窗口路由的 IPC**、每窗口独立文档存储、文件工作区、主题目录、版本历史、外部变更轮询、原生剪贴板、缩放/窗口状态持久化、Pandoc 能力探测与导入导出 |
+| `electron/theme-css.cjs` | 主题加载：按入口 CSS 是否含实际 `#write` 选择器识别 Typora / legacy 模式，整棵 import 树继承；本地 `@import` 递归内联、`url()` 字体/图片转 data URL、`realpath` 限制在主题目录内并拒绝网络/UNC/绝对路径/符号链接/复杂资源语法逃逸；Typora 模式把 `#write` 映射到单一内容面（编辑器 `#write`、导出 `.write-surface`），legacy 模式保留原始选择器语义 |
 | `electron/store.cjs` | 原文读取、文件身份识别、原子写入、磁盘版本检查、保存历史、恢复副本及 `syncAssets()` 资源同步 |
 | `electron/assets.cjs` | 图片与链接路径统一解析：UNC/设备路径/带 host 的 `file://` 拒绝、图片扩展名白名单（realpath 后复查）、可执行文件与 `PATHEXT` 拒绝、未保存文档临时图片目录 |
 | `electron/search.cjs` | 文件夹全文搜索（逐行匹配、片段窗口、单文件/总量上限、跳过 `node_modules` 等目录、可取消）与文件名/工作区边界校验 |
 | `electron/session.cjs` | 最近文件/文件夹与会话状态（去重、上限、缺失剔除、网络位置直接丢弃） |
 | `electron/argv.cjs` | 命令行文档路径解析（冷启动「打开方式」，忽略 Electron 开关与应用目录） |
-| `test/*.test.js` | 16 个测试文件、140 项单元测试：存储与恢复、行尾、命令行路径、资源路径安全、Markdown 渲染、表格、行内标记、排版态、渲染缓存、搜索、会话、链接、按需高亮、字符映射、版本 diff 与大纲重排 |
-| `test/desktop.mjs`、`test/perf.mjs`、`test/visual-check.mjs`、`docs/evidence/` | 桌面端到端回归（103 步骤）、输入延迟基准、真实界面截图脚本、构建日志与视觉证据 |
+| `test/*.test.js` | 22 个测试文件、242 项单元测试：存储与恢复、行尾、命令行路径、资源路径安全、Markdown 渲染、表格、行内标记、排版态、渲染缓存、搜索、会话、链接、按需高亮、字符映射、版本 diff、大纲重排、公式编号、原生图表、导出设置、主题 CSS、Pandoc AST、工作台 |
+| `test/desktop.mjs`、`test/perf.mjs`、`test/visual-check.mjs`、`docs/evidence/` | 桌面端到端回归（123 步骤；Windows 与 Linux 另含标题栏一步）、输入延迟基准、真实界面截图脚本、构建日志与视觉证据 |
 | `docs/parity-baseline.md` | 固定 Typora 1.14.15 的双平台对等基准与逐项用例矩阵 |
 | `docs/parity/fixtures/parity-sample.md` | 两平台共用的冻结 Markdown 回归语料 |
 | `docs/regression-map.md` | 第 1～6A 批修复项 → 单测 / 桌面 STEP 的映射表与无覆盖清单 |
 | `README.md` | 中文说明：环境要求、安装运行、四类测试、打包、目录结构、安全说明与已知限制 |
-| `.github/workflows/ci.yml` | CI：push/PR 在 Windows 与 macOS 上跑 `npm test` + `npm run build`；桌面用例手动触发且不阻塞 |
+| `.github/workflows/ci.yml` | CI：push/PR 在 Windows、macOS 与 Ubuntu 上跑 `npm test` + `npm run build`；桌面用例手动触发且不阻塞 |
 | `dist/` | 目前通过桌面测试的前端构建 |
 | `release/mac-arm64/Inkstone.app` | Apple Silicon 开发包，未做发行签名和公证。包内 `app.asar` 仍是十轮改动之前的旧构建，**按用户要求暂不重新打包**；本地验收请用 `npm start`（加载当前 `dist/`） |
 | `release/win-unpacked/` | Windows x64 解包目录，同为旧构建。本轮在 Windows 11 上用 `npm start`（当前源码 + 当前 `dist/`）完成验收，**没有使用这个解包目录**；NSIS 安装器仍未生成 |
@@ -72,7 +73,7 @@ node test/desktop.mjs
 | 技术语法 | 整篇一次解析、共享 `env` 逐块渲染：重复标题锚点、脚注、引用式链接、`[TOC]` 文内目录、YAML 属性卡片、GitHub 五类警示块、`\(…\)` / `\[…\]` 公式分隔符、公式与标题自动编号、Mermaid 错误可见与主题重绘。表格**单击单元格就地输入**、Enter 追加行、Tab/Shift+Tab 走单元格、拖动表头右边缘调整列宽（写文档末尾不可见注释，重开与导出保持），Alt+单击/右键仍开图形化编辑器（改值、增删行列、逐列对齐） |
 | 图片与导出 | 文件选择、粘贴、拖放插图，本地图片写入 `assets/`，双击渲染图片可放大、右键可复制 Markdown/HTML/图片路径。HTML/PDF 直接导出；HTML 内嵌公式字体、本地图片与全部样式（含自定义主题），PDF 生成文档大纲；复制为 Markdown / HTML、粘贴纯文本、代码块一键复制（Electron 45 W3C 剪贴板 API）；**HTML 无依赖导入**、Pandoc 能力探测（未安装时导出按钮禁用并明确提示）。窗口尺寸/位置/最大化状态与缩放级别持久化。导出分页视觉与 PDF 书签、Pandoc 全格式未验收 |
 | 界面 | **默认 Typora 极简外观**：38px 单一标题栏（居中文件名 + 未保存圆点、淡图标）、无品牌栏/标签栏/排版工具栏、侧栏默认隐藏可一键开合、24px 右下字数状态栏、macOS 红绿灯跟随标题栏高度；默认主题为纯白纸面 + 16px/1.6 正文 + 860px 列宽 + 标题细线 + 浅灰代码块，深色为 Night 风格；**工作台外观**可在偏好设置或命令面板一键切回，保留全部标签/工具/状态栏。另有命令面板（`⌘/Ctrl+P` 搜命令与文件）、大纲/文件/文章三面板、可拖拽侧栏宽度、浅色/深色/纸张 + 自定义 CSS 主题、专注与打字机模式、表情短代码补全与选择器、独立新窗口 |
-| 双平台 | **Windows 11 x64 实测**：`npm test` **140 项通过**；`npm run build` 通过（主包 952.98 kB / gzip 308.02 kB）；`node test/desktop.mjs` **103 步骤全部通过**（含真实剪贴板断言与像素拖动）；`node test/perf.mjs` 通过（100k 字符平均 81.7 ms/键，目标 150 ms）；`node test/visual-check.mjs` 可生成八张真实桌面截图，视觉结论仍靠人工检查。**macOS 本轮未复测**；真实中文输入法实机、签名与安装仍待验收 |
+| 双平台 | 当前单测为 **22 个测试文件 / 242 项**，`node test/desktop.mjs` 为 **123 个 STEP**（macOS；Windows 与 Linux 另含标题栏一步）。CI 在 Windows、macOS、Ubuntu 上跑 `npm test` 与 `npm run build`。2026-11 审计时 Windows 11 实测为 140 项单测、103 步桌面回归、主包 952.98 kB / gzip 308.02 kB，`node test/perf.mjs` 100k 字符平均 81.7 ms/键；RFC 0001 在 macOS 上复测了当前的 242 项与 123 步。真实中文输入法实机、签名与安装仍待验收 |
 
 ## 接手顺序（原始顺序，供追溯；当前完成度见文末推进记录与 `docs/parity-baseline.md`）
 
@@ -178,6 +179,7 @@ node test/desktop.mjs
 4. **第 4 批：图片与资源路径统一解析。** 新增 `electron/assets.cjs`：协议、剪贴板、HTML 导出共用一套解析；UNC、`\?\UNC\` 与 `\.\` 设备路径、带 host 的 `file://` 在第一次文件系统调用前拒绝（避免 Windows 上仅 `realpath` 就泄露 NTLM 哈希），`realpath` 之后再查一次；图片只接受白名单扩展名且必须是真实文件；文档链接允许任意类型，但可执行/脚本扩展名（含 Windows `PATHEXT` 声明的全部类型）一律拒绝。DOMPurify 的保留属性改为 `FORBID_ATTR` 配置而不是字符串二次遍历；未保存文档的图片进入按文档 id 派生的临时目录，首次保存时迁移，崩溃恢复沿用原 id 的目录，关闭与启动时清理过期目录。回归：`test/assets.test.js`（12 项）+ 相关 `test/store.test.js` 用例，桌面 STEP 60–66 / 79–80 / 101–102。
 5. **第 5 批：欢迎页、默认外观、侧栏与 Windows 标题栏、中文化。** 欢迎页改为「未修改」的命名文档（`欢迎使用.md`），首个打开的文件替换它、编辑后成为普通未保存文档；默认极简外观下保留侧栏开关、新建、主题、设置与菜单按钮；侧栏列出全部已打开文档（切换、未保存标记、键盘操作、关闭提示）；Windows / Linux 使用单条 38px 标题栏（`titleBarOverlay` 随主题换色、原生菜单按钮、全屏时释放右侧留白）；查找替换面板、菜单、回收站/废纸篓提示中文化。回归：桌面 STEP 1–4 / 33 / 75–77 / 85–86；macOS 红绿灯位置联动无自动覆盖（需 macOS）。
 6. **第 6A 批：搜索、会话、文件树、链接、高亮与实时预览。** 新增 `electron/search.cjs`（文件夹全文搜索：逐行匹配、片段窗口、单文件/总量上限、跳过构建目录、可取消、未保存内容覆盖磁盘字节、文件名校验、工作区边界）与 `electron/session.cjs`（最近文件/文件夹、会话恢复、缺失与网络位置剔除）；文件树支持新建、重命名、移到回收站、刷新；新增 `src/links.js` 处理本地 `.md` 链接与跨文档锚点（可执行文件与网络路径仍拒绝）；活跃代码块用 `@codemirror/language-data` 高亮，`src/highlight.js` 改为「核心 18 种内置 + 其余按需动态加载」，导出前预取；公式块与 Mermaid 图表支持输入时实时预览并显示语法错误。回归：`test/search.test.js`（9 项）、`test/session.test.js`（5 项）、`test/links.test.js`（6 项）、新增 `test/highlight.test.js`（4 项），桌面 STEP 87–103。
+7. **第 7A 批：Typora CSS 主题兼容。** 新增 `electron/theme-css.cjs`，复用现有 `readTheme` / `applyCustomTheme`：本地 `@import` 按被导入文件的位置递归内联，`@font-face` 的 woff2/woff/ttf 与 CSS 图片按 `realpath` 限制在 `<userData>/themes` 内后转成 data URL；网络、`file:`、UNC/设备路径、Windows 盘符、绝对路径、`..` 越界与符号链接逃逸全部变成空资源，不再依赖网络或新增协议。选择器层先按入口主题是否存在**实际 `#write` 选择器**识别模式，并让整棵 `@import` 树继承：Typora 模式把 `#write` 本身映射到单一文档面（CodeMirror 内容新增 `id="write"`，导出/打印 article 新增 `.write-surface`），后代排版仍通过 `#write ...` 作用到 `.md-widget` 与导出正文；不再把 `#write` 的 `padding-bottom` 落到每个 `.prose` 区块。legacy 模式（未使用 `#write` 的旧墨页 CSS）保留原始选择器/prelude/声明语义，`.topbar`、`button[data-command="settings"]`、`.prose p` 等选择器不再被强制包一层文档作用域；两种模式仍共用本地资源、安全声明和上限检查。Typora 模式下 `html`/`body` 只作用于编辑器/导出正文，`#write h1`、正文、链接、`code`/`pre`、`table`、`blockquote` 及 `.md-fences` / `.md-task-list-item` / `.md-meta-block` / `.md-toc` 做代表性映射；标题字号/字体/颜色/行高还会同步到活跃排版行。资源重写只处理真实 `url()` token：`url()` 内的 data URL 原样保留，避免二次包裹；`image-set` / `-webkit-image-set` / `image` / `cross-fade` / `paint` / `src` 与转义函数名（如 `u\72l`）明确拒绝，普通 `content` 字符转义保留。源 CSS（含 `@import`）上限 2 MiB，展开输出上限 8 MiB，超限明确报错而不是 `slice` 截断已嵌入资源。渲染进程用递增请求序号丢弃晚返回的旧主题，避免覆盖新选择。HTML/PDF/PNG 导出沿用同一份 CSS 与 data URL 资源，PNG 背景取主题纸张色。回归：`test/theme-css.test.js`（12 项：导入/字体、远程与遍历拒绝、符号链接、旧主题、文件名、资源门、选择器/声明/at-rule 逃逸、导出 `<style>` 逃逸、data URL/复杂资源语法、超限报错、legacy 原始选择器/按钮选择器、模式识别边界），新增独立 `test/theme.desktop.mjs`（偏好入口切换、编辑/预览/打印样式、开/存、HTML/PDF/PNG、切回内置、晚返回竞态）。本机另用 `/tmp` 临时 profile 实测 Typora 1.14.15 的 GitHub / Night / Newsprint：GitHub 4 个 woff2 与 Open Sans 生效，Newsprint 4 个 woff2 与 PT Serif 生效，Night 的 3 个本地 `@import` 内联生效；正文/标题/链接/代码/表格/引用计算样式、打开与保存、HTML/PDF/PNG 均通过，且无网络请求。外部 `check-typora-themes.mjs` 的 default（含 legacy 应用选择器）/ security / style-escape / legacy 模式均通过，security 模式用本机 HTTP 服务器确认零请求；legacy 模式回归包含 `.topbar` 与 `button[data-command="settings"]` 原生选择器。
 
 **本轮新增单测**：`test/highlight.test.js`（4 项，只 import `src/highlight.js`，不启动 Electron）——覆盖「文档请求了哪些语言」「未知语言如何回退」「语言包到达后是否注册别名」。因此 `npm test` 由 136 项变为 **140 项**；桌面用例仍为 **103 步**。
 
@@ -190,14 +192,19 @@ node test/desktop.mjs
 - `node test/desktop.mjs`：**103 个 STEP 全部通过**（约 1 分 54 秒），含真实剪贴板断言与像素拖动，覆盖六个回归点与第 6～10 轮、第 1～6A 批新增用例。
 - `node test/perf.mjs`：通过（5k 平均 21.8 ms/键、30k 37.9 ms、100k 81.7 ms；目标 50 / 50 / 150 ms 只报告；超过目标 3 倍或图表被重建时退出码为 1）。
 - `node test/visual-check.mjs`：生成八张真实桌面截图，视觉结论仍需人工检查。
-- **macOS 本轮未复测**；真实系统中文 IME 实机、签名公证与 NSIS/DMG 发行包仍未验收。CI（`.github/workflows/ci.yml`）尚未在 GitHub 上实际运行过。
+- **macOS 本轮未复测**；真实系统中文 IME 实机、签名公证与 NSIS/DMG 发行包仍未验收。CI（`.github/workflows/ci.yml`）已在 GitHub Actions 上运行：每次 push 与 pull_request 都在 Windows、macOS、Ubuntu 上执行 `npm test` 与 `npm run build`。标签 0.1.0（`da5d6ea`）的 macOS 与 Ubuntu 通过，Windows 因把空 host 的 UNC file URL（`file:///\\server/share`）报成「图片路径无效」而失败；该写法现与其它网络位置一样，在任何文件系统调用之前拒绝。当前单测为 22 个文件 / 242 项，`test/desktop.mjs` 为 123 步（macOS）。
 
 ### 已知边界（十轮后仍未根治）
 
 - 活跃块是「行内装饰模拟排版」，Typora 是「可编辑渲染 DOM」；嵌套强调（`**粗 *斜* 字**`）的内层标记仍只淡化不隐藏；跨块拖选时中间块展开为源码行而非保留渲染高亮。**窗口 chrome 与默认主题排版已按 Typora 对齐**，但原生菜单栏、系统窗口装饰、主题内每一条 CSS 规则仍不是像素级复刻。
+- Typora 主题兼容是**代表性选择器子集**：`#write` / `html` / `body`、标题、正文、链接、`code` / `pre`、表格、引用与本地字体已验证；`@include-when-export`、远程资源和 `image-set` / 转义函数名等复杂资源写法被明确拒绝，`#write` 的 padding 仍由编辑器布局控制（避免破坏打字机/打印布局），活动单行标题在编辑时有意的保持正文字号。未使用 `#write` 的旧墨页 CSS 保持原始选择器语义（包括 `.topbar`、按钮选择器与 `.prose`）；含 `#write` 的 Typora 主题才进入受限正文映射。真实 Typora 主题不隐藏原生顶栏，Windows 标题栏 overlay 仍只跟随内置 light/dark/sepia。
 - 字符映射仍基于「渲染文本是源码字符子序列」的贪心对齐；长 HTML 属性中的同形字符、复杂转义实体可能偏移。
 - 表格就地输入是「选中源码单元格后键入」，不是渲染态单元格内的富文本编辑；列宽拖动按表头右边缘 9px 命中。
 - 公式引擎为 KaTeX，宏支持范围与 MathJax 不同；跨进程多窗口并发写同一文件的冲突语义未定义（应用内窗口隔离已验收）。
+
+### RFC 0001 本地验收（2026-11-09）
+
+当前工作区通过 242 项单测、123 步 macOS 桌面回归，以及主题、导出和 Pandoc 专项验证。Apple Silicon 验证包位于 `release/rfc-0001/mac/mac-arm64/Inkstone.app`，通过打开、编辑、保存和真实系统拼音。Linux x64 验证包位于 `release/rfc-0001/linux/Inkstone-0.1.0.AppImage`，已解包核对 `text/markdown` 与两种 Markdown 扩展名。Windows、Linux 的实机启动和系统关联待验证。下面为上一轮交接时的记录。
 
 ### 需要后续跟进
 

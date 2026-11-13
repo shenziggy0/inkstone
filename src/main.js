@@ -1,8 +1,9 @@
 import './styles.css';
 import 'katex/dist/katex.min.css';
 import { createEditor } from './editor.js';
-import { escapeHTML, headings, statistics, renderMarkdown, renderDiagrams, refreshDiagrams } from './markdown.js';
-import { parseTables, serializeTable, setCell, insertRow, removeRow, insertColumn, removeColumn, setAlignment, columnWidthEdit } from './table.js';
+import { escapeHTML, headings, statistics, renderMarkdown, renderDiagrams, refreshDiagrams, tableSourceRanges, setMathNumbering, setImageRootSetting, setFrontMatterImageRoot } from './markdown.js';
+import { replaceFrontMatterImageRoot } from '../electron/front-matter.mjs';
+import { parseTables, serializeTable, setCell, insertRow, removeRow, insertColumn, removeColumn, setAlignment, columnWidthEdit, tableMoveEdit } from './table.js';
 import { compareLines, renderDiffRows, POSITIONAL_DIFF_NOTE } from './diff.js';
 import { rewriteAssetReferences } from '../electron/asset-references.mjs';
 import { parseSections, moveSection } from './outline.js';
@@ -10,13 +11,14 @@ import { welcome } from './welcome.js';
 import { ensureLanguages } from './highlight.js';
 import { splitLinkTarget, headingForAnchor, safeDecode } from './links.js';
 import { browserBridge } from './browser.js';
+import { styledHTML, unstyledHTML, pngHTML, printHTML } from './export.js';
 import { EMOJI } from './emoji.js';
 
 const native = !!window.desktop;
 const bridge = window.desktop || browserBridge();
 const documents = new Map();
 let activeId, folder, prefs, sideMode = 'outline', sourceMode = false, busy = false;
-let customThemes = [], selectedHistory = null, lastThemeKey = null, lastUiMode = null;
+let customThemes = [], selectedHistory = null, lastThemeKey = null, lastUiMode = null, customThemeSeq = 0;
 let capabilities = { installed: false, version: null, platform: '' }, imageContext = null;
 let pendingTable = null, quickFiles = [];
 // Folder-wide search state. The query survives a sidebar redraw so results can
@@ -89,7 +91,7 @@ $('#app').innerHTML = `
   <div id="notification" role="alert" hidden></div>
   <div id="context-menu" class="context-menu" role="menu" hidden></div>
   <dialog id="dialog" aria-labelledby="dialog-title"><div id="dialog-content"></div></dialog>
-  <article class="print-document prose" id="print-document"></article>
+  <article class="print-document prose write-surface" id="print-document"></article>
 `;
 
 function notify(message, error = false) {
@@ -531,8 +533,31 @@ async function openDocuments(records) {
     await closeDocument(welcome.id, false);
   }
   for (const record of list) await addDocument(record);
+  await adoptFolderFromMain();
+}
+/**
+ * A file opened while no workspace is open makes its own directory the file
+ * tree root in the main process. Mirror that here so the tree lists the
+ * neighbours of the file that was just opened. The sidebar keeps its current
+ * show / hide state (hidden by default, like Typora) and the main process is the
+ * only place that decides which folder is current.
+ */
+async function adoptFolderFromMain() {
+  if (!native || folder) return;
+  const info = await api('activeFolder').catch(() => null);
+  if (!info?.path || folder) return;
+  folder = info;
+  // The file tree is what the sidebar should offer next time it opens. A panel
+  // the user already has in front of them stays as it is, and the sidebar's
+  // visibility is never changed here.
+  if (document.body.classList.contains('sidebar-hidden')) sideMode = 'files';
+  drawSidebar();
+  saveSession();
 }
 function activate(id) {
+  // An in-cell draft belongs to the outgoing document. Commit it before its
+  // mount is detached; the background flush / autosave path never does this.
+  if (activeId && activeId !== id) documents.get(activeId)?.editor?.commitActiveCell();
   activeId = id;
   const doc = current();
   $('#editor-host').replaceChildren(doc.mount);
@@ -558,6 +583,19 @@ function applyAssetRewrites(doc, rewritten) {
   while (endBefore > start && endAfter > start && before[endBefore - 1] === after[endAfter - 1]) { endBefore--; endAfter--; }
   doc.editor.applyChange({ from: start, to: endBefore, insert: after.slice(start, endAfter) });
 }
+/**
+ * Mirror a Save As / rename image-root relocation into the live text. The main
+ * process edits only the actual leading front matter key; the renderer applies
+ * the same edit to the current buffer, and only while that key still holds the
+ * value the save started from. Text typed during the save is therefore kept,
+ * and a code fence or body line with the same spelling is never touched.
+ */
+function applyImageRootRewrite(doc, rewrite) {
+  if (!doc?.editor || !rewrite || typeof rewrite.expected !== 'string' || typeof rewrite.value !== 'string') return;
+  const change = replaceFrontMatterImageRoot(doc.editor.text(), rewrite.expected, rewrite.value);
+  if (change) doc.editor.applyChange(change);
+}
+
 function updateDirty(doc) {
   doc.dirty = !!doc.recovered || doc.content !== doc.savedContent;
 }
@@ -574,6 +612,7 @@ function documentOperation(doc, action) {
 
 async function applySavedDocument(doc, saved) {
   applyAssetRewrites(doc, saved.rewritten);
+  applyImageRootRewrite(doc, saved.imageRootRewrite);
   doc.path = saved.path;
   doc.name = saved.name;
   doc.savedContent = saved.content;
@@ -586,13 +625,18 @@ async function applySavedDocument(doc, saved) {
   saveSession();
 }
 
-function save(doc = current(), saveAs = false) {
-  if (doc) return documentOperation(doc, () => saveNow(doc, saveAs));
+function save(doc = current(), saveAs = false, { commitCell = false } = {}) {
+  if (doc) return documentOperation(doc, () => saveNow(doc, saveAs, { commitCell }));
 }
 
-async function saveNow(doc, saveAs) {
+async function saveNow(doc, saveAs, { commitCell = false } = {}) {
   doc.saving = true;
   try {
+    // An explicit save reads the document immediately. A cell draft lives only
+    // in the in-cell editor until it is committed, so commit it first. Autosave
+    // and background flushes call here without the flag and must leave the
+    // active cell (and its focus) alone.
+    if (commitCell) doc.editor.commitActiveCell({ focus: true });
     await flush(doc);
     const saved = await api('saveDocument', doc.id, saveAs);
     if (!saved) return;
@@ -610,6 +654,10 @@ async function closeDocument(id, createReplacement = true, includePath = false) 
 }
 async function closeDocumentNow(doc, createReplacement, includePath) {
   const { id } = doc;
+  // Closing (or quitting) reads the document for the save prompt; a dirty cell
+  // draft must be part of it. `closeDocument` is only reached from an explicit
+  // close / quit loop, never from the background flush.
+  doc.editor.commitActiveCell();
   await flush(doc);
   const closed = await api('closeDocument', id, includePath);
   if (!closed) return false;
@@ -697,7 +745,7 @@ async function resolveExternalPrompt(action) {
       await applyDiskVersion(id, record);
       notify(record.discarded ? `已重新加载磁盘版本。本地内容已另存为：${record.discarded}` : '已重新加载磁盘版本。');
     } else if (action === 'save-as') {
-      await save(doc, true);
+      await save(doc, true, { commitCell: true });
     } else if (action === 'detach') {
       const record = await api('detachDocument', id);
       Object.assign(doc, { path: null, name: record.name, savedContent: '' });
@@ -716,9 +764,15 @@ async function resolveExternalPrompt(action) {
   showNextExternalPrompt();
 }
 async function applyCustomTheme(value) {
+  // Theme reads are asynchronous. A slower older read must not overwrite the
+  // theme the user selected afterwards, including a switch back to built-in.
+  const request = ++customThemeSeq;
   const custom = String(value).startsWith('custom:') ? value.slice(7) : '';
   if (!custom) { document.getElementById('custom-theme')?.remove(); return; }
-  const css = await api('readTheme', custom);
+  let css;
+  try { css = await api('readTheme', custom); }
+  catch (error) { if (request === customThemeSeq) throw error; return; }
+  if (request !== customThemeSeq) return;
   const node = document.getElementById('custom-theme') || Object.assign(document.createElement('style'), { id: 'custom-theme' });
   node.textContent = css;
   if (!node.isConnected) document.head.append(node);
@@ -740,6 +794,17 @@ function applyPreferences() {
   document.body.classList.toggle('focus-mode', prefs.focus);
   document.body.classList.toggle('typewriter-mode', prefs.typewriter);
   document.body.classList.toggle('math-numbering', !!prefs.mathNumbering);
+  // Auto-numbering is now part of the rendered KaTeX tree (so `\ref` and the
+  // HTML export agree with the screen). A preference change must therefore
+  // invalidate the per-document block cache and refresh every open editor.
+  if (setMathNumbering(!!prefs.mathNumbering)) {
+    for (const doc of documents.values()) doc.editor.refreshRendered();
+  }
+  // The optional global image root is baked into every root-relative asset
+  // URL, so changing it has to rebuild the blocks that carry one as well.
+  if (setImageRootSetting(prefs.imageRoot || '')) {
+    for (const doc of documents.values()) doc.editor.refreshRendered();
+  }
   document.body.classList.toggle('heading-numbering', !!prefs.headingNumbering);
   document.body.classList.toggle('hide-formatbar', prefs.showFormatbar === false);
   applyCustomTheme(prefs.theme).catch(error => notify(error.message, true));
@@ -769,15 +834,20 @@ function showDialog(title, body, purpose = 'other') {
 }
 const flattenFiles = entries => entries.flatMap(entry => entry.children ? flattenFiles(entry.children) : [entry]);
 const modKey = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl+';
+// Typora's own file shortcuts: macOS uses ⌘⇧O for quick open and leaves folder
+// opening to its menu item / sidebar button; Windows / Linux keep Ctrl+P for
+// quick open and Ctrl+Shift+O for a folder.
+const macDesktop = () => native && appPlatform === 'darwin';
 // One palette for both files and actions: quicker than hunting through menus,
 // and it doubles as a discoverable shortcut reference.
 const paletteCommands = () => [
   ['新建文档', 'new', '文件', `${modKey}N`],
   ['新建窗口', 'new-window', '文件', `${modKey}⇧N`],
   ['打开文档…', 'open', '文件', `${modKey}O`],
-  ['打开文件夹…', 'folder', '文件', `${modKey}⇧O`],
+  ['打开文件夹…', 'folder', '文件', macDesktop() ? '' : `${modKey}⇧O`],
   ['在文件夹中搜索…', 'folder-search', '文件', `${modKey}⇧F`],
   ['最近打开的文件…', 'recent-files', '文件', ''],
+  ['命令面板 / 快速打开…', 'quick-open', '文件', macDesktop() ? `${modKey}⇧O` : `${modKey}P`],
   ['保存', 'save', '文件', `${modKey}S`],
   ['另存为…', 'save-as', '文件', `${modKey}⇧S`],
   ['导出…', 'export', '文件', `${modKey}⇧E`],
@@ -799,6 +869,7 @@ const paletteCommands = () => [
   ['插入图表', 'diagram', '段落', `${modKey}Alt+D`],
   ['插入文内目录', 'toc', '段落', ''],
   ['插入图片…', 'image', '段落', ''],
+  ['设置文档图片根目录…', 'image-root', '段落', ''],
   ['源码模式', 'source', '视图', `${modKey}/`],
   ['切换侧边栏', 'sidebar', '视图', `${modKey}⇧L`],
   ['切换界面外观（Typora / 工作台）', 'toggle-ui', '视图', ''],
@@ -899,26 +970,161 @@ async function insertImageNow(file, doc) {
     }
   } catch (error) { notify(error.message, true); }
 }
+const defaultPdfExport = () => ({ header: '', footer: '', pageNumbers: false, pageSize: 'css', landscape: false, margins: 'css' });
+const pdfExportConfig = () => ({ ...defaultPdfExport(), ...(prefs?.pdfExport || {}) });
+const pdfPresets = () => Array.isArray(prefs?.pdfPresets) ? prefs.pdfPresets : [];
+
+/** Read the PDF option fields, or fall back to the persisted last-used values. */
+function currentPdfExport() {
+  const root = $('#pdf-export-options');
+  if (!root) return pdfExportConfig();
+  return {
+    header: $('#pdf-header')?.value || '',
+    footer: $('#pdf-footer')?.value || '',
+    pageNumbers: !!$('#pdf-page-numbers')?.checked,
+    pageSize: $('#pdf-page-size')?.value || 'css',
+    landscape: !!$('#pdf-landscape')?.checked,
+    margins: $('#pdf-margins')?.value || 'css'
+  };
+}
+
+const pdfPresetSelectOptions = selected => ['<option value="">自定义</option>', ...pdfPresets().map((preset, index) => `<option value="${index}" ${preset.name === selected ? 'selected' : ''}>${escapeHTML(preset.name)}</option>`)].join('');
+
+function pdfExportOptionsHTML(config = pdfExportConfig()) {
+  const pageSizes = [['css', '跟随打印样式（A4）'], ['A0', 'A0'], ['A1', 'A1'], ['A2', 'A2'], ['A3', 'A3'], ['A4', 'A4'], ['A5', 'A5'], ['A6', 'A6'], ['Letter', 'Letter'], ['Legal', 'Legal'], ['Tabloid', 'Tabloid'], ['Ledger', 'Ledger']];
+  const margins = [['css', '与打印样式一致（20 / 18 mm）'], ['normal', '常规（1 in）'], ['narrow', '窄（0.5 in）'], ['wide', '宽（1.5 in）']];
+  return `<div class="pdf-export-options" id="pdf-export-options">
+    <div class="pdf-export-heading"><strong>PDF 选项</strong><span>页眉页脚按纯文本处理；可用 \${pageNo}、\${pageCount} 或 \${totalPages} 插入页码。留空并使用“跟随打印样式”时保持原有默认输出。</span></div>
+    <label class="pdf-wide">预设<select id="pdf-preset-select">${pdfPresetSelectOptions('')}</select></label>
+    <div class="pdf-grid">
+      <label>页眉<input id="pdf-header" type="text" maxlength="500" value="${escapeHTML(config.header || '')}" placeholder="例如：\${pageNo} / \${pageCount}"></label>
+      <label>页脚<input id="pdf-footer" type="text" maxlength="500" value="${escapeHTML(config.footer || '')}" placeholder="例如：第 \${pageNo} 页"></label>
+      <label>纸张<select id="pdf-page-size">${pageSizes.map(([value, label]) => `<option value="${value}" ${config.pageSize === value ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
+      <label>页边距<select id="pdf-margins">${margins.map(([value, label]) => `<option value="${value}" ${config.margins === value ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
+    </div>
+    <label class="checkbox-label"><span>显示页码（页脚没有页码占位符时自动追加 \${pageNo} / \${pageCount}）</span><input id="pdf-page-numbers" type="checkbox" ${config.pageNumbers ? 'checked' : ''}></label>
+    <label class="checkbox-label"><span>横向纸张</span><input id="pdf-landscape" type="checkbox" ${config.landscape ? 'checked' : ''}></label>
+    <div class="pdf-preset-row"><input id="pdf-preset-name" type="text" maxlength="40" placeholder="预设名称"><button type="button" data-pdf-preset-action="save">保存预设</button><button type="button" data-pdf-preset-action="delete">删除预设</button><button type="button" data-pdf-preset-action="reset">恢复默认</button></div>
+  </div>`;
+}
+
+function refreshPdfPresetSelect(selected = '') {
+  const select = $('#pdf-preset-select');
+  if (select) select.innerHTML = pdfPresetSelectOptions(selected);
+}
+
+/** Fill the PDF form from one saved preset; keeping the name lets «保存预设» replace it. */
+function applyPdfPreset(index) {
+  if (index === '' || index === undefined || index === null) return;
+  const preset = pdfPresets()[Number(index)];
+  if (!preset) return;
+  $('#pdf-header').value = preset.header || '';
+  $('#pdf-footer').value = preset.footer || '';
+  $('#pdf-page-numbers').checked = !!preset.pageNumbers;
+  $('#pdf-page-size').value = preset.pageSize || 'css';
+  $('#pdf-landscape').checked = !!preset.landscape;
+  $('#pdf-margins').value = preset.margins || 'css';
+  $('#pdf-preset-name').value = preset.name;
+}
+
+async function savePdfPreset() {
+  const name = ($('#pdf-preset-name')?.value || '').trim();
+  if (!name) { notify('请先填写预设名称。', true); return; }
+  const config = currentPdfExport();
+  const next = pdfPresets().filter(preset => preset.name.toLowerCase() !== name.toLowerCase());
+  next.unshift({ name, ...config });
+  const bounded = next.slice(0, 20);
+  try {
+    const saved = await api('settings', { pdfPresets: bounded });
+    Object.assign(prefs, saved);
+    refreshPdfPresetSelect(name);
+    $('#pdf-preset-name').value = name;
+    notify(`已保存 PDF 预设：${name}`);
+  } catch (error) { notify(error.message, true); }
+}
+
+async function deletePdfPreset() {
+  const selected = $('#pdf-preset-select');
+  if (!selected || selected.value === '') { notify('请先选择一个预设。', true); return; }
+  const preset = pdfPresets()[Number(selected.value)];
+  if (!preset) { notify('请先选择一个预设。', true); return; }
+  try {
+    const saved = await api('settings', { pdfPresets: pdfPresets().filter(entry => entry.name !== preset.name) });
+    Object.assign(prefs, saved);
+    refreshPdfPresetSelect('');
+    $('#pdf-preset-name').value = '';
+    notify(`已删除 PDF 预设：${preset.name}`);
+  } catch (error) { notify(error.message, true); }
+}
+
 async function exportDocument(format) {
-  const doc = current(); await flush(doc);
+  const doc = current(); if (!doc) return;
+  await flush(doc);
+  const pdfConfig = format === 'pdf' ? currentPdfExport() : null;
   // `chrome: false` drops the editor-only affordances (code copy buttons,
   // front-matter / alert decorations) so the serialized HTML and the printed
   // PDF carry the document body only.
   // Every language the document fences must be registered before the export is
   // serialised, otherwise a lazily loaded language would export unstyled.
   await ensureLanguages(doc.content);
-  const target = $('#print-document'); target.innerHTML = renderMarkdown(doc.content, doc.id, { chrome: false });
+  const target = $('#print-document'); target.innerHTML = renderMarkdown(doc.content, doc.id, { chrome: false, mathNumbering: !!prefs.mathNumbering });
   await renderDiagrams(target);
   await document.fonts.ready;
   await Promise.all([...target.querySelectorAll('img')].map(img => { img.loading = 'eager'; return img.decode().catch(() => {}); }));
-  // Editor-only affordances have no meaning in a shared file: drop the copy
-  // button and column-resize rules from the inlined stylesheet, so an export
-  // carries neither the button nor a trace of it.
-  const chromeRule = /\.(?:code-copy|table-column-resizer)\b/;
-  const css = [...document.styleSheets].flatMap(sheet => { try { return [...sheet.cssRules].filter(rule => !chromeRule.test(rule.selectorText || '')).map(rule => rule.cssText); } catch { return []; } }).join('\n');
-  const html = `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${escapeHTML(doc.name)}</title><style>${css}\nbody{overflow:auto!important;display:block!important;height:auto!important;padding:48px!important}.prose{max-width:800px;margin:auto}</style><body><article class="prose">${target.innerHTML}</article></body></html>`;
-  const result = await api('exportDocument', doc.id, format, html);
-  if (result) notify(`已导出：${result}`);
+
+  let request;
+  if (format === 'html' || format === 'png') {
+    // Editor-only affordances have no meaning in a shared file: drop the copy
+    // button and column-resize rules from the inlined stylesheet, so an export
+    // carries neither the button nor a trace of it.
+    const chromeRule = /\.(?:code-copy|table-column-resizer)\b/;
+    const css = [...document.styleSheets].flatMap(sheet => { try { return [...sheet.cssRules].filter(rule => !chromeRule.test(rule.selectorText || '')).map(rule => rule.cssText); } catch { return []; } }).join('\n');
+    if (format === 'html') request = { html: styledHTML(doc.name, target.innerHTML, css) };
+    else {
+      const width = Math.round((Number(prefs.lineWidth) || 860) + 96);
+      // A Typora theme paints its paper on #write/body, which the loader scopes
+      // to .prose. Use that computed paper for the capture background so the
+      // PNG margins match the themed document instead of the app chrome.
+      const pagePaper = getComputedStyle(target).backgroundColor;
+      const background = pagePaper && pagePaper !== 'rgba(0, 0, 0, 0)' && pagePaper !== 'transparent'
+        ? pagePaper
+        : (getComputedStyle(document.body).backgroundColor || '#ffffff');
+      request = {
+        html: pngHTML(doc.name, target.innerHTML, css, {
+          width, background,
+          theme: document.documentElement.dataset.theme || 'light',
+          ui: document.documentElement.dataset.ui || 'typora',
+          headingNumbering: !!prefs.headingNumbering
+        }),
+        width,
+        pixelRatio: window.devicePixelRatio || 1
+      };
+    }
+  } else if (format === 'html-unstyled') {
+    request = { html: unstyledHTML(doc.name, target) };
+  } else if (format === 'pdf') {
+    const chromeRule = /\.(?:code-copy|table-column-resizer)\b/;
+    const css = [...document.styleSheets].flatMap(sheet => { try { return [...sheet.cssRules].filter(rule => !chromeRule.test(rule.selectorText || '')).map(rule => rule.cssText); } catch { return []; } }).join('\n');
+    request = {
+      pdf: pdfConfig,
+      html: printHTML(document.title, target.innerHTML, css, {
+        theme: document.documentElement.dataset.theme || 'light',
+        ui: document.documentElement.dataset.ui || 'typora',
+        headingNumbering: !!prefs.headingNumbering
+      })
+    };
+  }
+
+  const result = await api('exportDocument', doc.id, format, request);
+  if (result) {
+    // Remembering the last successful configuration makes the next export
+    // repeatable, but only after the save succeeded: cancelling the dialog must
+    // not change a preset or another document's defaults.
+    if (format === 'pdf') {
+      try { const saved = await api('settings', { pdfExport: pdfConfig }); Object.assign(prefs, saved); } catch { /* the file is already saved */ }
+    }
+    notify(`已导出：${result}`);
+  }
 }
 async function runCommand(command, detail) {
   const editor = current()?.editor;
@@ -952,7 +1158,7 @@ async function runCommand(command, detail) {
         // The export path waits for on-demand languages too, so the clipboard
         // copy matches what the editor shows.
         await ensureLanguages(source);
-        await api('writeClipboard', { text: source, html: renderMarkdown(source, activeId, { chrome: false }) });
+        await api('writeClipboard', { text: source, html: renderMarkdown(source, activeId, { chrome: false, mathNumbering: !!prefs.mathNumbering }) });
       },
       'paste-plain': async () => { const text = await api('readClipboardText'); editor?.insert(String(text).replace(/\r\n/g, '\n')); },
       'panel-outline': () => { sideMode = 'outline'; setSidebarVisible(true); drawSidebar(); },
@@ -1013,8 +1219,8 @@ async function runCommand(command, detail) {
         showDialog('最近打开', `<p class="dialog-description">最多保留 20 个文件；已删除的文件会自动移除。</p><div class="menu-list">${rows}</div>`);
         break;
       }
-      case 'save': await save(); break;
-      case 'save-as': await save(current(), true); break;
+      case 'save': await save(current(), false, { commitCell: true }); break;
+      case 'save-as': await save(current(), true, { commitCell: true }); break;
       case 'close': await closeDocument(activeId); break;
       case 'find': editor?.find(); break;
       case 'source': sourceMode = !sourceMode; editor?.setSource(sourceMode); editor?.view.focus(); $('#mode-label').textContent = sourceMode ? 'Markdown 源码' : '即时渲染'; $('[data-command="source"]').setAttribute('aria-pressed', String(sourceMode)); break;
@@ -1026,27 +1232,59 @@ async function runCommand(command, detail) {
       case 'quote': editor?.prefix('> '); break;
       case 'task': editor?.prefix('- [ ] '); break;
       case 'image': await insertImage(); break;
+      case 'image-root': {
+        // The explicit local entry for typora-root-url. The chosen folder is
+        // written into the document's own front matter, not into hidden state,
+        // so the preview, exports and a later reopen all read the same value.
+        const doc = current();
+        if (!doc) break;
+        const picked = await api('chooseImageRoot', doc.id);
+        if (!picked) break;
+        const change = setFrontMatterImageRoot(doc.editor.text(), picked.value);
+        if (!change) { notify('无法写入文档属性。', true); break; }
+        doc.editor.applyChange(change);
+        notify(`图片根目录已设为：${picked.value}`);
+        break;
+      }
       case 'import': { const doc = await api('importDocument'); if (doc) await openDocuments(doc); break; }
       case 'export': {
+        // Presets are stored in the main process and shared by windows. Refresh
+        // before drawing the dialog so another window's saved preset and the
+        // last successful PDF defaults are visible here too.
+        const latestSettings = await api('settings').catch(() => null);
+        if (latestSettings && typeof latestSettings === 'object') Object.assign(prefs, latestSettings);
         const external = ['docx', 'odt', 'epub', 'tex', 'rst'];
-        const options = ['pdf', 'html', ...external].map(format => {
+        // The browser preview only knows the browser's print dialog and a
+        // download; it must not advertise PNG or the main-process PDF options.
+        const formats = native ? ['pdf', 'html', 'html-unstyled', 'png', ...external] : ['pdf', 'html'];
+        const descriptions = {
+          pdf: '带书签，可配置页眉页脚',
+          html: '自包含样式与图片',
+          'html-unstyled': '无样式 · 语义 HTML',
+          png: '整篇长图 · 离线捕获'
+        };
+        const options = formats.map(format => {
           const needsPandoc = external.includes(format);
           const locked = needsPandoc && !capabilities.installed;
-          return `<button data-export="${format}" ${locked ? 'disabled aria-disabled="true"' : ''}><strong>${format.toUpperCase()}</strong><span>${!needsPandoc ? '直接导出' : locked ? '需要 Pandoc（未安装）' : 'Pandoc 可用'}</span></button>`;
+          const label = format === 'html-unstyled' ? 'HTML' : format.toUpperCase();
+          const description = descriptions[format] || (!needsPandoc ? '直接导出' : locked ? '需要 Pandoc（未安装）' : 'Pandoc 可用');
+          return `<button data-export="${format}" ${locked ? 'disabled aria-disabled="true"' : ''}><strong>${label}</strong><span>${description}</span></button>`;
         }).join('');
-        const note = capabilities.installed
-          ? `已检测到 ${escapeHTML(capabilities.version || 'Pandoc')}，全部格式可用。`
-          : '未检测到 Pandoc。DOCX / ODT / EPUB / LaTeX / RST 需要安装 Pandoc（macOS 可执行 <code>brew install pandoc</code>，或访问 pandoc.org/installing.html），安装后重启墨页即可解锁。HTML 与 PDF 始终可用，HTML / TXT / Markdown 也可直接导入。';
-        showDialog('导出文档', `<p class="dialog-description">选择要分享的文档格式。</p><div class="export-options">${options}</div><p class="dialog-description">${note}</p>`);
+        const note = !native
+          ? '浏览器预览只支持 HTML 与 PDF（使用系统打印对话框）。PNG、HTML（无样式）和 PDF 页眉页脚需要桌面版。'
+          : capabilities.installed
+            ? `已检测到 ${escapeHTML(capabilities.version || 'Pandoc')}，全部格式可用。`
+            : '未检测到 Pandoc。DOCX / ODT / EPUB / LaTeX / RST 需要安装 Pandoc（macOS 可执行 <code>brew install pandoc</code>，或访问 pandoc.org/installing.html），安装后重启墨页即可解锁。HTML、HTML（无样式）、PNG 与 PDF 始终可用，HTML / TXT / Markdown 也可直接导入。';
+        showDialog('导出文档', `<p class="dialog-description">选择要分享的文档格式。</p><div class="export-options">${options}</div>${native ? pdfExportOptionsHTML(pdfExportConfig()) : ''}<p class="dialog-description">${note}</p>`);
         break;
       }
       case 'settings': {
         customThemes = await api('listThemes');
         const options = [['light', '浅色'], ['dark', '深色'], ['sepia', '纸张'], ...customThemes.map(name => [`custom:${name}`, `自定义 · ${name.replace(/\.css$/i, '')}`])];
-        showDialog('偏好设置', `<form id="preferences"><label>主题<select name="theme">${options.map(([value, label]) => `<option value="${escapeHTML(value)}" ${prefs.theme === value ? 'selected' : ''}>${escapeHTML(label)}</option>`).join('')}</select></label><label>界面外观<select name="uiMode"><option value="typora" ${prefs.uiMode !== 'workbench' ? 'selected' : ''}>Typora 极简（默认）</option><option value="workbench" ${prefs.uiMode === 'workbench' ? 'selected' : ''}>工作台（标签 / 工具栏 / 状态栏）</option></select></label><label>正文字号<input name="fontSize" type="number" min="12" max="30" value="${prefs.fontSize}"></label><label>正文宽度<input name="lineWidth" type="number" min="560" max="1100" step="20" value="${prefs.lineWidth}"></label>${[['autoSave', '自动保存已命名的文件'], ['restoreSession', '启动时恢复上次的文件夹与已打开文档'], ['spellcheck', '拼写检查'], ['focus', '专注模式'], ['typewriter', '打字机模式'], ['mathNumbering', '公式自动编号'], ['headingNumbering', '标题自动编号'], ['showFormatbar', '显示排版工具栏']].map(([key, label]) => `<label class="checkbox-label"><span>${label}</span><input type="checkbox" name="${key}" ${prefs[key] ? 'checked' : ''}></label>`).join('')}<div class="dialog-actions"><button type="button" data-menu-command="themes-folder">打开主题文件夹</button><button class="primary" type="submit">保存设置</button></div></form>`);
+        showDialog('偏好设置', `<form id="preferences"><label>主题<select name="theme">${options.map(([value, label]) => `<option value="${escapeHTML(value)}" ${prefs.theme === value ? 'selected' : ''}>${escapeHTML(label)}</option>`).join('')}</select></label><label>界面外观<select name="uiMode"><option value="typora" ${prefs.uiMode !== 'workbench' ? 'selected' : ''}>Typora 极简（默认）</option><option value="workbench" ${prefs.uiMode === 'workbench' ? 'selected' : ''}>工作台（标签 / 工具栏 / 状态栏）</option></select></label><label>正文字号<input name="fontSize" type="number" min="12" max="30" value="${prefs.fontSize}"></label><label>正文宽度<input name="lineWidth" type="number" min="560" max="1100" step="20" value="${prefs.lineWidth}"></label><label>图片根目录（默认值）<input name="imageRoot" type="text" value="${escapeHTML(prefs.imageRoot || '')}" placeholder="留空时使用文档中的 typora-root-url"><button type="button" data-pick-image-root>选择文件夹…</button></label>${[['autoSave', '自动保存已命名的文件'], ['restoreSession', '启动时恢复上次的文件夹与已打开文档'], ['spellcheck', '拼写检查'], ['focus', '专注模式'], ['typewriter', '打字机模式'], ['mathNumbering', '公式自动编号'], ['headingNumbering', '标题自动编号'], ['showFormatbar', '显示排版工具栏']].map(([key, label]) => `<label class="checkbox-label"><span>${label}</span><input type="checkbox" name="${key}" ${prefs[key] ? 'checked' : ''}></label>`).join('')}<div class="dialog-actions"><button type="button" data-menu-command="themes-folder">打开主题文件夹</button><button class="primary" type="submit">保存设置</button></div></form>`);
         break;
       }
-      case 'document-menu': showDialog('文档操作', `<div class="menu-list">${[['save-as', '另存为…'], ['rename', '重命名 / 移动…'], ['reveal', '在文件夹中显示'], ['history', '查看保存历史…'], ['toc', '插入文内目录'], ['task', '插入任务项'], ['quote', '插入引用'], ['trash', `移到${trashName()}`]].map(([key, label]) => `<button data-menu-command="${key}">${label}</button>`).join('')}</div>`); break;
+      case 'document-menu': showDialog('文档操作', `<div class="menu-list">${[['save-as', '另存为…'], ['rename', '重命名 / 移动…'], ['image-root', '设置图片根目录…'], ['reveal', '在文件夹中显示'], ['history', '查看保存历史…'], ['toc', '插入文内目录'], ['task', '插入任务项'], ['quote', '插入引用'], ['trash', `移到${trashName()}`]].map(([key, label]) => `<button data-menu-command="${key}">${label}</button>`).join('')}</div>`); break;
       case 'edit-table': {
         if (!detail?.source) {
           // Invoked from the palette / menu: operate on the table at the caret.
@@ -1146,7 +1384,7 @@ async function runCommand(command, detail) {
       }
       case 'reopen-closed': await openDocuments(await api('reopenClosed')); break;
       case 'trash': { await flush(); const result = await api('trashDocument', activeId); if (result) { Object.assign(current(), result, { savedContent: '' }); updateChrome(); } break; }
-      case 'help': showDialog('写作从这里开始', '<div class="help-text"><p>输入 Markdown。离开当前段落后，文字会显示排版；点击排版内容可以继续编辑。正在编辑的段落也保持排版外观，只有把光标移到 <code>#</code>、<code>**</code> 等语法字符旁边时，它们才会显现以便修改。</p><p><kbd>⌘ / Ctrl + S</kbd> 保存 · <kbd>⌘ / Ctrl + F</kbd> 查找与替换 · <kbd>⌘ / Ctrl + /</kbd> 源码模式。</p><p>单击表格单元格即可直接输入，<kbd>Tab</kbd> / <kbd>Shift+Tab</kbd> 在单元格间跳转，<kbd>Enter</kbd> 新增一行；拖动表头右边缘可调整列宽并随文档保存。右键或 <kbd>Alt</kbd> + 单击表格可打开图形化编辑器，命令面板中也能搜索「表格图形化编辑」。</p><p>图片会复制到文档旁的 assets 文件夹。文件保存时会检查磁盘版本，避免覆盖其他程序的修改。</p><p>HTML、PDF 可直接导出，其他格式需要系统中安装 Pandoc。</p><p>已支持整篇上下文渲染（脚注、引用式链接、文内目录、YAML 属性、警示块）、点击排版内容定位到源码字符、跨块拖选、复制为 Markdown / HTML、命令面板、文章列表、自定义 CSS 主题、公式与标题编号、保存历史与外部修改提示。按 ⌘/Ctrl+P 打开命令面板，可搜索命令与文件；双击图片可放大查看；代码块右上角可一键复制。Windows 实机、真实中文输入法和发行签名仍需专项验收。</p></div>'); break;
+      case 'help': showDialog('写作从这里开始', '<div class="help-text"><p>输入 Markdown。离开当前段落后，文字会显示排版；点击排版内容可以继续编辑。正在编辑的段落也保持排版外观，只有把光标移到 <code>#</code>、<code>**</code> 等语法字符旁边时，它们才会显现以便修改。</p><p><kbd>⌘ / Ctrl + S</kbd> 保存 · <kbd>⌘ / Ctrl + F</kbd> 查找与替换 · <kbd>⌘ / Ctrl + /</kbd> 源码模式。</p><p>单击表格单元格即可直接输入，<kbd>Tab</kbd> / <kbd>Shift+Tab</kbd> 在单元格间跳转，<kbd>Enter</kbd> 新增一行；拖动表头右边缘可调整列宽并随文档保存。右键或 <kbd>Alt</kbd> + 单击表格可打开图形化编辑器，命令面板中也能搜索「表格图形化编辑」。</p><p>图片会复制到文档旁的 assets 文件夹。文件保存时会检查磁盘版本，避免覆盖其他程序的修改。</p><p>HTML、HTML（无样式）、PNG 与 PDF 可直接导出；PDF 可配置页眉页脚、页码、纸张和页边距预设。其他格式需要系统中安装 Pandoc。</p><p>已支持整篇上下文渲染（脚注、引用式链接、文内目录、YAML 属性、警示块）、点击排版内容定位到源码字符、跨块拖选、复制为 Markdown / HTML、命令面板、文章列表、自定义 CSS 主题、公式与标题编号、保存历史与外部修改提示。按 ⌘/Ctrl+P 打开命令面板，可搜索命令与文件；双击图片可放大查看；代码块右上角可一键复制。Windows 实机、真实中文输入法和发行签名仍需专项验收。</p></div>'); break;
       case 'system-open': await openDocuments(await api('drainPending')); break;
       case 'quit': {
         // Acknowledge first: the main process then stops its five second
@@ -1234,14 +1472,25 @@ document.addEventListener('click', async event => {
   if (imageAction) {
     $('#context-menu').hidden = true;
     if (!imageContext) return;
-    const { src, alt, id, renderedSrc } = imageContext;
+    const { src, alt, id, renderedSrc, imageRoot } = imageContext;
     try {
       switch (imageAction.dataset.imageAction) {
-        case 'copy-image': await api('copyImage', id, src); notify('图片已复制到剪贴板'); break;
-        case 'copy-path': await api('copyImagePath', id, src); notify('图片路径已复制到剪贴板'); break;
+        case 'copy-image': await api('copyImage', id, src, imageRoot); notify('图片已复制到剪贴板'); break;
+        case 'copy-path': await api('copyImagePath', id, src, imageRoot); notify('图片路径已复制到剪贴板'); break;
         case 'copy-markdown': await api('writeClipboard', { text: `![${alt}](${src})` }); notify('Markdown 图片语法已复制'); break;
         case 'preview': showDialog('图片预览', `<img class="lightbox-image" src="${escapeHTML(renderedSrc)}" alt="${escapeHTML(alt)}">`); break;
       }
+    } catch (error) { notify(error.message, true); }
+    return;
+  }
+  // The preferences picker fills the field in place instead of closing the
+  // dialog, so a chosen folder can still be confirmed with the form.
+  const pickImageRoot = event.target.closest('[data-pick-image-root]');
+  if (pickImageRoot) {
+    try {
+      const picked = await api('chooseImageRoot');
+      const input = document.querySelector('#preferences [name="imageRoot"]');
+      if (picked && input) input.value = picked.directory;
     } catch (error) { notify(error.message, true); }
     return;
   }
@@ -1263,6 +1512,24 @@ document.addEventListener('click', async event => {
     } catch (error) { notify(error.message, true); }
     return;
   }
+  const pdfPresetAction = target?.closest?.('[data-pdf-preset-action]');
+  if (pdfPresetAction) {
+    const action = pdfPresetAction.dataset.pdfPresetAction;
+    if (action === 'save') await savePdfPreset();
+    else if (action === 'delete') await deletePdfPreset();
+    else if (action === 'reset') {
+      const defaults = defaultPdfExport();
+      $('#pdf-header').value = defaults.header;
+      $('#pdf-footer').value = defaults.footer;
+      $('#pdf-page-numbers').checked = defaults.pageNumbers;
+      $('#pdf-page-size').value = defaults.pageSize;
+      $('#pdf-landscape').checked = defaults.landscape;
+      $('#pdf-margins').value = defaults.margins;
+      $('#pdf-preset-name').value = '';
+      refreshPdfPresetSelect('');
+    }
+    return;
+  }
   const exported = target?.closest?.('[data-export]');
   if (exported) {
     if (busy) return; busy = true; exported.disabled = true; exported.setAttribute('aria-busy', 'true');
@@ -1281,7 +1548,7 @@ document.addEventListener('submit', async event => {
   // Document content cannot forge the preferences form and change app settings.
   if (event.target.id !== 'preferences' || event.target.closest('.prose')) return;
   event.preventDefault(); const data = new FormData(event.target);
-  const patch = { theme: data.get('theme'), uiMode: data.get('uiMode'), fontSize: Number(data.get('fontSize')), lineWidth: Number(data.get('lineWidth')) };
+  const patch = { theme: data.get('theme'), uiMode: data.get('uiMode'), fontSize: Number(data.get('fontSize')), lineWidth: Number(data.get('lineWidth')), imageRoot: String(data.get('imageRoot') ?? '').trim() };
   for (const key of ['autoSave', 'restoreSession', 'spellcheck', 'focus', 'typewriter', 'mathNumbering', 'headingNumbering', 'showFormatbar']) patch[key] = data.has(key);
   try { await setPreferences(patch); $('#dialog').close(); } catch (error) { notify(error.message, true); }
 });
@@ -1299,6 +1566,10 @@ document.addEventListener('input', event => {
   }
 });
 document.addEventListener('change', event => {
+  if (event.target.id === 'pdf-preset-select') {
+    applyPdfPreset(event.target.value);
+    return;
+  }
   const option = event.target.closest?.('[data-search-option]');
   if (option) {
     searchState[option.dataset.searchOption] = option.checked;
@@ -1331,6 +1602,37 @@ document.addEventListener('inkstone:table-width', event => {
   const index = tables.findIndex(table => table.start <= detail.absoluteStart && detail.absoluteStart < table.end);
   if (index < 0) return;
   doc.editor.applyChange(columnWidthEdit(text, index, detail.widths));
+});
+// Dragging a row grip or a column grip rewrites that table (and its stored
+// widths) in one transaction, so a single undo puts the original back. The
+// event may arrive long after the drag started, so it is applied only to the
+// document and block it was measured in.
+document.addEventListener('inkstone:table-move', event => {
+  const doc = current();
+  const detail = event.detail;
+  if (!doc || !detail) return;
+  // Another document became active while the pointer was down.
+  if (!detail.documentId || detail.documentId !== doc.id) return;
+  const text = doc.editor.text();
+  const blockEnd = detail.blockFrom + String(detail.blockSource ?? '').length;
+  // The block moved or changed since it was typeset (typing, reload, undo).
+  if (text.slice(detail.blockFrom, blockEnd) !== detail.blockSource) return;
+  // Table boundaries come from the renderer's own token map, not from the
+  // row scan: a heading such as `# H | Q` under a table is a separate block.
+  const ranges = tableSourceRanges(text);
+  const inBlock = ranges.filter(range => range.start >= detail.blockFrom && range.end <= blockEnd);
+  // A block can hold native HTML tables, which render as `<table>` but have no
+  // Markdown source. When the widget's DOM table count differs from the block's
+  // GFM table count the two index spaces cannot be matched safely, so a drag on
+  // any table of that block is refused instead of editing its neighbour.
+  if (inBlock.length !== detail.domTables) return;
+  const block = inBlock[detail.tableIndex];
+  if (!block) return;
+  const index = ranges.indexOf(block);
+  if (index < 0) return;
+  const changes = tableMoveEdit(text, index, detail.kind, detail.from, detail.slot, block);
+  if (!changes.length) return;
+  doc.editor.applyReorder(changes);
 });
 // Command palette keyboard navigation.
 document.addEventListener('keydown', event => {
@@ -1378,6 +1680,9 @@ $('#dialog').addEventListener('close', () => {
   showNextExternalPrompt();
 });
 // Right-clicking a rendered image exposes Typora-style copy actions.
+const assetRootOf = url => {
+  try { return new URL(url).searchParams.get('root'); } catch { return null; }
+};
 document.addEventListener('contextmenu', event => {
   const image = event.target.closest('.md-widget img');
   const menu = $('#context-menu');
@@ -1398,7 +1703,10 @@ document.addEventListener('contextmenu', event => {
   event.preventDefault();
   imageContext = {
     src: image.dataset.mdSrc || '', alt: image.alt || '', id: activeId,
-    renderedSrc: image.getAttribute('src') || ''
+    renderedSrc: image.getAttribute('src') || '',
+    // The root that this exact image was rendered with. An edit to the front
+    // matter reaches the picture before the 500 ms document flush.
+    imageRoot: assetRootOf(image.getAttribute('src') || '')
   };
   menu.innerHTML = [
     ['copy-image', '复制图片'], ['copy-path', '复制图片路径'],
@@ -1454,7 +1762,7 @@ document.addEventListener('drop', event => {
 });
 document.addEventListener('keydown', event => {
   if (native || !(event.metaKey || event.ctrlKey) || event.isComposing || $('#dialog').open) return;
-  const command = { s: event.shiftKey ? 'save-as' : 'save', o: event.shiftKey ? 'folder' : 'open', n: 'new', '/': 'source', ',': 'settings' }[event.key.toLowerCase()];
+  const command = { s: event.shiftKey ? 'save-as' : 'save', o: event.shiftKey ? 'folder' : 'open', p: 'quick-open', n: 'new', '/': 'source', ',': 'settings' }[event.key.toLowerCase()];
   if (command) { event.preventDefault(); runCommand(command); }
 });
 bridge.onCommand(runCommand);

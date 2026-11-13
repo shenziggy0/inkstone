@@ -437,3 +437,60 @@ test('moving an open file retains both source and destination history', async t 
   assert.ok(contents.includes('source original'));
   assert.ok(contents.includes('target original'));
 });
+
+test('a failed Save As keeps the original path, text, dirty state and recovery copy', async t => {
+  const { root, store } = await fixture(t);
+  const original = path.join(root, 'docs', 'note.md');
+  const target = path.join(root, 'other', 'occupied.md');
+  await fs.mkdir(path.dirname(original), { recursive: true });
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  const text = '---\ntypora-root-url: assets\n---\n\n![root](/sample.png)\n';
+  await fs.writeFile(original, text);
+  await fs.writeFile(target, '# occupied');
+  const clean = await store.open(original);
+  await store.open(target);
+  await assert.rejects(store.save(clean.id, target), /已在另一个标签页打开/);
+  const doc = store.get(clean.id);
+  assert.equal(doc.path, await fs.realpath(original), '失败后必须仍指向旧路径');
+  assert.equal(doc.content, text, '失败后正文不得被重定位');
+  assert.equal(doc.savedContent, text);
+  assert.equal(doc.dirty, false);
+  assert.equal(await fs.readFile(original, 'utf8'), text, '失败后原文件不得改动');
+  assert.equal(await fs.readFile(target, 'utf8'), '# occupied');
+  assert.equal(await fs.readFile(path.join(store.recoveryDirectory, `${clean.id}.json`), 'utf8').catch(() => null), null, '干净文档失败后不应生成恢复副本');
+
+  // A dirty document must keep its own newer text in the recovery copy as well.
+  const dirtyText = text.replace('\n\n!', '\n\n编辑中\n\n!');
+  await store.update(clean.id, dirtyText);
+  await assert.rejects(store.save(clean.id, target), /已在另一个标签页打开/);
+  assert.equal(store.get(clean.id).content, dirtyText);
+  assert.equal(store.get(clean.id).dirty, true);
+  const recovery = JSON.parse(await fs.readFile(path.join(store.recoveryDirectory, `${clean.id}.json`), 'utf8'));
+  assert.equal(recovery.content, dirtyText, '恢复副本也不得写入迁移后的图根');
+  assert.equal(recovery.path, await fs.realpath(original));
+});
+
+test('Save As preserves the relative image root while migrating a colliding pasted image', async t => {
+  const { root, store } = await fixture(t);
+  const from = path.join(root, 'docs'), to = path.join(root, 'copies');
+  for (const directory of [from, to]) await fs.mkdir(path.join(directory, 'assets'), { recursive: true });
+  await fs.mkdir(path.join(from, 'root'));
+  await fs.writeFile(path.join(from, 'root', 'rooted.png'), 'rooted image');
+  await fs.writeFile(path.join(from, 'assets', 'pasted.png'), 'source image');
+  await fs.writeFile(path.join(to, 'assets', 'pasted.png'), 'existing target image');
+  const original = path.join(from, 'note.md');
+  const target = path.join(to, 'note.md');
+  const text = '---\r\ntypora-root-url: "root"\r\n---\r\n\r\n![root](/rooted.png)\r\n![pasted](assets/pasted.png "caption")\r\n';
+  await fs.writeFile(original, text);
+  const doc = await store.open(original);
+
+  const saved = await store.save(doc.id, target, { migrateAssets: true });
+  assert.deepEqual(saved.imageRootRewrite, { expected: 'root', value: '../docs/root' });
+  assert.deepEqual(saved.rewritten, [{ from: 'assets/pasted.png', to: 'assets/pasted-1.png' }]);
+  assert.equal(await fs.readFile(target, 'utf8'), text
+    .replace('typora-root-url: "root"', 'typora-root-url: "../docs/root"')
+    .replace('assets/pasted.png', 'assets/pasted-1.png'));
+  assert.equal(await fs.readFile(original, 'utf8'), text);
+  assert.equal(await fs.readFile(path.join(to, 'assets', 'pasted.png'), 'utf8'), 'existing target image');
+  assert.equal(await fs.readFile(path.join(to, 'assets', 'pasted-1.png'), 'utf8'), 'source image');
+});

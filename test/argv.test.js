@@ -19,7 +19,15 @@ test('command-line document paths ignore Electron switches and the app directory
 test('relative paths resolve against the caller working directory', () => {
   const working = path.resolve('/workspace/docs');
   assert.deepEqual(parseDocumentPaths(['inkstone', 'chapters/one.markdown'], working), [path.resolve(working, 'chapters/one.markdown')]);
-  assert.deepEqual(parseDocumentPaths(['inkstone', '.\\notes\\today.txt'], working), [path.resolve(working, 'notes/today.txt')]);
+  // `\notes\today.txt` is a Windows-relative spelling. A backslash is only a
+  // separator on Windows: on POSIX the same bytes name one file that happens to
+  // contain backslashes, so the parser must leave that to the host's own rules
+  // instead of inventing separators the platform would not accept.
+  const windowsSpelled = '.\\notes\\today.txt';
+  const expected = process.platform === 'win32'
+    ? path.join(working, 'notes', 'today.txt')
+    : path.join(working, windowsSpelled);
+  assert.deepEqual(parseDocumentPaths(['inkstone', windowsSpelled], working), [expected], '反斜杠路径按宿主平台语义解析');
 });
 
 test('only Markdown and text documents are accepted, once each', () => {

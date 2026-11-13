@@ -2,6 +2,8 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { constants } = require('node:fs');
+// Pure shared parser; also imported by the renderer (src/markdown.js).
+const frontMatter = require('./front-matter.mjs');
 
 const digest = (data) => crypto.createHash('sha256').update(data).digest('hex');
 const inside = (root, candidate) => {
@@ -191,6 +193,7 @@ class DocumentStore {
         if (migration.unresolved?.length) {
           throw new Error(`图片未能迁移，文档未保存：${migration.unresolved.map(item => `${item.name}（${item.reason}）`).join('、')}`);
         }
+        const relocation = relocateImageRoot(migration.content, sourcePath, file);
         if (previous) {
           if (doc.dirty) await this.writeHistory(doc, doc.savedContent);
           if (diskContent !== null && diskContent !== doc.savedContent) await this.writeHistory(doc, diskContent);
@@ -198,16 +201,16 @@ class DocumentStore {
         if (moving) {
           // A confirmed overwrite still retains the previous target version.
           const targetBytes = await missingAsNull(fs.readFile(file));
-          if (targetBytes && !targetBytes.equals(Buffer.from(migration.content))) {
+          if (targetBytes && !targetBytes.equals(Buffer.from(relocation.content))) {
             const targetText = decodeText(targetBytes);
             await this.writeHistory({ path: file, name: path.basename(file) }, targetText);
           }
         }
-        await atomicWrite(file, migration.content);
+        await atomicWrite(file, relocation.content);
         const previousKey = moving ? this.historyKey(doc) : null;
         Object.assign(doc, {
-          path: file, name: path.basename(file), content: migration.content,
-          savedContent: migration.content, version: digest(Buffer.from(migration.content)),
+          path: file, name: path.basename(file), content: relocation.content,
+          savedContent: relocation.content, version: digest(Buffer.from(relocation.content)),
           dirty: false, recovered: false, sourcePath: null
         });
         const warnings = [];
@@ -225,7 +228,7 @@ class DocumentStore {
         } catch (error) {
           warnings.push(`已保存文档，但未能清理临时文件：${error.message}`);
         }
-        const result = this.public(doc);
+        const result = { ...this.public(doc), imageRootRewrite: relocation.imageRootRewrite };
         if (migrateAssets) result.rewritten = migration.renamed;
         if (warnings.length) result.warnings = warnings;
         return result;
@@ -478,6 +481,36 @@ class DocumentStore {
   }
 }
 
+/**
+ * Keep a document-relative `typora-root-url` pointing at the same folder after
+ * the document moved. Absolute and `file:` roots already do; on Windows a move
+ * to another drive falls back to an absolute path, which `path.relative()`
+ * returns by itself.
+ *
+ * The key position comes from electron/front-matter.mjs, the same module the
+ * renderer uses, so this only ever edits the real leading front matter line —
+ * never a code fence or body text that quotes the same line. `imageRootRewrite`
+ * carries the old and new value for the renderer's live buffer, which applies
+ * it only while the line still has the old value.
+ */
+function relocateImageRoot(content, previousPath, nextPath) {
+  const key = frontMatter.imageRootKey(content);
+  if (!key || !key.value || !previousPath || !nextPath) return { content, imageRootRewrite: null };
+  const value = key.value;
+  // Network roots and absolute roots never depend on the document's folder.
+  if (/^file:/i.test(value) || /^[\\/]{2}/.test(value) || path.isAbsolute(value) || path.win32.isAbsolute(value)) {
+    return { content, imageRootRewrite: null };
+  }
+  const previousDirectory = path.dirname(previousPath);
+  const nextDirectory = path.dirname(nextPath);
+  if (previousDirectory === nextDirectory) return { content, imageRootRewrite: null };
+  let nextValue = path.relative(nextDirectory, path.resolve(previousDirectory, value)) || '.';
+  if (path.sep === '\\') nextValue = nextValue.split('\\').join('/');
+  const next = frontMatter.rewriteFrontMatterImageRoot(content, nextValue);
+  if (next === null || next === content) return { content, imageRootRewrite: null };
+  return { content: next, imageRootRewrite: { expected: value, value: nextValue } };
+}
+
 /** Preserve managed relative images without replacing unrelated target files. */
 async function syncAssets(content, previousPath, nextPath, options = {}) {
   const result = { copied: 0, skipped: 0, renamed: [], unresolved: [], content };
@@ -597,4 +630,4 @@ async function listMarkdown(root, base = root, depth = 0, budget = { count: 0 })
   }
   return result;
 }
-module.exports = { DocumentStore, atomicWrite, inside, listMarkdown, syncAssets, HISTORY_LIMIT };
+module.exports = { DocumentStore, atomicWrite, inside, listMarkdown, syncAssets, frontMatterImageRoot: frontMatter.frontMatterImageRoot, imageRootKey: frontMatter.imageRootKey, relocateImageRoot, HISTORY_LIMIT };

@@ -1,6 +1,6 @@
 name: CI
 
-# 每次 push 与 pull_request 都在 Windows 和 macOS 上跑单元测试与前端构建。
+# 每次 push 与 pull_request 都在 Windows、macOS 和 Linux 上跑单元测试与前端构建。
 # 桌面端到端用例 test/desktop.mjs 需要真实显示环境、真实剪贴板和对时序敏感的
 # 像素拖动，因此不放进必过流程：它只在手动触发（workflow_dispatch）时运行，
 # 并且 continue-on-error，失败不会阻塞任何合并。
@@ -23,7 +23,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest]
+        os: [windows-latest, macos-latest, ubuntu-latest]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -74,5 +74,5 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Desktop end-to-end (103 steps)
+      - name: Desktop end-to-end (123 steps)
         run: node test/desktop.mjs

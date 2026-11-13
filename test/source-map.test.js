@@ -20,6 +20,20 @@ test('table cells align across the separator row', () => {
   assert.deepEqual(offsets(source, 'AB12'), [2, 6, 26, 30]);
 });
 
+test('a fenced code body maps to its own source characters, not to the fence', () => {
+  const source = '前文\n\n```js\nconst x = 1;\n```\n';
+  assert.deepEqual(offsets(source, 'const x = 1;'), [...Array(12)].map((_, index) => 10 + index));
+});
+
+test('heading, list and marked paragraph map rendered text to their own source characters', () => {
+  // Each block is aligned against its own source: headings skip `# `, lists
+  // skip `- `, and inline markers are skipped while their content keeps its
+  // identity.
+  assert.deepEqual(offsets('# 标题甲', '标题甲'), [2, 3, 4]);
+  assert.deepEqual(offsets('- 列表一\n- 列表二', '列表一列表二'), [2, 3, 4, 8, 9, 10]);
+  assert.deepEqual(offsets('段落 **加粗** 结尾。', '段落 加粗 结尾。'), [0, 1, 2, 5, 6, 9, 10, 11, 12]);
+});
+
 test('list items align without being confused by generated layout newlines', () => {
   const source = '- alpha\n- beta';
   assert.deepEqual(offsets(source, 'alphabeta'), [2, 3, 4, 5, 6, 10, 11, 12, 13]);
