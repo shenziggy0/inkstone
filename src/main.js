@@ -3,7 +3,8 @@ import 'katex/dist/katex.min.css';
 import { createEditor } from './editor.js';
 import { escapeHTML, headings, statistics, renderMarkdown, renderDiagrams, refreshDiagrams } from './markdown.js';
 import { parseTables, serializeTable, setCell, insertRow, removeRow, insertColumn, removeColumn, setAlignment, columnWidthEdit } from './table.js';
-import { diffHTML } from './diff.js';
+import { compareLines, renderDiffRows, POSITIONAL_DIFF_NOTE } from './diff.js';
+import { rewriteAssetReferences } from '../electron/asset-references.mjs';
 import { parseSections, moveSection } from './outline.js';
 import { welcome } from './welcome.js';
 import { ensureLanguages } from './highlight.js';
@@ -23,7 +24,7 @@ let pendingTable = null, quickFiles = [];
 let searchState = { query: '', caseSensitive: false, regex: false, results: null, busy: false, seq: 0, error: '' };
 let searchTimer = 0;
 // Recent documents (menu + palette) and the debounced session snapshot.
-let recentFiles = [], sessionTimer = 0, lastSessionKey = '';
+let recentFiles = [], lastSessionKey = '', quitting = false;
 // The welcome page is an unmodified document: it never prompts to save, and the
 // first file opened in its place replaces it instead of adding a second tab.
 let welcomeId = null;
@@ -330,7 +331,7 @@ function applyPathUpdates(records) {
     // A file that went to the trash leaves the document unsaved, so its
     // baseline becomes empty and the next save asks for a location.
     if (!record.path) doc.savedContent = '';
-    doc.dirty = doc.content !== doc.savedContent;
+    updateDirty(doc);
   }
   updateChrome();
   saveSession();
@@ -368,23 +369,32 @@ async function runFileOperation(action, target, isDirectory) {
       const before = String(target || '').replace(/^.*[\\/]/, '');
       const name = await askEntryName('重命名', before, '重命名 *.md 时可以省略扩展名，会自动补上。');
       if (!name || name === before) return;
-      const result = await api('renameEntry', target, name);
+      const normalizePath = value => {
+        const normalized = value.replaceAll('\\', '/');
+        return appPlatform === 'win32' ? normalized.toLowerCase() : normalized;
+      };
+      const source = normalizePath(target);
+      const affected = [...documents.values()].filter(doc => {
+        if (!doc.path) return false;
+        const file = normalizePath(doc.path);
+        return isDirectory ? file.startsWith(source + '/') : file === source;
+      }).sort((a, b) => a.id.localeCompare(b.id));
+      const rename = async () => {
+        if (!isDirectory && affected.length) await flush(affected[0]);
+        const result = await api('renameEntry', target, name);
+        if (!result) return;
+        applyPathUpdates(result.documents);
+        const doc = documents.get(result.document?.id);
+        if (doc) await applySavedDocument(doc, result.document);
+        return result;
+      };
+      const operation = affected.reduceRight((next, doc) => () => documentOperation(doc, next), rename);
+      const result = await operation();
+      if (!result) return;
       if (result.entries) folder = { ...folder, entries: result.entries };
-      // Renaming a folder moves every document opened from inside it.
-      applyPathUpdates(result.documents);
-      if (result.kind === 'document' && result.document) {
-        const doc = documents.get(result.document.id);
-        if (doc) {
-          // The same bookkeeping Save As uses: tab name, path and saved baseline
-          // follow the file, and rewritten asset references reach the live text.
-          applyAssetRewrites(doc, result.document.rewritten);
-          doc.path = result.document.path; doc.name = result.document.name;
-          doc.savedContent = result.document.content; doc.dirty = doc.content !== result.document.content;
-          updateChrome();
-        }
-      }
       drawSidebar();
-      notify('已重命名。');
+      const warnings = result.warnings || result.document?.warnings;
+      notify(warnings?.length ? warnings.join('\n') : '已重命名。', !!warnings?.length);
       return;
     }
     if (action === 'trash') {
@@ -453,16 +463,18 @@ async function navigateLink(href) {
 }
 
 /** Persist the restorable session (folder, saved documents, current document). */
-function saveSession() {
+function saveSession(force = false) {
+  if (quitting && !force) return;
   const files = [...documents.values()].filter(doc => doc.path).map(doc => doc.path);
   const key = JSON.stringify([folder?.path || null, files, current()?.path || null]);
-  if (key === lastSessionKey) return;
+  if (!force && key === lastSessionKey) return;
   lastSessionKey = key;
   // Sent right away: the key only changes when the document list does, and the
   // main process coalesces the writes. A debounce here could lose the session
   // when the window closes immediately after closing a document.
-  clearTimeout(sessionTimer);
-  api('saveSession', { folder: folder?.path || null, files, active: current()?.path || null }).catch(() => {});
+  return api('saveSession', { folder: folder?.path || null, files, active: current()?.path || null }).catch(() => {
+    if (lastSessionKey === key) lastSessionKey = '';
+  });
 }
 
 // headings() keeps the outline of the parse that rendered the current version,
@@ -490,7 +502,7 @@ async function addDocument(record) {
   const mount = document.createElement('div'); mount.className = 'editor-mount';
   doc.mount = mount;
   doc.editor = createEditor(mount, doc, content => {
-    doc.content = content; doc.dirty = content !== doc.savedContent; doc.error = '';
+    doc.content = content; updateDirty(doc); doc.error = '';
     clearTimeout(doc.timer);
     doc.timer = setTimeout(async () => {
       try {
@@ -501,7 +513,7 @@ async function addDocument(record) {
     }, 500);
     updateChrome();
     clearTimeout(doc.statsTimer); doc.statsTimer = setTimeout(() => { if (doc.id === activeId) { updateStats(); drawSidebar(); } }, 180);
-  }, selectionChanged, command => runCommand(command), file => insertImage(file));
+  }, selectionChanged, command => runCommand(command), file => insertImage(file, doc), href => navigateLink(href));
   doc.editor.setSpellcheck(prefs.spellcheck);
   activate(doc.id);
 }
@@ -537,11 +549,7 @@ function activate(id) {
 function applyAssetRewrites(doc, rewritten) {
   if (!doc?.editor || !Array.isArray(rewritten) || !rewritten.length) return;
   const before = doc.editor.text();
-  let after = before;
-  for (const entry of rewritten) {
-    if (!entry || typeof entry.from !== 'string' || typeof entry.to !== 'string' || !entry.from) continue;
-    after = after.split(`](${entry.from})`).join(`](${entry.to})`);
-  }
+  const after = rewriteAssetReferences(before, rewritten);
   if (after === before) return;
   // Trim the untouched head and tail so only the reference itself changes.
   let start = 0;
@@ -550,8 +558,39 @@ function applyAssetRewrites(doc, rewritten) {
   while (endBefore > start && endAfter > start && before[endBefore - 1] === after[endAfter - 1]) { endBefore--; endAfter--; }
   doc.editor.applyChange({ from: start, to: endBefore, insert: after.slice(start, endAfter) });
 }
-async function save(doc = current(), saveAs = false) {
-  if (!doc || doc.saving) return;
+function updateDirty(doc) {
+  doc.dirty = !!doc.recovered || doc.content !== doc.savedContent;
+}
+
+function documentOperation(doc, action) {
+  const pending = (doc.operation || Promise.resolve()).catch(() => {}).then(() => {
+    if (documents.get(doc.id) === doc) return action();
+  });
+  doc.operation = pending;
+  return pending.finally(() => {
+    if (doc.operation === pending) delete doc.operation;
+  });
+}
+
+async function applySavedDocument(doc, saved) {
+  applyAssetRewrites(doc, saved.rewritten);
+  doc.path = saved.path;
+  doc.name = saved.name;
+  doc.savedContent = saved.content;
+  doc.recovered = !!saved.recovered;
+  doc.error = '';
+  updateDirty(doc);
+  if (doc.dirty) await flush(doc);
+  doc.editor.view.dispatch({ effects: [] });
+  updateChrome();
+  saveSession();
+}
+
+function save(doc = current(), saveAs = false) {
+  if (doc) return documentOperation(doc, () => saveNow(doc, saveAs));
+}
+
+async function saveNow(doc, saveAs) {
   doc.saving = true;
   try {
     await flush(doc);
@@ -560,22 +599,28 @@ async function save(doc = current(), saveAs = false) {
     // Clashing images may have been renamed to a free name: apply the rewrite to
     // the live text before touching savedContent, otherwise the stale reference
     // would be flushed back into the store on the next save.
-    applyAssetRewrites(doc, saved.rewritten);
-    doc.path = saved.path; doc.name = saved.name; doc.savedContent = saved.content;
-    doc.dirty = doc.content !== saved.content; doc.error = '';
-    if (doc.dirty) await flush(doc);
-    doc.editor.view.dispatch({ effects: [] });
+    await applySavedDocument(doc, saved);
     if (folder) { folder = await api('refreshFolder'); drawSidebar(); }
   } finally { doc.saving = false; updateChrome(); }
 }
-async function closeDocument(id, createReplacement = true) {
-  const doc = documents.get(id); if (!doc) return true;
+async function closeDocument(id, createReplacement = true, includePath = false) {
+  const doc = documents.get(id);
+  if (!doc) return true;
+  return (await documentOperation(doc, () => closeDocumentNow(doc, createReplacement, includePath))) ?? true;
+}
+async function closeDocumentNow(doc, createReplacement, includePath) {
+  const { id } = doc;
   await flush(doc);
-  if (!await api('closeDocument', id)) return false;
+  const closed = await api('closeDocument', id, includePath);
+  if (!closed) return false;
   clearTimeout(doc.timer); clearTimeout(doc.statsTimer); doc.editor.destroy(); documents.delete(id);
   if (documents.size) activate([...documents.keys()].at(-1));
-  else if (createReplacement) await addDocument(await api('newDocument', ''));
-  return true;
+  else {
+    activeId = undefined;
+    if (createReplacement) await addDocument(await api('newDocument', ''));
+    else saveSession();
+  }
+  return closed;
 }
 // External changes are shown one at a time: the queue keeps a second prompt
 // from silently replacing the first, and waits while another dialog is open.
@@ -793,7 +838,7 @@ function quickOpenResults(query = '') {
 async function runQuickItem(element) {
   try {
     if (element.dataset.quickDocument) activate(element.dataset.quickDocument);
-    else if (element.dataset.quickPath) await openDocuments(await api('openDocument', element.dataset.quickPath));
+    else if (element.dataset.quickPath) await openDocuments(await api('openPath', element.dataset.quickPath));
     else if (element.dataset.quickCommand) await runCommand(element.dataset.quickCommand);
   } catch (error) { notify(error.message, true); }
 }
@@ -836,8 +881,10 @@ function tableOperation(op, index) {
   if (op === 'remove-column') pendingTable.table = removeColumn(pendingTable.table, index);
   renderTableDialog();
 }
-async function insertImage(file) {
-  const doc = current(); if (!doc) return;
+function insertImage(file, doc = current()) {
+  if (doc) return documentOperation(doc, () => insertImageNow(file, doc));
+}
+async function insertImageNow(file, doc) {
   try {
     let payload;
     if (file) {
@@ -846,7 +893,10 @@ async function insertImage(file) {
       payload = { data, extension: file.type.split('/')[1].replace('jpeg', 'jpg') };
     }
     const relative = await api('insertImage', doc.id, payload);
-    if (relative) doc.editor.insert(`![图片](${relative})`);
+    if (relative) {
+      doc.editor.insert(`![图片](${relative})`);
+      await flush(doc);
+    }
   } catch (error) { notify(error.message, true); }
 }
 async function exportDocument(format) {
@@ -1045,15 +1095,15 @@ async function runCommand(command, detail) {
         break;
       }
       case 'rename': {
-        await flush();
-        const result = await api('renameDocument', activeId);
-        if (result) {
-          const doc = current();
-          applyAssetRewrites(doc, result.rewritten);
-          doc.path = result.path; doc.name = result.name; doc.savedContent = result.content;
-          doc.dirty = doc.content !== result.content;
-          updateChrome();
-        }
+        const doc = current();
+        if (!doc) break;
+        await documentOperation(doc, async () => {
+          await flush(doc);
+          const result = await api('renameDocument', doc.id);
+          if (!result) return;
+          await applySavedDocument(doc, result);
+          if (result.warnings?.length) notify(result.warnings.join('\n'), true);
+        });
         break;
       }
       case 'reveal': await api('revealDocument', activeId); break;
@@ -1077,22 +1127,59 @@ async function runCommand(command, detail) {
         if (!selectedHistory) break;
         const previous = await api('readHistory', selectedHistory.dir, selectedHistory.name);
         const now = current()?.content || '';
-        showDialog('版本对比', `<p class="dialog-description">− 表示历史版本独有，+ 表示当前版本新增。差异按行计算，可直接看到改动位置。</p>${diffHTML(previous, now)}<div class="dialog-actions"><button data-menu-command="history">返回历史列表</button><button class="primary" data-dismiss>关闭</button></div>`);
+        const { rows, approximate } = compareLines(previous, now);
+        showDialog('版本对比', `<p class="dialog-description">− 表示历史版本独有，+ 表示当前版本新增。${approximate ? POSITIONAL_DIFF_NOTE : ''}</p><div class="diff-view" role="table" aria-label="版本差异"></div><p id="diff-progress" role="status"></p><div class="dialog-actions"><button id="diff-more">继续显示</button><button data-menu-command="history">返回历史列表</button><button class="primary" data-dismiss>关闭</button></div>`);
+        const list = $('#dialog .diff-view');
+        const progress = $('#dialog #diff-progress');
+        const more = $('#dialog #diff-more');
+        let shown = 0;
+        const append = () => {
+          const next = Math.min(shown + 3000, rows.length);
+          list.insertAdjacentHTML('beforeend', renderDiffRows(rows, shown, next));
+          shown = next;
+          progress.textContent = `已显示 ${shown} / ${rows.length} 条`;
+          more.hidden = shown === rows.length;
+        };
+        more.addEventListener('click', append);
+        append();
         break;
       }
       case 'reopen-closed': await openDocuments(await api('reopenClosed')); break;
       case 'trash': { await flush(); const result = await api('trashDocument', activeId); if (result) { Object.assign(current(), result, { savedContent: '' }); updateChrome(); } break; }
       case 'help': showDialog('写作从这里开始', '<div class="help-text"><p>输入 Markdown。离开当前段落后，文字会显示排版；点击排版内容可以继续编辑。正在编辑的段落也保持排版外观，只有把光标移到 <code>#</code>、<code>**</code> 等语法字符旁边时，它们才会显现以便修改。</p><p><kbd>⌘ / Ctrl + S</kbd> 保存 · <kbd>⌘ / Ctrl + F</kbd> 查找与替换 · <kbd>⌘ / Ctrl + /</kbd> 源码模式。</p><p>单击表格单元格即可直接输入，<kbd>Tab</kbd> / <kbd>Shift+Tab</kbd> 在单元格间跳转，<kbd>Enter</kbd> 新增一行；拖动表头右边缘可调整列宽并随文档保存。右键或 <kbd>Alt</kbd> + 单击表格可打开图形化编辑器，命令面板中也能搜索「表格图形化编辑」。</p><p>图片会复制到文档旁的 assets 文件夹。文件保存时会检查磁盘版本，避免覆盖其他程序的修改。</p><p>HTML、PDF 可直接导出，其他格式需要系统中安装 Pandoc。</p><p>已支持整篇上下文渲染（脚注、引用式链接、文内目录、YAML 属性、警示块）、点击排版内容定位到源码字符、跨块拖选、复制为 Markdown / HTML、命令面板、文章列表、自定义 CSS 主题、公式与标题编号、保存历史与外部修改提示。按 ⌘/Ctrl+P 打开命令面板，可搜索命令与文件；双击图片可放大查看；代码块右上角可一键复制。Windows 实机、真实中文输入法和发行签名仍需专项验收。</p></div>'); break;
       case 'system-open': await openDocuments(await api('drainPending')); break;
-      case 'quit':
+      case 'quit': {
         // Acknowledge first: the main process then stops its five second
         // fallback, so a native save prompt may wait for the user indefinitely.
-        await api('quitAck').catch(() => {});
-        // Ask for every dirty document; a cancel aborts the whole application quit.
-        for (const id of [...documents.keys()]) {
-          if (!await closeDocument(id, false)) { await api('cancelQuit').catch(() => {}); return; }
+        if (quitting) break;
+        quitting = true;
+        let finished = false;
+        try {
+          await api('quitAck');
+          await saveSession(true);
+          const active = activeId;
+          const files = [];
+          let activePath = null;
+          for (const id of [...documents.keys()]) {
+            const closed = await closeDocument(id, false, true);
+            if (!closed) return;
+            if (closed.path) {
+              files.push(closed.path);
+              if (id === active) activePath = closed.path;
+            }
+          }
+          await api('saveSession', { folder: folder?.path || null, files, active: activePath });
+          await api('finishQuit');
+          finished = true;
+        } finally {
+          if (!finished) {
+            quitting = false;
+            await saveSession(true);
+            await api('cancelQuit').catch(() => {});
+          }
         }
-        await api('finishQuit'); break;
+        break;
+      }
     }
   } catch (error) { notify(error.message, true); }
 }

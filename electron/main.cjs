@@ -6,7 +6,7 @@ const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const crypto = require('node:crypto');
 const { AsyncLocalStorage } = require('node:async_hooks');
-const { DocumentStore, atomicWrite, inside, listMarkdown, syncAssets } = require('./store.cjs');
+const { DocumentStore, atomicWrite, inside, listMarkdown } = require('./store.cjs');
 const { parseAssetURL, resolveAssetFile, resolveDocumentLink, imageMime, unsavedAssetsDirectory, isNetworkPath, isExecutableExtension } = require('./assets.cjs');
 const { searchFolder, validateEntryName, isMarkdownFile } = require('./search.cjs');
 const { WorkspaceState } = require('./session.cjs');
@@ -126,7 +126,8 @@ function htmlToMarkdown(html) {
  * files next to the document and removes the folder.
  */
 const unsavedAssetsFor = id => unsavedAssetsDirectory(app.getPath('userData'), id);
-const assetOptions = doc => ({ documentPath: doc.path, unsavedDirectory: unsavedAssetsFor(doc.id) });
+const resourcePath = doc => doc.path || doc.sourcePath;
+const assetOptions = doc => ({ documentPath: resourcePath(doc), unsavedDirectory: unsavedAssetsFor(doc.id) });
 
 /** Resolve a document image reference through the shared resolver. */
 async function resolveAsset(doc, src) {
@@ -613,15 +614,34 @@ const findDocumentByPath = file => [...store.documents.values()].find(doc => doc
  * to the trash instead of being deleted outright.
  */
 async function moveDocumentFile(doc, target) {
-  const previous = doc.path;
-  const synced = await syncAssets(doc.content, previous, target);
-  if (synced.content !== doc.content) await store.update(doc.id, synced.content);
-  const result = await store.save(doc.id, target);
-  if (previous) await shell.trashItem(previous);
-  workspace.recordFile(result.path);
-  notified.delete(doc.id);
-  (contextStorage.getStore() || primary)?.misses.delete(doc.id);
-  return { ...result, rewritten: synced.renamed };
+  return saveDocumentFile(doc, target, original => shell.trashItem(original));
+}
+
+async function saveDocumentFile(doc, target, moveSource) {
+  suppressed.add(doc.id);
+  try {
+    const result = await store.save(doc.id, target, { migrateAssets: true, moveSource });
+    rememberFile(result);
+    notified.delete(doc.id);
+    (contextStorage.getStore() || primary)?.misses.delete(doc.id);
+    return result;
+  } finally {
+    setTimeout(() => suppressed.delete(doc.id), 1000);
+  }
+}
+
+/** Collect real files before a folder move so closed documents retain history. */
+async function historyPaths(source, target, directory, historyKeys) {
+  if (!directory) {
+    const from = store.historyKey({ path: source });
+    return historyKeys.has(from) ? [{ from, source, target }] : [];
+  }
+  const records = [];
+  for (const entry of await fs.readdir(source, { withFileTypes: true })) {
+    if (!entry.isFile() && !entry.isDirectory()) continue;
+    records.push(...await historyPaths(path.join(source, entry.name), path.join(target, entry.name), entry.isDirectory(), historyKeys));
+  }
+  return records;
 }
 
 /**
@@ -649,7 +669,9 @@ function registerHandlers() {
     // from a previous crashed session. Live secondary windows keep separate
     // directories, so their active recovery records are never stolen.
     const context = contextStorage.getStore() || primary;
-    const recovered = await store.recoverAll(store === primary?.store);
+    const recovered = await store.recoverAll(store === primary?.store, {
+      isDocumentOpen: id => liveContexts().some(context => context.store !== store && context.store.documents.has(id))
+    });
     // Session restore runs before any command-line document, for the first
     // window only, and never for a file whose unsaved draft was just recovered
     // (the recovery copy takes priority and the file must not open twice).
@@ -660,12 +682,13 @@ function registerHandlers() {
         root = session.folder;
         restored.folder = session.folder;
         restored.entries = await listMarkdown(session.folder).catch(() => []);
-        for (const file of session.files) {
-          if (store.recoveredPaths?.has(file)) continue;
-          try { restored.documents ||= []; restored.documents.push(rememberFile(await store.open(file))); } catch { /* silently skip a vanished file */ }
-        }
-        restored.active = session.active;
       }
+      restored.documents = [];
+      for (const file of session.files) {
+        if (store.recoveredPaths?.has(file)) continue;
+        try { restored.documents.push(rememberFile(await store.open(file))); } catch { /* silently skip a vanished file */ }
+      }
+      restored.active = session.active;
     }
     const opened = [];
     for (const file of pendingFiles.splice(0)) { try { opened.push(rememberFile(await store.open(file))); } catch {} }
@@ -783,21 +806,38 @@ function registerHandlers() {
       const doc = findDocumentByPath(resolved);
       if (doc) return { kind: 'document', document: await moveDocumentFile(doc, next), entries: rememberFolderEntries(await listMarkdown(root)) };
     }
+    const historyKeys = new Set(await fs.readdir(historyDirectory()).catch(error => {
+      if (error.code === 'ENOENT') return [];
+      throw error;
+    }));
+    const history = historyKeys.size ? await historyPaths(resolved, next, stat.isDirectory(), historyKeys) : [];
     await fs.rename(resolved, next);
     // Every document opened from inside a renamed folder keeps pointing at its
     // file: the bytes did not move relative to each other, so the text, the
     // dirty state and the disk version stay valid — only the path changes.
     const documents = [];
+    const warnings = [];
+    const handled = new Set();
     if (stat.isDirectory()) {
       const affected = [...store.documents.values()].filter(doc => doc.path && inside(resolved, doc.path));
       for (const open of affected) {
+        handled.add(store.historyKey(open));
         const moved = await store.rekey(open.id, path.join(next, path.relative(resolved, open.path)));
+        warnings.push(...(moved.warnings || []));
         notified.delete(open.id);
         (contextStorage.getStore() || primary)?.misses.delete(open.id);
         documents.push(moved);
       }
     }
-    return { kind: stat.isDirectory() ? 'folder' : 'file', from: resolved, to: next, documents, entries: rememberFolderEntries(await listMarkdown(root)) };
+    for (const entry of history) {
+      if (handled.has(entry.from)) continue;
+      try {
+        await store.moveHistory(entry.from, store.historyKey({ path: await fs.realpath(entry.target) }));
+      } catch (error) {
+        warnings.push(`“${path.basename(entry.source)}”的保存历史未迁移：${error.message}`);
+      }
+    }
+    return { kind: stat.isDirectory() ? 'folder' : 'file', from: resolved, to: next, documents, warnings, entries: rememberFolderEntries(await listMarkdown(root)) };
   });
   handle('trashEntry', async target => {
     const resolved = await pathInsideRoot(target, { allowRoot: false });
@@ -855,7 +895,7 @@ function registerHandlers() {
   // ── Local document links ──
   handle('resolveLink', async (id, reference) => {
     const doc = store.get(id);
-    const resolved = await resolveDocumentLink(reference, { documentPath: doc.path, unsavedDirectory: unsavedAssetsFor(id) });
+    const resolved = await resolveDocumentLink(reference, assetOptions(doc));
     return { path: resolved, name: path.basename(resolved), markdown: isMarkdownFile(resolved) };
   });
   handle('openLocalFile', async target => {
@@ -880,34 +920,9 @@ function registerHandlers() {
   handle('saveDocument', async (id, saveAs = false) => {
     const doc = store.get(id);
     const file = saveAs || !doc.path ? await selectSave(doc) : doc.path;
-    if (!file) return null;
-    const previousPath = doc.path;
-    // No previous path means the images live in the unsaved-document folder.
-    const unsaved = previousPath ? null : unsavedAssetsFor(id);
-    // Our own atomic write briefly replaces the file; do not report it as an
-    // external change while the disk watcher polls.
-    suppressed.add(id);
-    let rewritten = [];
-    try {
-      // Copy referenced images first: a name collision must be resolved before
-      // the document is written with the rewritten reference.
-      const synced = previousPath
-        ? await syncAssets(store.get(id).content, previousPath, file)
-        : await syncAssets(store.get(id).content, null, file, { fromDirectory: unsaved });
-      if (synced.content !== store.get(id).content) await store.update(id, synced.content);
-      rewritten = synced.renamed;
-      const result = await store.save(id, file);
-      // The document now owns a real path; its temporary images were migrated.
-      if (!previousPath) await removeUnsavedAssets(id);
-      rememberFile(result);
-      notified.delete(id);
-      (contextStorage.getStore() || primary)?.misses.delete(id);
-      // The renderer must apply these to its live text, or the next flush would
-      // put the old reference back into the store and onto the disk.
-      return { ...result, rewritten };
-    } finally { setTimeout(() => suppressed.delete(id), 1000); }
+    return file ? saveDocumentFile(doc, file) : null;
   });
-  handle('closeDocument', async id => {
+  handle('closeDocument', async (id, includePath = false) => {
     const context = contextStorage.getStore() || primary;
     const doc = store.get(id);
     if (doc.dirty) {
@@ -916,13 +931,7 @@ function registerHandlers() {
       if (result.response === 0) {
         const file = doc.path || await selectSave(doc);
         if (!file) return false;
-        // A never-saved document still has its images in the temporary folder;
-        // closing after "保存" must migrate them like the save button does.
-        if (!doc.path) {
-          const synced = await syncAssets(doc.content, null, file, { fromDirectory: unsavedAssetsFor(id) });
-          if (synced.content !== doc.content) await store.update(id, synced.content);
-        }
-        await store.save(id, file);
+        await saveDocumentFile(doc, file);
       }
     }
     await store.close(id);
@@ -933,7 +942,7 @@ function registerHandlers() {
     context?.misses.delete(id);
     // Quitting closes documents too, but those must not fill reopen history.
     if (doc.path && context && !context.quitting) context.recentlyClosed.push(doc.path);
-    return true;
+    return includePath ? { path: doc.path } : true;
   });
   handle('settings', async patch => {
     if (!patch) return preferences;
@@ -1127,7 +1136,6 @@ function registerHandlers() {
     } finally { scanning = false; }
   }, 4000);
   handle('insertImage', async (id, payload) => {
-    const doc = store.get(id);
     let bytes, extension, name;
     if (payload) {
       if (typeof payload.data !== 'string' || payload.data.length > 28 * 1024 * 1024 || !['png', 'jpg', 'jpeg', 'gif', 'webp'].includes(payload.extension)) throw new Error('图片格式不支持或超过 20 MB。');
@@ -1142,11 +1150,14 @@ function registerHandlers() {
     // An unsaved document keeps its images in the application's temporary
     // folder until the first save moves them next to the document; either way
     // the editor gets a plain `assets/<file>` reference it can render at once.
-    const folder = path.join(doc.path ? path.dirname(doc.path) : unsavedAssetsFor(id), 'assets');
-    await fs.mkdir(folder, { recursive: true });
-    const file = `${name.replace(/[^\p{L}\p{N}_-]/gu, '-')}-${require('node:crypto').randomUUID().slice(0, 8)}.${extension}`;
-    await atomicWrite(path.join(folder, file), bytes);
-    return `assets/${file}`;
+    return store.serial(id, async () => {
+      const source = resourcePath(store.get(id));
+      const folder = path.join(source ? path.dirname(source) : unsavedAssetsFor(id), 'assets');
+      await fs.mkdir(folder, { recursive: true });
+      const file = `${name.replace(/[^\p{L}\p{N}_-]/gu, '-')}-${crypto.randomUUID().slice(0, 8)}.${extension}`;
+      await atomicWrite(path.join(folder, file), bytes);
+      return `assets/${file}`;
+    });
   });
   handle('importDocument', async () => {
     const result = await dialog.showOpenDialog(win, { properties: ['openFile'], filters: [{ name: '可导入文档', extensions: ['docx', 'odt', 'html', 'htm', 'epub', 'tex', 'rst', 'md', 'markdown', 'txt'] }] });
@@ -1207,7 +1218,8 @@ function registerHandlers() {
       const output = path.join(temporary, `output.${format}`);
       try {
         await fs.writeFile(source, doc.content);
-        await run('pandoc', [source, '-f', 'markdown+tex_math_dollars', '--standalone', '--resource-path', doc.path ? path.dirname(doc.path) : temporary, '-o', output], { timeout: 60000, maxBuffer: 4 * 1024 * 1024 });
+        const resource = resourcePath(doc);
+        await run('pandoc', [source, '-f', 'markdown+tex_math_dollars', '--standalone', '--resource-path', resource ? path.dirname(resource) : unsavedAssetsFor(id), '-o', output], { timeout: 60000, maxBuffer: 4 * 1024 * 1024 });
         await atomicWrite(result.filePath, await fs.readFile(output));
       } catch (error) { if (error.code === 'ENOENT') throw new Error('导出此格式需要安装 Pandoc（https://pandoc.org/installing.html）。HTML 和 PDF 可直接导出。'); throw error; }
       finally { await fs.rm(temporary, { recursive: true, force: true }); }
@@ -1252,7 +1264,7 @@ else {
         });
         if (!context) return new Response('', { status: 404 });
         const doc = context.store.get(documentId);
-        const file = await resolveAssetFile(reference, { documentPath: doc.path, unsavedDirectory: unsavedAssetsFor(documentId) });
+        const file = await resolveAssetFile(reference, assetOptions(doc));
         return net.fetch(pathToFileURL(file).href);
       } catch { return new Response('', { status: 404 }); }
     });
@@ -1260,11 +1272,13 @@ else {
     session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
     registerHandlers(); installMenu();
     handle('drainPending', async () => Promise.all(pendingFiles.splice(0).map(file => store.open(file).then(record => rememberFile(record)))));
-    handle('finishQuit', () => {
+    handle('finishQuit', async () => {
       // Only this window is finished. Closing it triggers window-all-closed
       // when it was the last one, so other windows keep their save prompts.
       const context = contextStorage.getStore() || primary;
       if (!context) return true;
+      await workspace.writing;
+      await workspace.flush();
       context.allowClose = true;
       settleQuit(context, 'saved');
       if (!context.win.isDestroyed()) context.win.close();

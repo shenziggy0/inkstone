@@ -27,6 +27,19 @@ test('very large documents take the bounded path without throwing', () => {
   assert.equal(rows.at(-1).text, 'extra');
 });
 
+test('history diff compares past line 3000 and identifies positional comparison', () => {
+  const lines = Array.from({ length: 3100 }, (_, i) => `line ${i + 1}`);
+  const before = lines.join('\n');
+  lines[3098] = 'changed line 3099';
+  const after = lines.join('\n');
+  const changed = diffLines(before, after).filter(row => row.type !== 'equal');
+  assert.deepEqual(changed, [
+    { type: 'remove', text: 'line 3099' },
+    { type: 'add', text: 'changed line 3099' }
+  ]);
+  assert.match(diffHTML(before, after), /按行位置比较/);
+});
+
 const DOCUMENT = '前言\n\n# 一\n\n内容一\n\n## 子一\n\n子内容\n\n# 二\n\n内容二\n\n# 三\n\n内容三\n';
 
 test('top-level sections own their subsections', () => {

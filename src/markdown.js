@@ -1,11 +1,4 @@
-import MarkdownIt from 'markdown-it';
-import footnote from 'markdown-it-footnote';
-import taskLists from 'markdown-it-task-lists';
-import texmath from 'markdown-it-texmath';
-import mark from 'markdown-it-mark';
-import sub from 'markdown-it-sub';
-import sup from 'markdown-it-sup';
-import { full as emoji } from 'markdown-it-emoji';
+import { createMarkdownParser } from '../electron/markdown-parser.mjs';
 import { highlightCode } from './highlight.js';
 import katex from 'katex';
 import DOMPurify from 'dompurify';
@@ -94,8 +87,7 @@ export function decodeAssetReference(src) {
 export function assetURL(documentId, src) {
   return `inkstone-asset://${documentId}/${encodeURIComponent(decodeAssetReference(src))}`;
 }
-export const parser = new MarkdownIt({
-  html: true, linkify: true, breaks: false,
+export const parser = createMarkdownParser({
   highlight(code, language) {
     if (language === 'mermaid') return `<pre class="mermaid">${escapeHTML(code)}</pre>`;
     // A language that is not registered yet lands on the escaped fallback; the
@@ -106,38 +98,7 @@ export const parser = new MarkdownIt({
     const content = highlighted.html ?? escapeHTML(code);
     return `<pre class="code-block"><span class="code-language">${escapeHTML(language || 'text')}</span><code class="hljs">${content}</code></pre>`;
   }
-}).use(footnote).use(taskLists, { enabled: true })
-  // Typora 1.11+ accepts both $…$ / $$…$$ and \(…\) / \[…\].
-  .use(texmath, { engine: katex, delimiters: ['dollars', 'brackets'], katexOptions: { throwOnError: false, trust: false } })
-  .use(mark).use(sub).use(sup).use(emoji);
-
-// Typora renders local images referenced as `file:///…` URLs. markdown-it drops
-// any `file:` destination before it becomes an image token, so allow that one
-// scheme here; opening such a link still goes through the `openExternal`
-// allow-list (https/http/mailto only), so this only affects image rendering.
-const defaultValidateLink = parser.validateLink.bind(parser);
-parser.validateLink = url => /^file:/i.test(url) || defaultValidateLink(url);
-
-// ── YAML Front Matter ──────────────────────────────────────────────────────
-// Registered before `hr` so a leading `---` block is metadata, not a rule.
-parser.block.ruler.before('hr', 'front_matter', (state, startLine, endLine, silent) => {
-  if (startLine !== 0 || state.blkIndent !== 0) return false;
-  const first = state.src.slice(state.bMarks[0] + state.tShift[0], state.eMarks[0]).trim();
-  if (first !== '---') return false;
-  let close = -1;
-  for (let line = 1; line < endLine; line++) {
-    const text = state.src.slice(state.bMarks[line] + state.tShift[line], state.eMarks[line]).trim();
-    if (text === '---' || text === '...') { close = line; break; }
-  }
-  if (close < 0) return false;
-  if (silent) return true;
-  const token = state.push('front_matter', '', 0);
-  token.map = [0, close + 1];
-  token.content = state.getLines(0, close + 1, state.blkIndent, false);
-  token.hidden = true;
-  state.line = close + 1;
-  return true;
-}, { alt: ['paragraph', 'reference', 'blockquote', 'list'] });
+});
 
 parser.renderer.rules.front_matter = (tokens, index) => {
   const raw = tokens[index].content.replace(/^---[^\n]*\r?\n/, '').replace(/\r?\n(?:---|\.\.\.)\s*$/, '');
@@ -169,32 +130,33 @@ parser.renderer.rules.blockquote_open = (tokens, index, options, env, self) => {
 };
 
 const slugify = title => title.toLowerCase().replace(/[^\p{L}\p{N}\s_-]/gu, '').replace(/\s+/g, '-');
-const headingRule = parser.renderer.rules.heading_open || ((tokens, index, options, _env, self) => self.renderToken(tokens, index, options));
-parser.renderer.rules.heading_open = (tokens, index, options, env, self) => {
-  const title = tokens[index + 1]?.content || '';
-  const slug = slugify(title);
-  env.slugs ||= {};
-  const count = env.slugs[slug] || 0;
-  env.slugs[slug] = count + 1;
-  tokens[index].attrSet('id', count ? `${slug}-${count}` : slug);
-  return headingRule(tokens, index, options, env, self);
-};
+// Assign anchors after parsing the full document, including footnote headings.
+// Cached blocks can then skip rendering without changing the IDs of other blocks.
+parser.core.ruler.push('inkstone_heading_ids', ({ tokens }) => {
+  const nextSuffix = new Map();
+  const used = new Set();
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index];
+    if (token.type !== 'heading_open') continue;
+    const slug = slugify(tokens[index + 1]?.content || '') || 'heading';
+    let suffix = nextSuffix.get(slug) ?? 0;
+    let id = suffix ? `${slug}-${suffix}` : slug;
+    while (used.has(id)) id = `${slug}-${++suffix}`;
+    nextSuffix.set(slug, suffix + 1);
+    used.add(id);
+    token.attrSet('id', id);
+  }
+});
 
 /**
- * Outline entries for an already parsed token stream. This reproduces the
- * document-wide slug counter of the `heading_open` rule above, so the sidebar,
- * the breadcrumb and [TOC] can share the parse that rendered the document
- * instead of running the whole file through markdown-it a second time.
+ * Outline entries share the IDs assigned to the rendered heading tokens.
  */
 export function headingsFromTokens(tokens) {
-  const result = [], slugs = {};
+  const result = [];
   for (let i = 0; i < tokens.length; i++) {
     if (tokens[i].type !== 'heading_open' || !tokens[i].map) continue;
     const title = tokens[i + 1]?.content || '';
-    const slug = slugify(title);
-    const count = slugs[slug] || 0;
-    slugs[slug] = count + 1;
-    result.push({ title, level: Number(tokens[i].tag.slice(1)), line: tokens[i].map[0] + 1, id: count ? `${slug}-${count}` : slug });
+    result.push({ title, level: Number(tokens[i].tag.slice(1)), line: tokens[i].map[0] + 1, id: tokens[i].attrGet('id') });
   }
   return result;
 }
@@ -216,8 +178,6 @@ export function headings(source) {
 }
 
 export const tocItemsFromHeadings = items => items.map(h => `<li style="margin-left:${(h.level - 1) * 12}px"><a href="#${escapeHTML(h.id)}" data-line="${h.line}">${escapeHTML(h.title)}</a></li>`).join('');
-
-const tocItems = source => tocItemsFromHeadings(headings(source));
 
 function footnoteTitles(source, env) {
   const definitions = new Map();
@@ -305,10 +265,13 @@ function finalizeHTML(html, documentId, toc, footnotes = [], options = {}) {
 }
 
 export function renderMarkdown(source, documentId, options = {}) {
-  const text = source.replace(/^\uFEFF/, '');
+  const text = normalized(source);
   const env = {};
-  const html = parser.render(text, env);
-  return injectColumnWidths(finalizeHTML(html, documentId, tocItems(text), footnoteTitles(text, env), options), readColumnWidths(text));
+  const tokens = parser.parse(text, env);
+  const items = headingsFromTokens(tokens);
+  outlineCache = { key: text, items };
+  const html = parser.renderer.render(tokens, parser.options, env);
+  return injectColumnWidths(finalizeHTML(html, documentId, tocItemsFromHeadings(items), footnoteTitles(text, env), options), readColumnWidths(text));
 }
 
 /**
@@ -335,11 +298,8 @@ export function groupTokens(tokens) {
  * widths and the document id used for asset URLs. When this string is
  * unchanged, a block that did not change renders to identical HTML.
  *
- * Heading ids are deliberately not in here: a heading id only depends on its
- * own title plus how many earlier headings share its slug, and [TOC] is the
- * only block that needs the whole list. Both are handled per block, so typing
- * a new heading refreshes that heading and the table of contents instead of
- * the entire document.
+ * The cache key for each block includes its assigned heading IDs. The [TOC]
+ * cache key also includes the full outline, keeping unrelated blocks reusable.
  */
 export function globalSignature({ tokens = [], env = {}, documentId = '', widths = [] } = {}) {
   const references = env.references || {};
@@ -482,29 +442,20 @@ export function prepareDocument(source, documentId) {
   const widths = readColumnWidths(text);
   const groups = groupTokens(tokens);
   const lines = text.split('\n');
-  // Per-block inputs that come from the heading sequence: a heading's anchor
-  // depends on how many earlier headings share its slug, and a [TOC] block
-  // lists all of them. Nothing else in a block's HTML depends on the outline.
-  // Tokens are walked in the same order the renderer assigns ids, including
-  // headings that live inside a footnote body.
-  const slugs = {};
+  // A block may contain both headings and a TOC, for example inside a quote.
   let tocContext = null;
   for (const group of groups) {
     group.source = lines.slice(group.start, group.end).join('\n');
     const anchors = [];
-    for (let index = 0; index < group.tokens.length; index++) {
-      const token = group.tokens[index];
-      if (token.type !== 'heading_open') continue;
-      const slug = slugify(group.tokens[index + 1]?.content || '');
-      const count = slugs[slug] || 0;
-      slugs[slug] = count + 1;
-      anchors.push(`${slug}:${count}`);
+    for (const token of group.tokens) {
+      if (token.type === 'heading_open') anchors.push(token.attrGet('id'));
     }
-    if (anchors.length) group.context = `a\u0000${anchors.join('\u0001')}`;
-    else if (/\[toc\]/i.test(group.source)) {
+    group.context = anchors.length ? `a\u0000${anchors.join('\u0001')}` : '';
+    if (/\[toc\]/i.test(group.source)) {
       tocContext ??= items.map(item => `${item.id}\u0002${item.title}\u0002${item.line}`).join('\u0001');
-      group.context = `toc\u0000${tocContext}`;
-    } else group.context = '';
+      if (group.context) group.context += '\u0000';
+      group.context += `toc\u0000${tocContext}`;
+    }
   }
   return {
     text, env, tokens, items, groups, widths,

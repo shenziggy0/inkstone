@@ -348,3 +348,92 @@ test('rekey points a document at a renamed folder and moves its history', async 
   assert.equal(saved.path, await fs.realpath(path.join(after, 'x.md')));
   assert.equal(await fs.readFile(path.join(after, 'x.md'), 'utf8'), 'after rename');
 });
+test('two stores sharing a file reject the losing concurrent save and retain its draft', async t => {
+  const { root, store } = await fixture(t);
+  const other = new DocumentStore(path.join(root, 'other'));
+  const file = path.join(root, 'shared.md');
+  await fs.writeFile(file, 'base');
+  const a = await store.open(file), b = await other.open(file);
+  await store.update(a.id, 'window A');
+  await other.update(b.id, 'window B');
+  const results = await Promise.allSettled([store.save(a.id), other.save(b.id)]);
+  assert.equal(results.filter(result => result.status === 'fulfilled').length, 1);
+  const lost = results[0].status === 'rejected' ? [store, a] : [other, b];
+  assert.equal(lost[0].get(lost[1].id).dirty, true);
+  const record = JSON.parse(await fs.readFile(path.join(lost[0].recoveryDirectory, lost[1].id + '.json')));
+  assert.equal(record.content, lost[0].get(lost[1].id).content);
+  assert.notEqual(await fs.readFile(file, 'utf8'), record.content);
+});
+
+test('a recovered empty named draft stays dirty across updates and restarts', async t => {
+  const { root, store } = await fixture(t);
+  const file = path.join(root, 'original.md');
+  await fs.writeFile(file, 'base');
+  const original = await store.open(file);
+  await store.update(original.id, '');
+  const second = new DocumentStore(store.recoveryDirectory);
+  const [draft] = await second.recoverAll();
+  assert.equal(draft.path, null);
+  assert.equal(draft.recovered, true);
+  assert.equal(draft.dirty, true);
+  assert.equal((await second.update(draft.id, '')).dirty, true);
+  const third = new DocumentStore(store.recoveryDirectory);
+  const [again] = await third.recoverAll();
+  assert.equal(again.dirty, true);
+  assert.equal(third.get(again.id).sourcePath, original.path);
+  const saved = await third.save(again.id, path.join(root, 'copy.md'));
+  assert.equal(Boolean(saved.recovered), false);
+  assert.equal(await fs.readFile(file, 'utf8'), 'base');
+});
+
+test('asset collisions rewrite parsed destinations and reference definitions while preserving CRLF and code', async t => {
+  const { root } = await fixture(t);
+  const from = path.join(root, 'a'), to = path.join(root, 'b');
+  for (const dir of [from, to]) await fs.mkdir(path.join(dir, 'assets'), { recursive: true });
+  await fs.writeFile(path.join(from, 'assets', 'p 图.png'), 'local');
+  await fs.writeFile(path.join(to, 'assets', 'p 图.png'), 'existing');
+  const content = '\uFEFF![a](<assets/p 图.png> "title")\r\n\r\n![b][pic]\r\n\r\n[pic]: <assets/p 图.png>\r\n\r\n```md\r\n![a](<assets/p 图.png> "title")\r\n```\r\n';
+  const result = await syncAssets(content, path.join(from, 'note.md'), path.join(to, 'note.md'));
+  assert.equal(result.copied, 1);
+  assert.equal(result.content, '\uFEFF![a](<assets/p%20%E5%9B%BE-1.png> "title")\r\n\r\n![b][pic]\r\n\r\n[pic]: <assets/p%20%E5%9B%BE-1.png>\r\n\r\n```md\r\n![a](<assets/p 图.png> "title")\r\n```\r\n');
+  assert.equal(await fs.readFile(path.join(to, 'assets', 'p 图-1.png'), 'utf8'), 'local');
+});
+
+test('first save preserves unrecognized temporary images and rejects incomplete migration', async t => {
+  const { root } = await fixture(t);
+  const unsavedAssetsDirectory = path.join(root, 'unsaved-assets');
+  const store = new DocumentStore(path.join(root, '.recovery'), { unsavedAssetsDirectory });
+  const doc = store.create();
+  await store.update(doc.id, '![a](assets/missing.png "title")');
+  const temporary = path.join(unsavedAssetsDirectory, doc.id, 'assets');
+  await fs.mkdir(temporary, { recursive: true });
+  await fs.writeFile(path.join(temporary, 'extra.png'), 'private image');
+  const target = path.join(root, 'copy.md');
+  await assert.rejects(store.save(doc.id, target, { migrateAssets: true }), /missing\.png/);
+  await assert.rejects(fs.access(target));
+  assert.equal(await fs.readFile(path.join(temporary, 'extra.png'), 'utf8'), 'private image');
+  assert.equal(store.get(doc.id).dirty, true);
+  await fs.writeFile(path.join(temporary, 'missing.png'), 'referenced image');
+  await store.save(doc.id, target, { migrateAssets: true });
+  assert.equal(await fs.readFile(path.join(root, 'assets', 'extra.png'), 'utf8'), 'private image');
+  await assert.rejects(fs.access(temporary), { code: 'ENOENT' });
+});
+
+test('moving an open file retains both source and destination history', async t => {
+  const { root, store } = await fixture(t);
+  const source = path.join(root, 'old.md'), target = path.join(root, 'new.md');
+  await fs.writeFile(source, 'source original');
+  await fs.writeFile(target, 'target original');
+  const a = await store.open(source), b = await store.open(target);
+  await store.update(a.id, 'source edited');
+  await store.save(a.id);
+  await store.update(b.id, 'target edited');
+  await store.save(b.id);
+  await store.close(b.id);
+  const moved = await store.save(a.id, target, { moveSource: file => fs.rename(file, path.join(root, 'trash.md')) });
+  assert.equal(await fs.readFile(path.join(root, 'trash.md'), 'utf8'), 'source edited');
+  const versions = await store.listHistory(moved.id);
+  const contents = await Promise.all(versions.map(version => store.readHistory(version.dir, version.name)));
+  assert.ok(contents.includes('source original'));
+  assert.ok(contents.includes('target original'));
+});

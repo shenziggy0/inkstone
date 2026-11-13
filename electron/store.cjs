@@ -1,6 +1,7 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { constants } = require('node:fs');
 
 const digest = (data) => crypto.createHash('sha256').update(data).digest('hex');
 const inside = (root, candidate) => {
@@ -20,6 +21,26 @@ const HISTORY_LIMIT = 50;
 // Document ids double as folder names under `unsaved-assets/`, so they are
 // validated before ever being joined into a path.
 const SAFE_DOCUMENT_ID = /^[0-9a-f-]{36}$/i;
+const fileQueues = new Map();
+const pathKey = file => process.platform === 'win32' ? path.resolve(file).toLowerCase() : path.resolve(file);
+
+async function queueTask(queues, key, action) {
+  const pending = (queues.get(key) || Promise.resolve()).catch(() => {}).then(action);
+  queues.set(key, pending);
+  try { return await pending; } finally { if (queues.get(key) === pending) queues.delete(key); }
+}
+
+function withFileLocks(files, action) {
+  const keys = [...new Set(files.map(pathKey))].sort();
+  return keys.reduceRight((next, key) => () => queueTask(fileQueues, key, next), action)();
+}
+
+async function missingAsNull(promise) {
+  return promise.catch(error => {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  });
+}
 
 async function atomicWrite(file, content) {
   const temporary = path.join(path.dirname(file), `.${path.basename(file)}.${crypto.randomUUID()}.tmp`);
@@ -56,9 +77,7 @@ class DocumentStore {
     this.locks = new Map();
   }
   async serial(id, action) {
-    const pending = (this.locks.get(id) || Promise.resolve()).catch(() => {}).then(action);
-    this.locks.set(id, pending);
-    try { return await pending; } finally { if (this.locks.get(id) === pending) this.locks.delete(id); }
+    return queueTask(this.locks, id, action);
   }
   /**
    * @param {string} content initial text
@@ -69,8 +88,12 @@ class DocumentStore {
    */
   create(content = '', file = null, options = {}) {
     const name = file ? path.basename(file) : (options.name || '未命名.md');
-    const dirty = typeof options.dirty === 'boolean' ? options.dirty : !!content;
-    const doc = { id: crypto.randomUUID(), path: file, name, content, savedContent: dirty ? '' : content, version: null, dirty };
+    const recovered = options.recovered === true;
+    const dirty = recovered || (typeof options.dirty === 'boolean' ? options.dirty : !!content);
+    const doc = {
+      id: crypto.randomUUID(), path: file, name, content, savedContent: dirty ? '' : content,
+      version: null, dirty, recovered, sourcePath: options.sourcePath || null
+    };
     this.documents.set(doc.id, doc);
     return this.public(doc);
   }
@@ -79,7 +102,11 @@ class DocumentStore {
     if (!doc) throw new Error('文档已关闭，请重新打开。');
     return doc;
   }
-  public(doc) { return { id: doc.id, path: doc.path, name: doc.name, content: doc.content, dirty: doc.dirty }; }
+  public(doc) {
+    const record = { id: doc.id, path: doc.path, name: doc.name, content: doc.content, dirty: doc.dirty };
+    if (doc.recovered) record.recovered = true;
+    return record;
+  }
   async open(file) {
     const resolved = await fs.realpath(file);
     const existing = [...this.documents.values()].find(d => d.path === resolved);
@@ -98,7 +125,7 @@ class DocumentStore {
     return this.serial(id, async () => {
       const doc = this.get(id);
       doc.content = content;
-      doc.dirty = content !== doc.savedContent;
+      doc.dirty = doc.recovered || content !== doc.savedContent;
       await this.recover(doc);
       return this.public(doc);
     });
@@ -107,8 +134,11 @@ class DocumentStore {
     if (!this.recoveryDirectory) return;
     await fs.mkdir(this.recoveryDirectory, { recursive: true });
     const file = path.join(this.recoveryDirectory, `${doc.id}.json`);
-    if (!doc.dirty) { await fs.unlink(file).catch(() => {}); return; }
-    await atomicWrite(file, JSON.stringify({ ...this.public(doc), updatedAt: new Date().toISOString() }));
+    if (!doc.dirty) { await missingAsNull(fs.unlink(file)); return; }
+    await atomicWrite(file, JSON.stringify({
+      ...this.public(doc), schemaVersion: 2, sourcePath: doc.sourcePath,
+      recovered: doc.recovered, updatedAt: new Date().toISOString()
+    }));
   }
   /**
    * Keep the current in-memory text as a copy nobody prunes, so reloading the
@@ -123,7 +153,7 @@ class DocumentStore {
     await atomicWrite(file, doc.content);
     return file;
   }
-  async save(id, target) {
+  async save(id, target, { migrateAssets = false, moveSource } = {}) {
     return this.serial(id, async () => {
       const doc = this.get(id);
       const requestedFile = target || doc.path;
@@ -134,24 +164,72 @@ class DocumentStore {
         if (error.code !== 'ENOENT') throw error;
         return path.join(await fs.realpath(path.dirname(requestedFile)), path.basename(requestedFile));
       });
-      let diskContent = null;
-      if (file === doc.path && doc.version !== null) {
-        const current = await fs.readFile(file).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
-        if (current === null || digest(current) !== doc.version) throw new Error('文件已被其他程序修改或删除。为避免覆盖，请另存为，或重新打开磁盘版本。');
-        // Remember the version we are about to replace whenever it differs from
-        // the local baseline (an accepted external edit, for example).
-        try { diskContent = decodeText(current); } catch { diskContent = null; }
-      }
-      const opened = [...this.documents.values()].find(d => d.id !== id && d.path === file);
-      if (opened) throw new Error('目标文件已在另一个标签页打开，请选择其他名称。');
-      if (doc.path) {
-        if (doc.dirty) await this.writeHistory(doc, doc.savedContent);
-        if (diskContent !== null && diskContent !== doc.savedContent) await this.writeHistory(doc, diskContent);
-      }
-      await atomicWrite(file, doc.content);
-      Object.assign(doc, { path: file, name: path.basename(file), savedContent: doc.content, version: digest(Buffer.from(doc.content)), dirty: false });
-      await this.recover(doc);
-      return this.public(doc);
+      const previous = doc.path;
+      const sameFile = previous && pathKey(previous) === pathKey(file);
+      const moving = Boolean(moveSource && previous && !sameFile);
+      return withFileLocks(previous ? [previous, file] : [file], async () => {
+        let diskContent = null;
+        if ((sameFile || moving) && doc.version !== null) {
+          const current = await missingAsNull(fs.readFile(previous));
+          if (current === null || digest(current) !== doc.version) throw new Error('文件已被其他程序修改或删除。为避免覆盖，请另存为，或重新打开磁盘版本。');
+          // Keep the accepted external revision when it differs from our baseline.
+          try { diskContent = decodeText(current); } catch { diskContent = null; }
+        }
+        const opened = [...this.documents.values()].find(other => other.id !== id && other.path && pathKey(other.path) === pathKey(file));
+        if (opened) throw new Error('目标文件已在另一个标签页打开，请选择其他名称。');
+
+        const sourcePath = previous || doc.sourcePath;
+        const privateAssets = migrateAssets && !sourcePath && this.unsavedAssetsDirectory
+          ? path.join(this.unsavedAssetsDirectory, id) : null;
+        if (privateAssets) {
+          const privateRoot = await missingAsNull(fs.realpath(privateAssets));
+          if (privateRoot && inside(privateRoot, file)) throw new Error('不能保存到本草稿的临时图片目录。');
+        }
+        const migration = migrateAssets
+          ? await syncAssets(doc.content, sourcePath, file, { fromDirectory: privateAssets })
+          : { content: doc.content, renamed: [] };
+        if (migration.unresolved?.length) {
+          throw new Error(`图片未能迁移，文档未保存：${migration.unresolved.map(item => `${item.name}（${item.reason}）`).join('、')}`);
+        }
+        if (previous) {
+          if (doc.dirty) await this.writeHistory(doc, doc.savedContent);
+          if (diskContent !== null && diskContent !== doc.savedContent) await this.writeHistory(doc, diskContent);
+        }
+        if (moving) {
+          // A confirmed overwrite still retains the previous target version.
+          const targetBytes = await missingAsNull(fs.readFile(file));
+          if (targetBytes && !targetBytes.equals(Buffer.from(migration.content))) {
+            const targetText = decodeText(targetBytes);
+            await this.writeHistory({ path: file, name: path.basename(file) }, targetText);
+          }
+        }
+        await atomicWrite(file, migration.content);
+        const previousKey = moving ? this.historyKey(doc) : null;
+        Object.assign(doc, {
+          path: file, name: path.basename(file), content: migration.content,
+          savedContent: migration.content, version: digest(Buffer.from(migration.content)),
+          dirty: false, recovered: false, sourcePath: null
+        });
+        const warnings = [];
+        if (moving) {
+          try {
+            await this.moveHistory(previousKey, this.historyKey(doc));
+            await moveSource(previous);
+          } catch (error) {
+            warnings.push(`已保存到新位置，但移动未完成：${error.message}`);
+          }
+        }
+        try {
+          await this.recover(doc);
+          if (privateAssets) await fs.rm(privateAssets, { recursive: true, force: true });
+        } catch (error) {
+          warnings.push(`已保存文档，但未能清理临时文件：${error.message}`);
+        }
+        const result = this.public(doc);
+        if (migrateAssets) result.rewritten = migration.renamed;
+        if (warnings.length) result.warnings = warnings;
+        return result;
+      });
     });
   }
   /**
@@ -173,19 +251,47 @@ class DocumentStore {
       doc.path = resolved;
       doc.name = path.basename(resolved);
       const nextKey = this.historyKey(doc);
-      if (previousKey !== nextKey) await this.moveHistory(previousKey, nextKey);
-      await this.recover(doc);
-      return this.public(doc);
+      const warnings = [];
+      try {
+        if (previousKey !== nextKey) await this.moveHistory(previousKey, nextKey);
+      } catch (error) {
+        warnings.push(`已更新路径，但历史迁移未完成：${error.message}`);
+      }
+      try { await this.recover(doc); }
+      catch (error) { warnings.push(`已更新路径，但恢复记录未能更新：${error.message}`); }
+      return { ...this.public(doc), ...(warnings.length ? { warnings } : {}) };
     });
   }
-  /** Move one history folder to the key of the renamed file, never merging. */
+  /** Copy all recognized entries before removing the source history. */
   async moveHistory(fromKey, toKey) {
+    if (fromKey === toKey) return false;
+    if (!/^[0-9a-f]{16}$/.test(fromKey) || !/^[0-9a-f]{16}$/.test(toKey)) throw new Error('历史目录键无效。');
     const from = path.join(this.historyDirectory, fromKey);
-    const stat = await fs.stat(from).catch(() => null);
-    if (!stat?.isDirectory()) return false;
     const to = path.join(this.historyDirectory, toKey);
-    if (await fs.stat(to).catch(() => null)) return false;
-    return fs.rename(from, to).then(() => true).catch(() => false);
+    return withFileLocks([from, to], async () => {
+      const entries = await missingAsNull(fs.readdir(from, { withFileTypes: true }));
+      if (!entries) return false;
+      const versions = entries.filter(entry => entry.isFile() && HISTORY_ENTRY.test(entry.name));
+      if (!versions.length) return false;
+      await fs.mkdir(to, { recursive: true });
+      for (const entry of versions) {
+        const source = path.join(from, entry.name);
+        const destination = path.join(to, entry.name);
+        try {
+          await fs.copyFile(source, destination, constants.COPYFILE_EXCL);
+        } catch (error) {
+          if (error.code !== 'EEXIST') throw error;
+          const bytes = await fs.readFile(source);
+          if ((await fs.readFile(destination)).equals(bytes)) continue;
+          const [, stamp, , name] = HISTORY_ENTRY.exec(entry.name);
+          await fs.copyFile(source, path.join(to, `${stamp}-${crypto.randomUUID()}-${name}`), constants.COPYFILE_EXCL);
+        }
+      }
+      for (const entry of versions) await missingAsNull(fs.unlink(path.join(from, entry.name)));
+      await fs.rmdir(from).catch(() => {});
+      await this.pruneHistory(to);
+      return true;
+    });
   }
   /**
    * Re-read the on-disk version into an already-open document. A dirty document
@@ -307,27 +413,20 @@ class DocumentStore {
     });
   }
   /**
-   * Move the pasted images of an unsaved document to the id of its recovered
-   * copy. A crash leaves the pictures under the old id and recovery always
-   * creates a new document, so without this the draft comes back with broken
-   * images and the folder is pruned a week later. When the old document is
-   * still open in this process (a renderer reload keeps the store entry alive)
-   * the folder is copied instead of moved, so neither document loses it.
+   * Copy the old draft's assets first. The caller retires the source only
+   * after the new recovery record has been written successfully.
    */
   async carryUnsavedAssets(fromId, toId) {
     if (!this.unsavedAssetsDirectory || !SAFE_DOCUMENT_ID.test(fromId || '') || !SAFE_DOCUMENT_ID.test(toId || '') || fromId === toId) return false;
     const source = path.join(this.unsavedAssetsDirectory, fromId);
     const target = path.join(this.unsavedAssetsDirectory, toId);
-    const stat = await fs.stat(source).catch(() => null);
-    if (!stat?.isDirectory()) return false;
-    if (await fs.stat(target).catch(() => null)) return false;
-    try {
-      if (this.documents.has(fromId)) await fs.cp(source, target, { recursive: true });
-      else await fs.rename(source, target);
-      return true;
-    } catch { return false; }
+    const stat = await missingAsNull(fs.lstat(source));
+    if (!stat) return false;
+    if (!stat.isDirectory()) throw new Error('恢复图片目录无效。');
+    await fs.cp(source, target, { recursive: true, errorOnExist: true, force: false });
+    return true;
   }
-  async recoverAll(includeNested = false) {
+  async recoverAll(includeNested = false, { isDocumentOpen = () => false } = {}) {
     if (!this.recoveryDirectory) return [];
     await fs.mkdir(this.recoveryDirectory, { recursive: true });
     const recovered = [];
@@ -345,96 +444,137 @@ class DocumentStore {
     };
     await collect(this.recoveryDirectory);
     for (const file of files) {
+      let doc;
       try {
         const record = JSON.parse(await fs.readFile(file, 'utf8'));
         if (typeof record.content !== 'string') continue;
-        if (typeof record.path === 'string') this.recoveredPaths.add(record.path);
-        const doc = this.create(record.content);
-        this.get(doc.id).name = `恢复-${record.name || '未命名.md'}`;
-        // Pasted images follow the document to its new id before anything renders.
-        await this.carryUnsavedAssets(record.id, doc.id);
+        if (isDocumentOpen(record.id)) continue;
+        const { isNetworkPath } = require('./assets.cjs');
+        const origin = record.sourcePath || record.path;
+        const sourcePath = typeof origin === 'string' && path.isAbsolute(origin) && !isNetworkPath(origin) ? origin : null;
+        const name = path.basename(typeof record.name === 'string' ? record.name : '') || '未命名.md';
+        doc = this.create(record.content, null, {
+          name: record.recovered ? name : `恢复-${name}`, recovered: true, sourcePath
+        });
+        const copied = await this.carryUnsavedAssets(record.id, doc.id);
         await this.recover(this.get(doc.id));
-        recovered.push(this.public(this.get(doc.id)));
+        // If retirement fails, keep only the original recovery entry.
         await fs.unlink(file);
-      } catch { /* Keep unreadable recovery files for manual recovery. */ }
+        if (sourcePath) this.recoveredPaths.add(sourcePath);
+        recovered.push(doc);
+        if (copied && !this.documents.has(record.id)) {
+          await fs.rm(path.join(this.unsavedAssetsDirectory, record.id), { recursive: true, force: true }).catch(() => {});
+        }
+      } catch {
+        if (!doc) continue;
+        this.documents.delete(doc.id);
+        await fs.unlink(path.join(this.recoveryDirectory, `${doc.id}.json`)).catch(() => {});
+        if (this.unsavedAssetsDirectory) {
+          await fs.rm(path.join(this.unsavedAssetsDirectory, doc.id), { recursive: true, force: true }).catch(() => {});
+        }
+      }
     }
     return recovered;
   }
 }
 
-/**
- * Keep relative `assets/` images usable when a document is saved or renamed
- * into a different directory. Only references actually used by the document
- * are copied; the strict basename check prevents path traversal. A target that
- * already holds different bytes is never overwritten: a free name is picked and
- * the reference inside the returned content is rewritten to match. `renamed`
- * lists those reference rewrites so the renderer can mirror them in the editor.
- *
- * `options.fromDirectory` replaces `path.dirname(previousPath)`: an unsaved
- * document has no previous path, but its pasted images still live in the
- * per-document temporary folder, which is then migrated by the same rules.
- */
+/** Preserve managed relative images without replacing unrelated target files. */
 async function syncAssets(content, previousPath, nextPath, options = {}) {
-  const result = { copied: 0, skipped: 0, renamed: [], content };
+  const result = { copied: 0, skipped: 0, renamed: [], unresolved: [], content };
   if (!nextPath || typeof content !== 'string') return result;
   const fromDir = options.fromDirectory || (previousPath ? path.dirname(previousPath) : null);
   if (!fromDir) return result;
   const toDir = path.dirname(nextPath);
-  if (fromDir === toDir) return result;
-  const references = [];
-  for (const match of content.matchAll(/!\[[^\]]*\]\(([^)\s]+)\)/g)) {
-    let reference;
-    try { reference = decodeURIComponent(match[1]); } catch { continue; }
-    if (!/^assets\/[^/\\]+$/.test(reference)) continue;
-    const name = path.basename(reference);
-    if (!name || name === '.' || name === '..') continue;
-    references.push({ raw: match[1], name });
+  if (pathKey(fromDir) === pathKey(toDir)) return result;
+
+  const { collectAssetReferences, rewriteAssetReferences } = await import('./asset-references.mjs');
+  const { IMAGE_MIME, isNetworkPath, resolveAssetFile } = require('./assets.cjs');
+  const references = collectAssetReferences(content);
+  const images = new Map();
+  for (const reference of references) {
+    if (!images.has(reference.name)) images.set(reference.name, []);
+    images.get(reference.name).push(reference);
   }
-  if (!references.length) return result;
-  await fs.mkdir(path.join(toDir, 'assets'), { recursive: true });
-  const assigned = new Map();
-  const targetAssets = path.join(toDir, 'assets');
-  const pickName = async (name, bytes) => {
-    const extension = path.extname(name);
-    const stem = name.slice(0, name.length - extension.length);
-    for (let index = 1; index <= 999; index++) {
-      const candidate = `${stem}-${index}${extension}`;
-      const existing = await fs.readFile(path.join(targetAssets, candidate)).catch(() => null);
-      if (existing === null) return { name: candidate, copy: true };
-      if (existing.equals(bytes)) return { name: candidate, copy: false };
+  const fromAssets = path.join(fromDir, 'assets');
+  const toAssets = path.join(toDir, 'assets');
+  if (isNetworkPath(fromAssets) || isNetworkPath(toAssets)) throw new Error('不支持迁移网络位置的图片。');
+
+  // First save preserves all private assets, including raw HTML references
+  // and images that do not currently appear in Markdown.
+  if (options.fromDirectory) {
+    const privateEntries = await missingAsNull(fs.readdir(options.fromDirectory, { withFileTypes: true }));
+    for (const entry of privateEntries || []) {
+      if (entry.name !== 'assets' || !entry.isDirectory()) {
+        result.unresolved.push({ name: entry.name, reason: '临时目录包含无法迁移的资源' });
+      }
     }
-    throw new Error('目标文件夹中无法为该图片找到可用的文件名。');
-  };
-  for (const { name } of references) {
-    if (assigned.has(name)) continue;
-    const bytes = await fs.readFile(path.join(fromDir, 'assets', name)).catch(() => null);
-    // A missing asset stays a visible broken link instead of failing the save.
-    if (bytes === null) { assigned.set(name, null); continue; }
-    const existing = await fs.readFile(path.join(targetAssets, name)).catch(() => null);
-    if (existing !== null && existing.equals(bytes)) { assigned.set(name, name); result.skipped++; continue; }
-    if (existing === null) {
-      await fs.copyFile(path.join(fromDir, 'assets', name), path.join(targetAssets, name));
-      assigned.set(name, name);
-      result.copied++;
-      continue;
+    if (result.unresolved.length) return result;
+    const entries = await missingAsNull(fs.readdir(fromAssets, { withFileTypes: true }));
+    for (const entry of entries || []) {
+      if (!entry.isFile() || !IMAGE_MIME.has(path.extname(entry.name).toLowerCase())) {
+        result.unresolved.push({ name: entry.name, reason: '临时目录包含无法迁移的资源' });
+      } else if (!images.has(entry.name)) {
+        images.set(entry.name, []);
+      }
     }
-    const picked = await pickName(name, bytes);
-    if (picked.copy) {
-      await fs.copyFile(path.join(fromDir, 'assets', name), path.join(targetAssets, picked.name));
-      result.copied++;
-    } else result.skipped++;
-    assigned.set(name, picked.name);
   }
-  let next = content;
-  for (const { raw, name } of references) {
-    const replacement = assigned.get(name);
-    if (!replacement || replacement === name) continue;
-    const target = `assets/${encodeURIComponent(replacement)}`;
-    next = next.split(`](${raw})`).join(`](${target})`);
-    // Report each textual rewrite once, exactly as it appears in the document.
-    if (!result.renamed.some(entry => entry.from === raw && entry.to === target)) result.renamed.push({ from: raw, to: target });
+  if (!images.size || result.unresolved.length) return result;
+
+  await fs.mkdir(toAssets, { recursive: true });
+  const destinationRoot = await fs.realpath(toAssets);
+  if (isNetworkPath(destinationRoot)) throw new Error('不支持迁移网络位置的图片。');
+  const privateRoot = options.fromDirectory && await missingAsNull(fs.realpath(options.fromDirectory));
+  if (privateRoot && inside(privateRoot, destinationRoot)) {
+    throw new Error('目标图片目录指向本草稿的临时目录。');
   }
-  result.content = next;
+
+  for (const [name, uses] of images) {
+    try {
+      if (!IMAGE_MIME.has(path.extname(name).toLowerCase())) throw new Error('不支持的图片类型');
+      const reference = uses[0]?.src ?? `assets/${encodeURIComponent(name)}`;
+      const source = await resolveAssetFile(reference, {
+        documentPath: previousPath,
+        unsavedDirectory: options.fromDirectory
+      });
+      if (options.fromDirectory && !inside(await fs.realpath(fromAssets), source)) {
+        throw new Error('图片不在临时资源目录中');
+      }
+      if (!(await fs.stat(source)).isFile()) throw new Error('图片不是普通文件');
+      const bytes = await fs.readFile(source);
+      const extension = path.extname(name);
+      const stem = name.slice(0, name.length - extension.length);
+      let assigned = false;
+      for (let index = 0; index <= 999; index++) {
+        if (index && (!uses.length || uses.some(use => use.from === null))) {
+          throw new Error('存在同名图片，且无法安全改写引用');
+        }
+        const candidate = index ? `${stem}-${index}${extension}` : name;
+        const destination = path.join(destinationRoot, candidate);
+        try {
+          await fs.copyFile(source, destination, constants.COPYFILE_EXCL);
+          if (!(await fs.readFile(destination)).equals(bytes)) throw new Error('图片在迁移期间发生变化');
+          result.copied++;
+        } catch (error) {
+          if (error.code !== 'EEXIST') throw error;
+          const stat = await fs.lstat(destination);
+          if (!stat.isFile() || !(await fs.readFile(destination)).equals(bytes)) continue;
+          result.skipped++;
+        }
+        if (index) {
+          const to = `assets/${encodeURIComponent(candidate)}`;
+          for (const { raw: from } of uses) {
+            if (!result.renamed.some(item => item.from === from)) result.renamed.push({ from, to });
+          }
+        }
+        assigned = true;
+        break;
+      }
+      if (!assigned) throw new Error('找不到可用的目标文件名');
+    } catch (error) {
+      result.unresolved.push({ name, reason: error.code === 'ENOENT' ? '源文件不存在' : error.message });
+    }
+  }
+  result.content = rewriteAssetReferences(content, result.renamed, references);
   return result;
 }
 

@@ -76,7 +76,7 @@ test('block context keeps duplicate heading anchors and the table of contents ex
   resetRenderCache();
   const { plan, stats, html } = renderPlan(source);
   const headingGroups = plan.groups.filter(group => group.tokens[0].type === 'heading_open');
-  assert.deepEqual(headingGroups.map(group => group.context), ['a\u0000标题:0', 'a\u0000标题:1'], '重复标题的上下文应带上同名序号');
+  assert.deepEqual(headingGroups.map(group => group.context), ['a\u0000标题', 'a\u0000标题-1'], '标题块上下文应包含分配后的锚点');
   assert.equal(new Set(headingGroups.map(group => group.source)).size, 1, '两个标题源码完全相同');
   assert.equal(stats.rendered, plan.groups.length, '相同源码但不同锚点的块不能共用缓存');
   assert.match(html, /<h1 id="标题">/, '第一个标题使用裸锚点');
@@ -106,6 +106,26 @@ test('per-block rendering matches one whole-document render', () => {
     const { html } = renderPlan(source);
     assert.equal(html, whole.html, `逐块渲染必须与整篇一次渲染完全一致：${JSON.stringify(source)}`);
   }
+});
+
+test('editing duplicate headings keeps cached anchors consistent with the whole document', () => {
+  const source = '[TOC]\n\n# Same\n\n正文。\n\n# Other\n';
+  resetRenderCache();
+  renderPlan(source);
+  const edited = source.replace('# Other', '# Same');
+  const firstEdit = renderPlan(edited);
+  assert.match(firstEdit.html, /<h1 id="same-1">/);
+  assert.equal(firstEdit.html, renderWhole(edited).html);
+  assert.equal(firstEdit.stats.reused, 2, '首个标题和未改段落应复用');
+  assert.deepEqual(firstEdit.plan.items.map(item => item.id), ['same', 'same-1']);
+
+  const withCollision = `${edited}\n# Same-1\n\n# Constructor\n`;
+  const collisionEdit = renderPlan(withCollision);
+  const ids = [...collisionEdit.html.matchAll(/<h1 id="([^"]+)">/g)].map(match => match[1]);
+  assert.equal(new Set(ids).size, 4, '同名序号不得与普通标题锚点重复');
+  assert.equal(ids.at(-1), 'constructor');
+  assert.deepEqual(ids, collisionEdit.plan.items.map(item => item.id));
+  assert.equal(collisionEdit.html, renderWhole(withCollision).html);
 });
 
 test('the outline and [TOC] are derived from the render parse', () => {
