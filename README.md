@@ -28,7 +28,7 @@
 
 | 平台 | 状态 |
 | --- | --- |
-| macOS（Apple Silicon） | 2026-11-14 已在本机用未签名 `Inkstone.app` 验证：打开并编辑保存 `.md`，以及设为默认应用。`.dmg` 安装盘尚未打包。 |
+| macOS（Apple Silicon） | 2026-11-14 已在本机用 `Inkstone.app` 验证：打开并编辑保存 `.md`，以及设为默认应用。打包工作流会打出临时签名的 `.dmg`（见下方「打包」）。 |
 | Windows 10/11 x64 | CI 单测与构建已通过；安装包、文件关联和系统输入法待实机验证。 |
 | Linux（AppImage） | CI 单测与构建已通过，并已交叉打出 AppImage；桌面启动和系统关联待实机验证。 |
 
@@ -63,7 +63,7 @@ Electron 首次启动需要下载对应平台的二进制；下载受阻时可�
 # macOS：可运行的 .app（输出 release/mac-<arch>/Inkstone.app）
 npm run build && npx electron-builder --mac dir --publish never
 
-# macOS：dmg 安装盘
+# macOS：临时签名的 dmg 安装盘（含安装说明和“应用程序”链接）
 npm run build && npx electron-builder --mac dmg --publish never
 
 # Windows：NSIS 安装包（输出 release/*.exe 与 release/win-unpacked/）
@@ -73,7 +73,11 @@ npm run build && npx electron-builder --win nsis --publish never
 npm run package:linux
 ```
 
-`npm run package:mac` / `package:win` 也会构建并打包，但默认没有 `--publish never`。未签名的 macOS 应用第一次打开时，请按住 Control 再点击，选择「打开」。
+`npm run package:mac` / `package:win` 也会构建并打包，但默认没有 `--publish never`。
+
+macOS 使用临时签名（`mac.identity` 为 `"-"`，关闭 Hardened Runtime，不做公证）。electron-builder 从内到外签名嵌套的 Mach-O、framework 和 helper；`scripts/verify-macos-ad-hoc.cjs` 在生成 dmg 之前执行 `codesign --verify --deep --strict`，不通过就停止构建。安装盘里有 `Inkstone.app`、指向“应用程序”的链接，以及 `安装前请阅读 - Read Me.txt`（正文来自 `docs/install/macOS安装说明.txt`）。第一次打开：把应用拖进“应用程序”后从那里启动；若系统拦截，右键“打开”，或到“系统设置 → 隐私与安全性 → 仍要打开”。只在信任来源时，才按说明用 `xattr` 去掉隔离标记。不必关闭 Gatekeeper 或 SIP。
+
+Windows 安装包保持可选目录（`oneClick: false`，`allowToChangeInstallationDirectory: true`），并带上 `.md` / `.markdown` 文件关联。安装程序的许可页显示 `docs/install/windows-license.html`（与 `docs/install/Windows安装说明.txt` 同一份说明）。若弹出 SmartScreen，选择“更多信息”→“仍要运行”。新版本装到原目录会就地升级。
 
 应用图标使用 `build/icon.png`（1024×1024，白底黑字 `IN`）。electron-builder 会据此生成各平台图标。
 
@@ -86,7 +90,7 @@ git push origin 0.1.1
 
 然后打开 **Actions** → **package** → **Run workflow**。**Use workflow from** 里可以选择刚推送的 tag；选分支时，用该提交能追溯到的最近一个 `1.2.3` 或 `v1.2.3` 形式的 tag（前导 `v` 会去掉）。找不到符合「主.次.修订」的 tag 时工作流会失败，不会猜一个版本。如果 HEAD 不正好在这个 tag 上（tag 之后还有提交），日志里会有警告。
 
-结束后在该次运行页面下载 Artifacts：`inkstone-<版本>-windows-x64` 是 Windows x64 的 NSIS 安装包，`inkstone-<版本>-macos-arm64` 是 Apple Silicon 的 `.dmg`。产物保留 7 天。这些安装包未签名，也不会发布到 Releases。macOS 第一次打开时，在访达中右键安装盘或应用，选择「打开」；Windows 若弹出 SmartScreen，选择「更多信息」→「仍要运行」。
+结束后在该次运行页面下载 Artifacts：`inkstone-<版本>-windows-x64` 含 Windows x64 的 NSIS 安装包和 `Windows安装说明.txt`，`inkstone-<版本>-macos-arm64` 含 Apple Silicon 的 `.dmg` 和 `安装前请阅读 - Read Me.txt`。产物保留 7 天，不会发布到 Releases。打开方式见各安装说明。
 
 ## 测试
 
@@ -118,8 +122,10 @@ RFC 0001 的独立回归：`node test/rfc0001-desktop.mjs`、`node test/rfc0001-
 inkstone/
 ├── .github/workflows/
 │   ├── ci.yml                 # push / PR：单测与构建；手动触发桌面用例
-│   └── package.yml            # 仅手动：从 git tag 取版本，未签名的 Windows x64 NSIS 与 macOS arm64 dmg
+│   └── package.yml            # 仅手动：从 git tag 取版本，Windows x64 NSIS 与临时签名的 macOS arm64 dmg
 ├── build/icon.png             # 应用图标源图（1024×1024）
+├── docs/install/              # 中英安装说明：macOS 放进 dmg，Windows 放进安装程序和产物
+├── scripts/verify-macos-ad-hoc.cjs  # dmg 之前校验 codesign --verify --deep --strict
 ├── docs/assets/logo.png       # README 用圆角 logo
 ├── electron/                  # 主进程：窗口、菜单、存储、导出、会话、资源路径
 ├── src/                       # 渲染层：编辑器、排版、表格、导出与界面

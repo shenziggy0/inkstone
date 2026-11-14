@@ -33,11 +33,47 @@
     },
     "mac": {
       "category": "public.app-category.productivity",
+      "identity": "-",
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "notarize": false,
+      "strictVerify": true,
+      "timestamp": "none",
       "target": [
         "dmg",
         "zip"
       ]
     },
+    "dmg": {
+      "backgroundColor": "#ffffff",
+      "format": "UDZO",
+      "window": {
+        "width": 540,
+        "height": 420
+      },
+      "contents": [
+        {
+          "x": 140,
+          "y": 160,
+          "type": "file",
+          "name": "Inkstone.app"
+        },
+        {
+          "x": 400,
+          "y": 160,
+          "type": "link",
+          "path": "/Applications"
+        },
+        {
+          "x": 270,
+          "y": 320,
+          "type": "file",
+          "path": "docs/install/macOS安装说明.txt",
+          "name": "安装前请阅读 - Read Me.txt"
+        }
+      ]
+    },
+    "afterSign": "./scripts/verify-macos-ad-hoc.cjs",
     "win": {
       "target": [
         "nsis"
@@ -59,7 +95,8 @@
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "license": "docs/install/windows-license.html"
     },
     "fileAssociations": [
       {
