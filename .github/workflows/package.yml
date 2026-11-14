@@ -15,11 +15,6 @@ name: package
 # 去掉前导 v 后必须是主.次.修订，否则失败，不猜测版本。
 on:
   workflow_dispatch:
-  # 本分支的 push 只为这一次校验：当前令牌无法 workflow_dispatch（Actions 403）。
-  # 校验通过后会删掉这段，合并后的工作流仍然只手动触发。
-  push:
-    branches:
-      - cursor/unsigned-installer-signing-f415
 
 permissions:
   contents: read
