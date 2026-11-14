@@ -77,6 +77,8 @@ npm run package:linux
 
 应用图标使用 `build/icon.png`（1024×1024，白底黑字 `IN`）。electron-builder 会据此生成各平台图标。
 
+也可以在 GitHub Actions 里手动打包，不创建 Release。打开 **Actions** → **package** → **Run workflow**，结束后在该次运行页面下载 Artifacts：`inkstone-windows-x64` 是 Windows x64 的 NSIS 安装包，`inkstone-macos-arm64` 是 Apple Silicon 的 `.dmg`。产物保留 7 天。这些安装包未签名。macOS 第一次打开时，在访达中右键安装盘或应用，选择「打开」；Windows 若弹出 SmartScreen，选择「更多信息」→「仍要运行」。
+
 ## 测试
 
 | 命令 | 覆盖内容 |
@@ -105,7 +107,9 @@ RFC 0001 的独立回归：`node test/rfc0001-desktop.mjs`、`node test/rfc0001-
 
 ```text
 inkstone/
-├── .github/workflows/ci.yml
+├── .github/workflows/
+│   ├── ci.yml                 # push / PR：单测与构建；手动触发桌面用例
+│   └── package.yml            # 仅手动：未签名的 Windows x64 NSIS 与 macOS arm64 dmg
 ├── build/icon.png             # 应用图标源图（1024×1024）
 ├── docs/assets/logo.png       # README 用圆角 logo
 ├── electron/                  # 主进程：窗口、菜单、存储、导出、会话、资源路径
