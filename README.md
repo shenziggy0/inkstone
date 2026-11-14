@@ -77,7 +77,16 @@ npm run package:linux
 
 应用图标使用 `build/icon.png`（1024×1024，白底黑字 `IN`）。electron-builder 会据此生成各平台图标。
 
-也可以在 GitHub Actions 里手动打包，不创建 Release。打开 **Actions** → **package** → **Run workflow**，结束后在该次运行页面下载 Artifacts：`inkstone-windows-x64` 是 Windows x64 的 NSIS 安装包，`inkstone-macos-arm64` 是 Apple Silicon 的 `.dmg`。产物保留 7 天。这些安装包未签名。macOS 第一次打开时，在访达中右键安装盘或应用，选择「打开」；Windows 若弹出 SmartScreen，选择「更多信息」→「仍要运行」。
+也可以在 GitHub Actions 里手动打包，不创建 Release。打包用的版本号来自 git tag，不需要为了出包去改 `package.json`。工作流只在运行器上把该版本写进 `package.json` 和 `package-lock.json`，不会提交或推送。
+
+```bash
+git tag -a 0.1.1 -m '...'
+git push origin 0.1.1
+```
+
+然后打开 **Actions** → **package** → **Run workflow**。**Use workflow from** 里可以选择刚推送的 tag；选分支时，用该提交能追溯到的最近一个 `1.2.3` 或 `v1.2.3` 形式的 tag（前导 `v` 会去掉）。找不到符合「主.次.修订」的 tag 时工作流会失败，不会猜一个版本。如果 HEAD 不正好在这个 tag 上（tag 之后还有提交），日志里会有警告。
+
+结束后在该次运行页面下载 Artifacts：`inkstone-<版本>-windows-x64` 是 Windows x64 的 NSIS 安装包，`inkstone-<版本>-macos-arm64` 是 Apple Silicon 的 `.dmg`。产物保留 7 天。这些安装包未签名，也不会发布到 Releases。macOS 第一次打开时，在访达中右键安装盘或应用，选择「打开」；Windows 若弹出 SmartScreen，选择「更多信息」→「仍要运行」。
 
 ## 测试
 
@@ -109,7 +118,7 @@ RFC 0001 的独立回归：`node test/rfc0001-desktop.mjs`、`node test/rfc0001-
 inkstone/
 ├── .github/workflows/
 │   ├── ci.yml                 # push / PR：单测与构建；手动触发桌面用例
-│   └── package.yml            # 仅手动：未签名的 Windows x64 NSIS 与 macOS arm64 dmg
+│   └── package.yml            # 仅手动：从 git tag 取版本，未签名的 Windows x64 NSIS 与 macOS arm64 dmg
 ├── build/icon.png             # 应用图标源图（1024×1024）
 ├── docs/assets/logo.png       # README 用圆角 logo
 ├── electron/                  # 主进程：窗口、菜单、存储、导出、会话、资源路径
