@@ -21,6 +21,7 @@
   "build": {
     "appId": "app.inkstone.editor",
     "productName": "Inkstone",
+    "icon": "build/icon.png",
     "npmRebuild": false,
     "files": [
       "dist/**/*",
