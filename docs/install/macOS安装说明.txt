@@ -1,0 +1,47 @@
+Inkstone（墨页）macOS 安装与更新说明
+================================
+
+1. 完全退出正在运行的旧版 Inkstone（菜单 Inkstone → 退出 Inkstone）。
+2. 将 Inkstone.app 拖到 Applications（应用程序），选择替换旧版。
+3. 从“应用程序”打开 Inkstone，不要直接从本安装盘运行。
+
+出现“已损坏，无法打开”或“无法验证开发者”
+--------------------------------------
+此安装包里的 Inkstone.app 做了临时签名（ad-hoc），没有 Apple Developer ID 签名，也没有公证。
+从网络下载后，macOS 可能拦截打开。
+“已损坏”也可能表示文件确实有问题，不能仅凭提示判断。
+
+确认安装包来自你信任的来源后，按下面的顺序试：
+1. 在访达中右键 Inkstone.app，选择“打开”。
+2. 或打开“系统设置 → 隐私与安全性”，点“仍要打开”（Open Anyway，如有这一项）。
+3. 若仍被拦截，确认应用已经复制到“应用程序”，打开“终端”执行：
+
+xattr -dr com.apple.quarantine /Applications/Inkstone.app
+
+然后重新打开。此命令只移除 Inkstone 的下载隔离标记，不会修复损坏的文件。
+如果提示 Permission denied，请检查应用的所有者及写入权限。
+如果仍无法打开，请重新下载安装包，并反馈 macOS 版本、芯片类型和完整错误。
+无需关闭 Gatekeeper 或系统完整性保护（SIP）。
+
+把 Inkstone 设为 .md 的默认应用
+------------------------------
+在访达中选中任意 .md 文件 → 右键“显示简介”（Get Info）→“打开方式”选 Inkstone →“全部更改…”。
+
+Mac installation (English)
+--------------------------
+Quit the old Inkstone. Drag Inkstone.app into Applications and replace it.
+Launch it from Applications, not from this disk image.
+
+This build is ad-hoc signed only. It is not Developer ID signed or notarized.
+If macOS says the app is damaged or from an unidentified developer, first
+right-click the app and choose Open, or use System Settings → Privacy &
+Security → Open Anyway.
+Only if you trust the download source, remove this app's quarantine flag:
+
+xattr -dr com.apple.quarantine /Applications/Inkstone.app
+
+This does not repair corrupted files. You do not need to disable Gatekeeper
+or System Integrity Protection (SIP).
+
+To open .md files with Inkstone: select a .md file in Finder → Get Info →
+Open with → Inkstone → Change All.

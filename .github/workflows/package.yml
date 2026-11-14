@@ -1,9 +1,12 @@
 name: package
 
-# 只由手动触发。打出未签名安装包并上传为 Actions artifact，不创建 Release、不推送 tag。
+# 只由手动触发。打出安装包并上传为 Actions artifact，不创建 Release、不推送 tag。
+# macOS 为临时签名（ad-hoc），没有 Developer ID，也不公证。Windows 安装包不签名。
 # electron-builder 在 CI 环境里会默认尝试发布到 GitHub Releases；--publish never
 # 关掉这一行为，因此这里不设置 GH_TOKEN，令牌也不会被用来发布。
 # CSC_IDENTITY_AUTO_DISCOVERY=false 避免在没有证书时去钥匙串或证书库里找签名身份并失败。
+# macOS 仍会按 package.json 的 mac.identity="-" 做临时签名（ad-hoc），
+# afterSign 在打 dmg 之前执行 codesign --verify --deep --strict，失败则整次构建失败。
 # macos-latest 是 Apple Silicon runner，--arm64 为本机架构。
 #
 # 版本号来自 git tag，只改运行器上的 package.json / package-lock.json，不提交、不推送：
@@ -32,11 +35,15 @@ jobs:
           - os: windows-latest
             name: windows-x64
             args: --win nsis --x64 --publish never
-            installer: release/*.exe
+            installer: |
+              release/*.exe
+              release/Windows安装说明.txt
           - os: macos-latest
             name: macos-arm64
             args: --mac dmg --arm64 --publish never
-            installer: release/*.dmg
+            installer: |
+              release/*.dmg
+              release/安装前请阅读 - Read Me.txt
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -106,6 +113,59 @@ jobs:
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: npx --no-install electron-builder ${{ matrix.args }}
+
+      - name: Stage install notes next to the installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.name }}" = "macos-arm64" ]; then
+            cp "docs/install/macOS安装说明.txt" "release/安装前请阅读 - Read Me.txt"
+            test -s "release/安装前请阅读 - Read Me.txt"
+            test -n "$(find release -maxdepth 1 -name '*.dmg' -print -quit)"
+          else
+            cp "docs/install/Windows安装说明.txt" "release/Windows安装说明.txt"
+            test -s "release/Windows安装说明.txt"
+            test -n "$(find release -maxdepth 1 -name '*.exe' -print -quit)"
+          fi
+
+      - name: Show codesign and dmg contents
+        if: matrix.name == 'macos-arm64'
+        run: |
+          set -euo pipefail
+          APP="$(find release -type d -name 'Inkstone.app' -print -quit)"
+          if [ -z "$APP" ]; then
+            echo "::error::找不到 Inkstone.app"
+            find release -maxdepth 3 -print
+            exit 1
+          fi
+          echo "=== codesign -dv $APP ==="
+          /usr/bin/codesign -dv "$APP" 2>&1
+          echo "=== codesign --verify --deep --strict $APP ==="
+          /usr/bin/codesign --verify --deep --strict --verbose=2 "$APP" 2>&1
+          echo "codesign --verify --deep --strict: passed"
+
+          DMG="$(find release -maxdepth 1 -name '*.dmg' -print -quit)"
+          echo "=== hdiutil verify $DMG ==="
+          /usr/bin/hdiutil verify "$DMG"
+
+          MOUNT="$(mktemp -d)"
+          cleanup() {
+            /usr/bin/hdiutil detach "$MOUNT" >/dev/null 2>&1 || true
+            rmdir "$MOUNT" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          /usr/bin/hdiutil attach "$DMG" -nobrowse -readonly -mountpoint "$MOUNT"
+          echo "=== dmg contents $MOUNT ==="
+          ls -la "$MOUNT"
+          test -d "$MOUNT/Inkstone.app"
+          test -L "$MOUNT/Applications"
+          test -f "$MOUNT/安装前请阅读 - Read Me.txt"
+          echo "Applications -> $(readlink "$MOUNT/Applications")"
+          echo "=== codesign -dv (app inside dmg) ==="
+          /usr/bin/codesign -dv "$MOUNT/Inkstone.app" 2>&1
+          echo "=== codesign --verify --deep --strict (app inside dmg) ==="
+          /usr/bin/codesign --verify --deep --strict --verbose=2 "$MOUNT/Inkstone.app" 2>&1
+          echo "codesign --verify --deep --strict (app inside dmg): passed"
 
       - name: Upload installer
         uses: actions/upload-artifact@v4
