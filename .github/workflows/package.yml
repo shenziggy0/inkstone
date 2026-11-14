@@ -1,0 +1,66 @@
+name: package
+
+# 只由手动触发。打出未签名安装包并上传为 Actions artifact，不创建 Release、不推送 tag。
+# electron-builder 在 CI 环境里会默认尝试发布到 GitHub Releases；--publish never
+# 关掉这一行为，因此这里不设置 GH_TOKEN，令牌也不会被用来发布。
+# CSC_IDENTITY_AUTO_DISCOVERY=false 避免在没有证书时去钥匙串或证书库里找签名身份并失败。
+# macos-latest 是 Apple Silicon runner，--arm64 为本机架构。
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows-x64
+            artifact: inkstone-windows-x64
+            args: --win nsis --x64 --publish never
+            installer: release/*.exe
+          - os: macos-latest
+            name: macos-arm64
+            artifact: inkstone-macos-arm64
+            args: --mac dmg --arm64 --publish never
+            installer: release/*.dmg
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          # 与 .github/workflows/ci.yml 相同：仓库没有 engines / .nvmrc，
+          # 显式锁定 Node 26.x。
+          node-version: '26.x'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Package unsigned installer
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: npx --no-install electron-builder ${{ matrix.args }}
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.installer }}
+          retention-days: 7
+          if-no-files-found: error
