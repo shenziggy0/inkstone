@@ -18,4 +18,4 @@ jobs:
       - name: Dispatch package workflow for tag 0.1.2
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow run package.yml --ref 0.1.2
+        run: gh workflow run package.yml --repo shenziggy0/inkstone --ref 0.1.2
