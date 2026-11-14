@@ -5,6 +5,11 @@ name: package
 # 关掉这一行为，因此这里不设置 GH_TOKEN，令牌也不会被用来发布。
 # CSC_IDENTITY_AUTO_DISCOVERY=false 避免在没有证书时去钥匙串或证书库里找签名身份并失败。
 # macos-latest 是 Apple Silicon runner，--arm64 为本机架构。
+#
+# 版本号来自 git tag，只改运行器上的 package.json / package-lock.json，不提交、不推送：
+# - Use workflow from 选中 tag 时，用该 tag 名
+# - 选中分支时，用 git describe 能追溯到的最近一个 1.2.3 或 v1.2.3 tag
+# 去掉前导 v 后必须是主.次.修订，否则失败，不猜测版本。
 on:
   workflow_dispatch:
 
@@ -26,17 +31,20 @@ jobs:
         include:
           - os: windows-latest
             name: windows-x64
-            artifact: inkstone-windows-x64
             args: --win nsis --x64 --publish never
             installer: release/*.exe
           - os: macos-latest
             name: macos-arm64
-            artifact: inkstone-macos-arm64
             args: --mac dmg --arm64 --publish never
             installer: release/*.dmg
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # 0 表示全部历史。checkout 在这个深度会连 tags 一起取；
+          # fetch-tags 再声明一次，保证 runner 上能看到 0.1.1 / v1.2.3 这类 tag。
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -49,6 +57,48 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Resolve version from git tag
+        id: version
+        shell: bash
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          if [ "$REF_TYPE" = "tag" ]; then
+            RAW_TAG="$REF_NAME"
+          else
+            if ! RAW_TAG=$(git describe --tags --abbrev=0 --match '[0-9]*.[0-9]*.[0-9]*' --match 'v[0-9]*.[0-9]*.[0-9]*'); then
+              echo "::error::找不到可用的版本 tag。请推送形如 0.1.1 或 v1.2.3 的 tag，或在 Run workflow 的 Use workflow from 里选择该 tag。不会猜测版本号。"
+              exit 1
+            fi
+          fi
+
+          VERSION="${RAW_TAG#v}"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::版本号 '${VERSION}'（来自 tag '${RAW_TAG}'）不是主.次.修订（例如 0.1.1 或 v0.1.1）。不会猜测版本号。"
+            exit 1
+          fi
+
+          HEAD_COMMIT=$(git rev-parse HEAD)
+          if ! TAG_COMMIT=$(git rev-parse -q --verify "refs/tags/${RAW_TAG}^{commit}"); then
+            echo "::error::无法解析 tag '${RAW_TAG}'，不能确认它指向哪个提交。"
+            exit 1
+          fi
+
+          echo "Version: ${VERSION}"
+          echo "VERSION=${VERSION}" >> "$GITHUB_OUTPUT"
+          if [ "$TAG_COMMIT" != "$HEAD_COMMIT" ]; then
+            echo "::warning::HEAD ${HEAD_COMMIT} 并不正好在 tag ${RAW_TAG}（${TAG_COMMIT}）上，本次构建包含该 tag 之后的提交。"
+          fi
+
+      - name: Set package version
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: npm version "$VERSION" --no-git-tag-version --allow-same-version
+
       - name: Build
         run: npm run build
 
@@ -60,7 +110,7 @@ jobs:
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
+          name: inkstone-${{ steps.version.outputs.VERSION }}-${{ matrix.name }}
           path: ${{ matrix.installer }}
           retention-days: 7
           if-no-files-found: error
