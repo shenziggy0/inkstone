@@ -1,9 +1,11 @@
 name: package
 
-# 只由手动触发。打出安装包并上传为 Actions artifact，不创建 Release、不推送 tag。
+# 只由手动触发。打出安装包、上传为 Actions artifact，并在 GitHub 服务器内网把双平台包
+# 自动挂载到对应 tag 的 Release 草稿（已存在则覆盖同名附件，不改动正文与发布状态；
+# 不存在则新建草稿供人工填文案后发布）。不推送 tag。
 # macOS 为临时签名（ad-hoc），没有 Developer ID，也不公证。Windows 安装包不签名。
 # electron-builder 在 CI 环境里会默认尝试发布到 GitHub Releases；--publish never
-# 关掉这一行为，因此这里不设置 GH_TOKEN，令牌也不会被用来发布。
+# 关掉这一行为，package 作业只有 contents: read 权限，真正挂载草稿由收尾作业完成。
 # CSC_IDENTITY_AUTO_DISCOVERY=false 避免在没有证书时去钥匙串或证书库里找签名身份并失败。
 # macOS 仍会按 package.json 的 mac.identity="-" 做临时签名（ad-hoc），
 # afterSign 在打 dmg 之前执行 codesign --verify --deep --strict，失败则整次构建失败。
@@ -28,6 +30,9 @@ jobs:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    outputs:
+      tag: ${{ steps.version.outputs.TAG }}
+      version: ${{ steps.version.outputs.VERSION }}
     strategy:
       fail-fast: false
       matrix:
@@ -94,7 +99,8 @@ jobs:
             exit 1
           fi
 
-          echo "Version: ${VERSION}"
+          echo "Version: ${VERSION} (tag: ${RAW_TAG})"
+          echo "TAG=${RAW_TAG}" >> "$GITHUB_OUTPUT"
           echo "VERSION=${VERSION}" >> "$GITHUB_OUTPUT"
           if [ "$TAG_COMMIT" != "$HEAD_COMMIT" ]; then
             echo "::warning::HEAD ${HEAD_COMMIT} 并不正好在 tag ${RAW_TAG}（${TAG_COMMIT}）上，本次构建包含该 tag 之后的提交。"
@@ -174,3 +180,51 @@ jobs:
           path: ${{ matrix.installer }}
           retention-days: 7
           if-no-files-found: error
+
+  draft-release:
+    name: upload assets to draft release
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download packaged installers
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Pack zip assets
+        shell: bash
+        env:
+          VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          for platform in windows-x64 macos-arm64; do
+            dir="artifacts/inkstone-${VERSION}-${platform}"
+            test -d "$dir"
+            (cd "$dir" && zip -r "$OLDPWD/release-assets/inkstone-${VERSION}-${platform}.zip" .)
+          done
+          ls -lh release-assets
+
+      - name: Attach assets to draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.package.outputs.tag }}
+          VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          set -euo pipefail
+          WIN_ZIP="release-assets/inkstone-${VERSION}-windows-x64.zip"
+          MAC_ZIP="release-assets/inkstone-${VERSION}-macos-arm64.zip"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists; uploading assets with --clobber..."
+            gh release upload "$TAG" "$WIN_ZIP" "$MAC_ZIP" --clobber
+          else
+            echo "Creating draft release for ${TAG}..."
+            gh release create "$TAG" "$WIN_ZIP" "$MAC_ZIP" \
+              --draft \
+              --title "墨页 Inkstone ${VERSION}" \
+              --notes ""
+          fi
