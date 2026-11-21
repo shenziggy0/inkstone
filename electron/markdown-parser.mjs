@@ -9,10 +9,28 @@ import { full as emoji } from 'markdown-it-emoji';
 import katex from 'katex';
 
 export function createMarkdownParser(options = {}) {
-  const parser = new MarkdownIt({ html: true, linkify: true, breaks: false, ...options }).use(footnote).use(taskLists, { enabled: true })
+  const parser = new MarkdownIt({ html: true, linkify: true, breaks: true, ...options }).use(footnote).use(taskLists, { enabled: true })
     // Typora 1.11+ accepts both $…$ / $$…$$ and \(…\) / \[…\].
     .use(texmath, { engine: katex, delimiters: ['dollars', 'brackets'], katexOptions: { throwOnError: false, trust: false } })
     .use(mark).use(sub).use(sup).use(emoji);
+
+  // Align CJK emphasis/strike/mark punctuation flanking with Typora.
+  const CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+  if (!parser.inline.State.prototype._inkstoneCjkPatched) {
+    const defaultScanDelims = parser.inline.State.prototype.scanDelims;
+    parser.inline.State.prototype.scanDelims = function (start, canSplitWord) {
+      const result = defaultScanDelims.call(this, start, canSplitWord);
+      if (!canSplitWord) return result;
+      const pos = start + result.length;
+      const before = start > 0 ? this.src.slice(Math.max(0, start - 2), start).slice(-1) : ' ';
+      const after = pos < this.posMax ? this.src.slice(pos, Math.min(this.posMax, pos + 2))[0] : ' ';
+      const sBefore = /\s/.test(before), sAfter = /\s/.test(after);
+      if (!sAfter && CJK.test(before)) result.can_open = true;
+      if (!sBefore && CJK.test(after)) result.can_close = true;
+      return result;
+    };
+    parser.inline.State.prototype._inkstoneCjkPatched = true;
+  }
 
   // Typora renders local images referenced as `file:///…` URLs. markdown-it drops
   // any `file:` destination before it becomes an image token, so allow that one

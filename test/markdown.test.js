@@ -66,3 +66,23 @@ test('statistics count every Han character, Latin words as one, and ignore BOM',
   assert.equal(statistics('hello world').words, 2);
   assert.equal(statistics('\uFEFF中文').characters, 2, 'BOM 不应计入字符数');
 });
+
+test('Typora parity: soft line breaks render as <br> and CJK punctuation flanks inline syntax', () => {
+  const { html: breaksHtml } = render('12.以后所有 `git commit`。\n13.不用 mock。\n14.默认 `ego-lite`。');
+  assert.match(breaksHtml, /12\.以后所有 <code>git commit<\/code>。<br>\n13\.不用 mock。<br>\n14\.默认 <code>ego-lite<\/code>。/);
+
+  const cjkCases = [
+    ['中文**（括号）**中文', /中文<strong>（括号）<\/strong>中文/],
+    ['中文**“引号”**中文', /中文<strong>“引号”<\/strong>中文/],
+    ['**注意：**不要这样做', /<strong>注意：<\/strong>不要这样做/],
+    ['请看**《墨页》**文档', /请看<strong>《墨页》<\/strong>文档/],
+    ['这是**重点！**一定要看', /这是<strong>重点！<\/strong>一定要看/],
+    ['使用**`code`**加粗代码', /使用<strong><code>code<\/code><\/strong>加粗代码/],
+    ['中文*（斜体）*中文', /中文<em>（斜体）<\/em>中文/],
+    ['中文==（高亮）==中文', /中文<mark>（高亮）<\/mark>中文/],
+    ['中文~~（删除）~~中文', /中文<s>（删除）<\/s>中文/]
+  ];
+  for (const [source, expected] of cjkCases) {
+    assert.match(render(source).html, expected, source);
+  }
+});

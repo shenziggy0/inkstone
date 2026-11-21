@@ -25,6 +25,8 @@ import { parser as renderParser } from './markdown.js';
 // Same character class Lezer uses for the CommonMark "punctuation" flanking
 // test (see its `Punctuation` constant).
 const PUNCTUATION = /\p{S}|\p{P}/u;
+// CJK scripts allowed to flank delimiters directly without spaces (Typora parity).
+const CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
 
 /**
  * `==highlight==`, matching markdown-it-mark. A run of `=` characters is one
@@ -48,14 +50,42 @@ const Mark = {
       const after = cx.char(end) < 0 ? '' : cx.slice(end, end + 1);
       const spaceBefore = !before || /\s/.test(before), spaceAfter = !after || /\s/.test(after);
       const punctBefore = PUNCTUATION.test(before), punctAfter = PUNCTUATION.test(after);
-      const open = !spaceAfter && (!punctAfter || spaceBefore || punctBefore);
-      const close = !spaceBefore && (!punctBefore || spaceAfter || punctAfter);
+      const cjkBefore = CJK.test(before), cjkAfter = CJK.test(after);
+      const open = !spaceAfter && (!punctAfter || spaceBefore || punctBefore || cjkBefore);
+      const close = !spaceBefore && (!punctBefore || spaceAfter || punctAfter || cjkAfter);
       if (open || close) {
         for (let at = pos + (length % 2); at + 1 < end; at += 2) cx.addDelimiter(MarkDelimiter, at, at + 2, open, close);
       }
       return end;
     }
   }]
+};
+
+const gfmBase = base.configure([GFM]);
+const baseEmphasis = gfmBase.inlineParsers[gfmBase.inlineNames.indexOf('Emphasis')];
+const baseStrikethrough = gfmBase.inlineParsers[gfmBase.inlineNames.indexOf('Strikethrough')];
+
+function parseWithCjk(baseParser) {
+  return (cx, next, pos) => {
+    const end = baseParser(cx, next, pos);
+    if (end >= 0 && next !== 0x5f /* _ */) {
+      const part = cx.parts[cx.parts.length - 1];
+      if (part && part.from === pos && part.to === end && typeof part.side === 'number') {
+        const before = pos > cx.offset ? cx.slice(pos - 1, pos) : '';
+        const after = cx.char(end) < 0 ? '' : cx.slice(end, end + 1);
+        if (after && !/\s/.test(after) && CJK.test(before)) part.side |= 1;
+        if (before && !/\s/.test(before) && CJK.test(after)) part.side |= 2;
+      }
+    }
+    return end;
+  };
+}
+
+const CjkInline = {
+  parseInline: [
+    { name: 'Emphasis', parse: parseWithCjk(baseEmphasis) },
+    { name: 'Strikethrough', parse: parseWithCjk(baseStrikethrough) }
+  ]
 };
 
 /** texmath's `$_pre` / `$_post` guards: a formula cannot start right after a
@@ -79,7 +109,9 @@ const nonSpaceNonBackslash = code => nonSpace(code) && code !== 0x5c;
  * the body cannot contain `$`, cannot be empty and cannot end in a backslash. */
 function doubleMathEnd(cx, pos) {
   for (let at = pos + 2; at < cx.end; at++) {
-    if (cx.char(at) !== 0x24) continue;
+    const ch = cx.char(at);
+    if (ch === 0x0a /* \n */) return -1;
+    if (ch !== 0x24) continue;
     if (cx.char(at + 1) !== 0x24 || at === pos + 2 || cx.char(at - 1) === 0x5c) return -1;
     return dollarClose(cx, at + 1) ? at + 2 : -1;
   }
@@ -101,8 +133,10 @@ const MathInline = {
       ]));
       if (next === 0x5c /* \ */) {
         if (cx.char(pos + 1) !== 0x28 /* ( */) return -1;
-        const close = cx.slice(pos + 2, cx.end).indexOf('\\)');
-        if (close < 1) return -1;
+        const rest = cx.slice(pos + 2, cx.end);
+        const close = rest.indexOf('\\)');
+        const newline = rest.indexOf('\n');
+        if (close < 1 || (newline >= 0 && newline < close)) return -1;
         return formula(pos + 2 + close + 2, 2);
       }
       if (next !== 0x24 /* $ */ || !dollarOpen(cx, pos)) return -1;
@@ -113,7 +147,9 @@ const MathInline = {
         if (end > 0) return formula(end, 2);
       }
       for (let at = pos + 2; at < cx.end; at++) {
-        if (cx.char(at) !== 0x24) continue;
+        const ch = cx.char(at);
+        if (ch === 0x0a /* \n */) return -1;
+        if (ch !== 0x24) continue;
         if (!nonSpaceNonBackslash(cx.char(pos + 1)) || !nonSpaceNonBackslash(cx.char(at - 1))) continue;
         // A match is only rejected by texmath's post-condition, and then the
         // rule as a whole fails rather than retrying a later `$`.
@@ -141,10 +177,20 @@ function scanMathBlockEnd(text, start = 2) {
   return null;
 }
 
+function scanBracketMathBlockEnd(text, start = 2) {
+  for (let at = start; at < text.length; at++) {
+    if (text[at] === '\\' && text[at + 1] === ']') {
+      if (at > start && text[at - 1] !== '\\') return at;
+    }
+  }
+  return null;
+}
+
 /**
- * Block maths: a paragraph that starts with `$$` and runs to the line with the
- * closing `$$`. texmath registers this as a block rule, so the body is never
- * parsed as inline Markdown — `_` and `^` inside a formula stay literal.
+ * Block maths: a paragraph that starts with `$$` or `\[` and runs to the line
+ * with the closing `$$` or `\]`. texmath registers this as a block rule, so the
+ * body is never parsed as inline Markdown — `_` and `^` inside a formula stay
+ * literal.
  *
  * This is a leaf-block override rather than an eager block parser because the
  * construct is only recognised once its closing delimiter shows up: an
@@ -153,11 +199,12 @@ function scanMathBlockEnd(text, start = 2) {
  */
 class MathBlockParser {
   constructor(leaf) {
-    this.result = scanMathBlockEnd(leaf.content);
+    this.scan = leaf.content.startsWith('\\[') ? scanBracketMathBlockEnd : scanMathBlockEnd;
+    this.result = this.scan(leaf.content);
   }
   nextLine(cx, line, leaf) {
     if (this.result !== null) return false;
-    this.result = scanMathBlockEnd(leaf.content + '\n' + line.scrub());
+    this.result = this.scan(leaf.content + '\n' + line.scrub());
     if (this.result === null || this.result < 0) return false;
     cx.nextLine();
     cx.addLeafElement(leaf, cx.elt('MathBlock', leaf.start, cx.prevLineEnd()));
@@ -174,11 +221,13 @@ const MathBlock = {
   defineNodes: [{ name: 'MathBlock', block: true }],
   parseBlock: [{
     name: 'MathBlock',
-    leaf(cx, leaf) { return leaf.content.startsWith('$$') ? new MathBlockParser(leaf) : null; }
+    leaf(cx, leaf) {
+      return (leaf.content.startsWith('$$') || leaf.content.startsWith('\\[')) ? new MathBlockParser(leaf) : null;
+    }
   }]
 };
 
-export const syntaxParser = base.configure([GFM, Subscript, Superscript, Emoji, Mark, MathInline, MathBlock]);
+export const syntaxParser = base.configure([GFM, Subscript, Superscript, Emoji, Mark, MathInline, MathBlock, CjkInline]);
 
 /** The text the live preview decorates.
  *

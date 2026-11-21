@@ -63,6 +63,192 @@ const emptyInfo = length => ({
   marks: [], styles: [], groups: [], replacements: [], plain: false, literal: false
 });
 
+function isEscaped(text, pos) {
+  let backslashes = 0;
+  for (let i = pos - 1; i >= 0 && text[i] === '\\'; i--) backslashes++;
+  return (backslashes & 1) === 1;
+}
+
+function replaceWithSpaces(text, from, to) {
+  return text.slice(0, from) + ' '.repeat(to - from) + text.slice(to);
+}
+
+function scanCodeSpansAndSingleBackticks(text) {
+  const runs = [];
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] !== '`' || isEscaped(text, i)) continue;
+    let end = i + 1;
+    while (end < text.length && text[end] === '`') end++;
+    runs.push({ from: i, to: end, len: end - i });
+    i = end - 1;
+  }
+  const multiRanges = [];
+  const singles = [];
+  for (let i = 0; i < runs.length; i++) {
+    const run = runs[i];
+    if (run.len >= 2) {
+      let close = -1;
+      for (let j = i + 1; j < runs.length; j++) {
+        if (runs[j].len === run.len) { close = j; break; }
+      }
+      if (close >= 0) {
+        multiRanges.push([run.from, runs[close].to]);
+        i = close;
+      }
+    } else {
+      singles.push(run.from);
+    }
+  }
+  return { multiRanges, singles };
+}
+
+function pickOrphanPosition(positions, editing, caretCols) {
+  if (!positions.length) return -1;
+  if (editing && caretCols?.length) {
+    const caret = caretCols[0];
+    const before = positions.filter(pos => pos < caret);
+    return before.length % 2 === 1
+      ? before[before.length - 1]
+      : (positions.find(pos => pos >= caret) ?? positions[positions.length - 1]);
+  }
+  return positions[positions.length - 1];
+}
+
+function findSymmetricMatches(text, regex, codeRanges) {
+  const matches = [];
+  for (const match of text.matchAll(regex)) {
+    const from = match.index;
+    const to = from + match[0].length;
+    if (isEscaped(text, from)) continue;
+    if (codeRanges.some(([a, b]) => from >= a && to <= b)) continue;
+    const before = from > 0 ? text[from - 1] : '';
+    const after = to < text.length ? text[to] : '';
+    if ((!before || /\s/.test(before)) && (!after || /\s/.test(after))) continue;
+    matches.push({ from, to });
+  }
+  return matches;
+}
+
+/**
+ * Isolate unclosed delimiters on a line using equal-length space padding so
+ * typing a lone `` ` `` or `**` never steals partners from closed syntax on
+ * the same line or across lines.
+ */
+export function isolateUnclosedDelimiters(text, editing, caretCols = [], blockTotals = null) {
+  let out = text;
+  const { multiRanges, singles } = scanCodeSpansAndSingleBackticks(out);
+  let orphanBacktick = -1;
+  if (singles.length % 2 === 1) {
+    orphanBacktick = pickOrphanPosition(singles, editing, caretCols);
+    if (orphanBacktick >= 0) out = replaceWithSpaces(out, orphanBacktick, orphanBacktick + 1);
+  }
+  if (!editing) return out;
+  const codeRanges = [...multiRanges];
+  const pairedSingles = singles.filter(pos => pos !== orphanBacktick);
+  for (let i = 0; i + 1 < pairedSingles.length; i += 2) {
+    codeRanges.push([pairedSingles[i], pairedSingles[i + 1] + 1]);
+  }
+  const specs = [
+    { key: 'strong', regex: /(?<!\*)\*\*(?!\*)/g },
+    { key: 'strike', regex: /(?<!~)~~(?!~)/g },
+    { key: 'mark', regex: /(?<!=)==(?!=)/g },
+    { key: 'em', regex: /(?<!\*)\*(?!\*)/g }
+  ];
+  for (const { key, regex } of specs) {
+    const matches = findSymmetricMatches(out, regex, codeRanges);
+    if (matches.length % 2 !== 1) continue;
+    const total = blockTotals ? blockTotals[key] : matches.length;
+    if (total % 2 !== 1 && matches.length < 3) continue;
+    const orphanPos = pickOrphanPosition(matches.map(m => m.from), true, caretCols);
+    const target = matches.find(m => m.from === orphanPos);
+    if (target) out = replaceWithSpaces(out, target.from, target.to);
+  }
+  return out;
+}
+
+function maskBlockLines(texts, startLine, editingLines, caretLines) {
+  const literalMask = texts.map(() => false);
+  let fence = null;
+  let mathCloser = null;
+  for (let index = 0; index < texts.length; index++) {
+    const line = texts[index];
+    if (fence) {
+      literalMask[index] = true;
+      const closeMatch = /^\s*(`{3,}|~{3,})\s*$/.exec(line);
+      if (closeMatch && closeMatch[1][0] === fence.char && closeMatch[1].length >= fence.len) fence = null;
+      continue;
+    }
+    if (mathCloser) {
+      literalMask[index] = true;
+      if (mathCloser.test(line)) mathCloser = null;
+      continue;
+    }
+    const fenceOpen = /^\s*(`{3,}|~{3,})/.exec(line);
+    if (fenceOpen) {
+      literalMask[index] = true;
+      fence = { char: fenceOpen[1][0], len: fenceOpen[1].length };
+      continue;
+    }
+    if (/^\s*\$\$\s*$/.test(line)) {
+      literalMask[index] = true;
+      mathCloser = /^\s*\$\$\s*$/;
+      continue;
+    }
+    if (/^\s*\\\[\s*$/.test(line)) {
+      literalMask[index] = true;
+      mathCloser = /^\s*\\\]\s*$/;
+    }
+  }
+  // Pass 1: isolate orphan single backticks on all non-literal lines and collect code spans.
+  const backtickMasked = texts.map((text, index) => {
+    if (literalMask[index]) return { text, codeRanges: [] };
+    const editing = Boolean(editingLines?.has(startLine + index));
+    const cols = caretLines?.get(startLine + index) || [];
+    const { multiRanges, singles } = scanCodeSpansAndSingleBackticks(text);
+    let out = text;
+    let orphanBacktick = -1;
+    if (singles.length % 2 === 1) {
+      orphanBacktick = pickOrphanPosition(singles, editing, cols);
+      if (orphanBacktick >= 0) out = replaceWithSpaces(out, orphanBacktick, orphanBacktick + 1);
+    }
+    const codeRanges = [...multiRanges];
+    const pairedSingles = singles.filter(pos => pos !== orphanBacktick);
+    for (let i = 0; i + 1 < pairedSingles.length; i += 2) {
+      codeRanges.push([pairedSingles[i], pairedSingles[i + 1] + 1]);
+    }
+    return { text: out, codeRanges };
+  });
+  // Pass 2: isolate unclosed **, ~~, ==, * on editing lines when unbalanced across the block.
+  const specs = [
+    { key: 'strong', regex: /(?<!\*)\*\*(?!\*)/g },
+    { key: 'strike', regex: /(?<!~)~~(?!~)/g },
+    { key: 'mark', regex: /(?<!=)==(?!=)/g },
+    { key: 'em', regex: /(?<!\*)\*(?!\*)/g }
+  ];
+  for (const { key, regex } of specs) {
+    let blockTotal = 0;
+    const perLine = backtickMasked.map((entry, index) => {
+      if (literalMask[index]) return [];
+      const matches = findSymmetricMatches(entry.text, regex, entry.codeRanges);
+      blockTotal += matches.length;
+      return matches;
+    });
+    for (let index = 0; index < backtickMasked.length; index++) {
+      if (literalMask[index] || !editingLines?.has(startLine + index)) continue;
+      const matches = perLine[index];
+      if (matches.length % 2 !== 1) continue;
+      if (blockTotal % 2 !== 1 && matches.length < 3) continue;
+      const cols = caretLines?.get(startLine + index) || [];
+      const orphanPos = pickOrphanPosition(matches.map(m => m.from), true, cols);
+      const target = matches.find(m => m.from === orphanPos);
+      if (target) {
+        backtickMasked[index].text = replaceWithSpaces(backtickMasked[index].text, target.from, target.to);
+      }
+    }
+  }
+  return backtickMasked.map(entry => entry.text).join('\n');
+}
+
 /**
  * Split one line's parsed block markers into the prefix segments that sit
  * before the content. Nested containers interleave arbitrarily
@@ -187,7 +373,7 @@ function combinePrefixes(prefixes) {
  * editing ranges and every entry of `lines` is the info for one source line,
  * with offsets relative to that line start.
  */
-export function liveBlock(document, startLine, endLine, editingLines) {
+export function liveBlock(document, startLine, endLine, editingLines, caretLines = new Map()) {
   const source = document.source;
   const lineStarts = document.lineStarts;
   const last = Math.min(endLine, lineStarts.length);
@@ -254,6 +440,7 @@ export function liveBlock(document, startLine, endLine, editingLines) {
   };
 
   const codeSpan = node => {
+    if (lineAt(node.from) !== lineAt(node.to - 1)) return;
     const delimiters = [];
     for (let child = node.firstChild; child; child = child.nextSibling) if (child.name === 'CodeMark') delimiters.push(child);
     if (delimiters.length < 2) return;
@@ -296,6 +483,19 @@ export function liveBlock(document, startLine, endLine, editingLines) {
       ? isDefined(textOf(reference).slice(1, -1))
       : isDefined(blockText.slice(labelFrom, labelTo)));
     if (!resolved) {
+      const rawLabel = blockText.slice(labelFrom, labelTo);
+      if (!destination && !reference && linkMarks.length >= 2 && rawLabel.startsWith('^') && rawLabel.length > 1) {
+        if (blockText[node.to] === ':') {
+          mark(node.from, node.to + 1, 'soft', -1);
+        } else {
+          const id = group(node.from, node.to, 'link');
+          for (const bracket of linkMarks) mark(bracket.from, bracket.to, 'syntax', id);
+          mark(labelFrom, labelFrom + 1, 'syntax', id);
+          style(labelFrom + 1, labelTo, 'sup');
+          style(labelFrom + 1, labelTo, 'link');
+        }
+        return;
+      }
       for (const bracket of linkMarks) mark(bracket.from, bracket.to, 'soft', -1);
       for (const child of others) inlineNode(child);
       return;
@@ -431,9 +631,10 @@ export function liveBlock(document, startLine, endLine, editingLines) {
     if (front) classify(front.from, front.to, 'plain');
   }
 
+  const parseText = maskBlockLines(texts, startLine, editingLines, caretLines);
   const stack = [];
-  syntaxParser.parse(blockText).iterate({
-    from: 0, to: blockText.length,
+  syntaxParser.parse(parseText).iterate({
+    from: 0, to: parseText.length,
     enter(ref) {
       stack.push(ref.name);
       const parent = stack[stack.length - 2];
@@ -476,6 +677,16 @@ export function liveBlock(document, startLine, endLine, editingLines) {
           if (parent === 'Table') classify(ref.from, ref.to, 'plain', 'cm-lv-table');
           else mark(ref.from, ref.to, 'soft', -1);
           break;
+        case 'LinkReference': {
+          for (let child = ref.node.firstChild; child; child = child.nextSibling) {
+            if (child.name === 'LinkLabel' || child.name === 'LinkMark' || child.name === 'LinkTitle') {
+              mark(child.from, child.to, 'soft', -1);
+            } else if (child.name === 'URL') {
+              style(child.from, child.to, 'link');
+            }
+          }
+          break;
+        }
         default:
           if (INLINE_CONTAINER.test(ref.name)) { htmlTags(ref.node); children(ref.node); }
       }

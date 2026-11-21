@@ -1049,10 +1049,13 @@ try {
   await ensureLive();
   console.log('STEP immediate typeset on closing delimiter + reveal only inside element');
   await fresh();
-  await page.keyboard.type('# ', { delay: 25 });
-  assert.equal(await page.locator('.cm-lv-h1').count(), 0, '输入 # 加空格时保持普通字号');
+  await page.keyboard.type('#', { delay: 25 });
+  assert.equal(await page.locator('.cm-lv-h1').count(), 0, '输入 # 在空格前保持普通字号');
+  await page.keyboard.type(' ', { delay: 25 });
+  await page.locator('.cm-lv-h1').waitFor();
+  assert.ok(!(await page.locator('.cm-content').textContent()).includes('# '), '输入 # 加空格后标题前缀立即隐藏');
   await page.keyboard.type('标题', { delay: 25 });
-  assert.ok((await page.locator('.cm-content').textContent()).includes('# '), '当前标题行保留前缀');
+  assert.ok(await page.locator('.cm-lv-h1').count() >= 1, '输入标题内容期间保持标题排版');
   await page.keyboard.press('Enter');
   await page.locator('.md-widget h1').waitFor();
   await fresh();

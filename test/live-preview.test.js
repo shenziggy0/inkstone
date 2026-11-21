@@ -447,3 +447,49 @@ test('a rule reveals its own source when the caret enters it', () => {
   const plain = liveBlock(documentLines('* * *'), 0, 1, new Set([0]));
   assert.deepEqual([...blockReveal(plain, [{ from: 2, to: 2 }]).prefixes].map(prefix => prefix.kind), ['hr']);
 });
+
+test('CJK punctuation flanking matches rendered Markdown in active blocks', () => {
+  for (const [line, expectedKind, expectedText] of [
+    ['中文**（括号）**中文', 'strong', '（括号）'],
+    ['**注意：**不要这样做', 'strong', '注意：'],
+    ['请看**《墨页》**文档', 'strong', '《墨页》'],
+    ['中文*（斜体）*中文', 'em', '（斜体）'],
+    ['中文==（高亮）==中文', 'mark', '（高亮）'],
+    ['中文~~（删除）~~中文', 'strike', '（删除）']
+  ]) {
+    const info = liveLine(line);
+    assert.ok(info.styles.some(style => style.kind === expectedKind && text(line, style.from, style.to) === expectedText), line);
+  }
+});
+
+test('bracket math blocks stay literal and unclosed delimiters never steal closed syntax', () => {
+  const mathSrc = '\\[\nx_1 + x_2 = y^2\n\\]';
+  const mathBlock = liveBlock(documentLines(mathSrc), 0, 3);
+  assert.ok(mathBlock.lines.every(info => info.literal), 'LaTeX \\[...\\] 块公式每一行都是字面量');
+
+  // Typing a lone backtick on line 1 must not break closed inline code on line 2.
+  const para = [
+    '12.以后所有 `git commit` 和 `git push`。',
+    '13.不用 `mock 测试。',
+    '14.默认浏览器使用 `ego-lite`。'
+  ].join('\n');
+  const block = liveBlock(documentLines(para), 0, 3, new Set([1]), new Map([[1, [7]]]));
+  assert.deepEqual(block.lines[2].styles.map(s => para.split('\n')[2].slice(s.from, s.to)), ['ego-lite']);
+  assert.equal(block.lines[1].styles.length, 0, '未闭合的单反引号不应向外扩散');
+
+  // Typing a lone `**` before an already closed `**bold**` on the same line keeps `**bold**` intact.
+  const sameLine = '**新开 **已加粗**';
+  const sameBlock = liveBlock(documentLines(sameLine), 0, 1, new Set([0]), new Map([[0, [4]]]));
+  assert.deepEqual(sameBlock.lines[0].styles.map(s => sameLine.slice(s.from, s.to)), ['已加粗']);
+});
+
+test('footnote references and link references format cleanly in active blocks', () => {
+  const fnRef = liveLine('正文[^fn1]结束');
+  assert.ok(fnRef.styles.some(s => s.kind === 'sup' && '正文[^fn1]结束'.slice(s.from, s.to) === 'fn1'));
+  assert.ok(fnRef.styles.some(s => s.kind === 'link' && '正文[^fn1]结束'.slice(s.from, s.to) === 'fn1'));
+  assert.equal(fnRef.marks.filter(m => m.kind === 'syntax').length, 3);
+
+  const linkRef = liveLine('[ref-id]: https://example.com "Title"');
+  assert.ok(linkRef.styles.some(s => s.kind === 'link' && '[ref-id]: https://example.com "Title"'.slice(s.from, s.to) === 'https://example.com'));
+  assert.ok(linkRef.marks.some(m => m.kind === 'soft' && '[ref-id]: https://example.com "Title"'.slice(m.from, m.to) === '[ref-id]'));
+});

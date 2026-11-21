@@ -869,17 +869,21 @@ onLanguageLoaded(language => {
 // itself stays editable source; the preview is a read-only block widget that
 // is rebuilt only when its source text changes.
 const mathFence = /^\s*\$\$\s*$/;
+const bracketMathOpen = /^\s*\\\[\s*$/;
+const bracketMathClose = /^\s*\\\]\s*$/;
 const fenceOpen = /^\s*(`{3,}|~{3,})\s*([^\s`~]*)/;
 const MAX_PREVIEW_BLOCK_LINES = 400;
 
-/** The `$$…$$` or ```mermaid / ```sequence / ```flow block that contains `pos`, or null. */
+/** The `$$…$$`, `\[…\]` or ```mermaid / ```sequence / ```flow block that contains `pos`, or null. */
 function enclosingPreviewBlock(doc, pos) {
   const caret = doc.lineAt(pos);
   const first = Math.max(1, caret.number - MAX_PREVIEW_BLOCK_LINES);
   let opener = null;
   for (let number = caret.number; number >= first; number--) {
     const text = doc.line(number).text;
-    if (mathFence.test(text)) { opener = { kind: 'math', number }; break; }
+    if (number < caret.number && bracketMathClose.test(text)) return null;
+    if (mathFence.test(text)) { opener = { kind: 'math', number, close: mathFence }; break; }
+    if (bracketMathOpen.test(text)) { opener = { kind: 'math', number, close: bracketMathClose }; break; }
     const fence = fenceOpen.exec(text);
     if (fence) {
       const language = fence[2].toLowerCase();
@@ -892,7 +896,7 @@ function enclosingPreviewBlock(doc, pos) {
   const last = Math.min(doc.lines, opener.number + MAX_PREVIEW_BLOCK_LINES);
   for (let number = opener.number + 1; number <= last; number++) {
     const text = doc.line(number).text;
-    const closes = opener.kind === 'math' ? mathFence.test(text) : new RegExp(`^\\s*${opener.marker}\\s*$`).test(text);
+    const closes = opener.kind === 'math' ? opener.close.test(text) : new RegExp(`^\\s*${opener.marker}\\s*$`).test(text);
     if (!closes) continue;
     // A caret below the closing marker belongs to the next block.
     if (caret.number > number) return null;
@@ -1082,15 +1086,95 @@ function liveDecorations(state, id) {
   const source = state.doc.toString();
   const { tokens, blocks, document, imageRoot } = parsedFor(source, id);
   const htmlByStart = new Map(blocks.map(block => [block.start, block.html]));
-  const ranges = [], occupied = new Set();
+  const ranges = [], occupied = new Set(), coveredLines = new Set();
   // Before any interaction, the caret at offset 0 must not turn the first
   // heading into an editable source line; the whole document is a reading view.
   const selection = mode.pristine || mode.hold ? [] : state.selection.ranges;
+  const editingLines = new Set();
+  const caretLines = new Map();
+  for (const range of selection) {
+    if (!range.empty) continue;
+    const line = state.doc.lineAt(range.head);
+    const index = line.number - 1;
+    editingLines.add(index);
+    const cols = caretLines.get(index) || [];
+    cols.push(range.head - line.from);
+    caretLines.set(index, cols);
+  }
+
+  const decorateActiveRange = (start, end, tokenType = '', tokenTag = '') => {
+    // The block is parsed as a whole, so emphasis may cross soft line breaks
+    // and code fences nested in a list are known to be literal. Only this
+    // block is parsed, which keeps every keystroke proportional to it.
+    const live = liveBlock(document, start, end, editingLines, caretLines);
+    // Only a multi-line Setext heading stays provisional while editing its
+    // underline row (`正文\n- `); ATX headings keep their display scale.
+    const pendingHeading = tokenType === 'heading_open' && end > start + 1 && editingLines.has(end - 1);
+    // Typora renders a completed syntax at once, even with the caret right
+    // after the closing marker. Only a caret *inside* the element (or a
+    // selection overlapping it) brings the source characters back.
+    const reveal = blockReveal(live, selection.map(range => ({
+      from: blockOffset(live, state, range.from, start), to: blockOffset(live, state, range.to, start)
+    })));
+    live.lines.forEach((info, index) => {
+      const line = state.doc.line(start + 1 + index);
+      const classes = ['cm-live-line', ...info.classes];
+      const readyHeading = info.classes.some(name => /^cm-lv-h[1-6]$/.test(name)) || (end > start + 1 && !pendingHeading);
+      if (index === 0 && tokenType === 'heading_open' && readyHeading) classes.push(`cm-heading-${tokenTag.slice(1)}`);
+      ranges.push(Decoration.line({ class: classes.join(' ') }).range(line.from));
+      // Code, formulas, HTML blocks and front matter are literal source.
+      if (info.literal) return;
+      if (info.plain) {
+        for (const mark of inlineMarks(line.text)) {
+          ranges.push(Decoration.mark({ class: 'cm-md-mark' }).range(line.from + mark.from, line.from + mark.to));
+        }
+        return;
+      }
+      for (const mark of info.marks) {
+        const markFrom = line.from + mark.from, markTo = line.from + mark.to;
+        const hidden = mark.kind === 'syntax' && mark.group >= 0 && !reveal.groups.has(mark.group);
+        if (hidden) {
+          ranges.push(Decoration.replace({ widget: hiddenMark }).range(markFrom, markTo));
+        } else {
+          ranges.push(Decoration.mark({ class: 'cm-md-mark' }).range(markFrom, markTo));
+        }
+      }
+      for (const style of info.styles) {
+        ranges.push(Decoration.mark({ class: `cm-lv-${style.kind}` }).range(line.from + style.from, line.from + style.to));
+      }
+      for (const replacement of info.replacements || []) {
+        const from = line.from + replacement.from, to = line.from + replacement.to;
+        if (reveal.groups.has(replacement.group)) ranges.push(Decoration.mark({ class: 'cm-md-mark' }).range(from, to));
+        else ranges.push(Decoration.replace({ widget: new RenderedInline(replacement.text) }).range(from, to));
+      }
+      for (const prefix of info.prefixes) {
+        const prefixFrom = line.from + prefix.from, prefixTo = line.from + prefix.to;
+        if (reveal.prefixes.has(prefix)) {
+          ranges.push(Decoration.mark({ class: 'cm-md-mark' }).range(prefixFrom, prefixTo));
+        } else if (prefix.kind === 'heading') {
+          ranges.push(Decoration.replace({ widget: hiddenMark }).range(prefixFrom, prefixTo));
+        } else {
+          // A quote owns an inline indentation/rule span, so prefixes remain
+          // ordered correctly for `- > item` as well as `> - item`. The line
+          // class only contributes the muted quote colour.
+          ranges.push(Decoration.replace({
+            widget: new PrefixWidget(prefix.kind, line.from + (prefix.checkOffset ?? 0), prefix.checked, prefix.label)
+          }).range(prefixFrom, prefixTo));
+        }
+      }
+    });
+  };
+
   for (const token of tokens) {
     if (!token.map || token.level !== 0 || token.nesting === -1) continue;
-    const [start, end] = token.map;
+    const [start, rawEnd] = token.map;
+    let end = rawEnd;
+    if (token.type !== 'fence' && token.type !== 'code_block' && token.type !== 'math_block') {
+      while (end > start + 1 && end <= state.doc.lines && !state.doc.line(end).text.trim()) end--;
+    }
     if (start >= end || occupied.has(start) || end > state.doc.lines) continue;
     occupied.add(start);
+    for (let lineIndex = start; lineIndex < end; lineIndex++) coveredLines.add(lineIndex);
     const from = state.doc.line(start + 1).from;
     const to = state.doc.line(end).to;
     if (from === to) continue;
@@ -1106,74 +1190,7 @@ function liveDecorations(state, id) {
     // characters are removed from the layout until the caret comes near them,
     // and the content itself receives real typography (bold, italic, code…).
     if (active) {
-      // The block is parsed as a whole, so emphasis may cross soft line breaks
-      // and code fences nested in a list are known to be literal. Only this
-      // block is parsed, which keeps every keystroke proportional to it.
-      const editingLines = new Set(selection.filter(range => range.empty).map(range => state.doc.lineAt(range.head).number - 1));
-      const live = liveBlock(document, start, end, editingLines);
-      const pendingHeading = token.type === 'heading_open' && editingLines.has(end - 1);
-      // Typora renders a completed syntax at once, even with the caret right
-      // after the closing marker. Only a caret *inside* the element (or a
-      // selection overlapping it) brings the source characters back.
-      const reveal = blockReveal(live, selection.map(range => ({
-        from: blockOffset(live, state, range.from, start), to: blockOffset(live, state, range.to, start)
-      })));
-      live.lines.forEach((info, index) => {
-        const line = state.doc.line(start + 1 + index);
-        // Keep the current heading line at body size until the caret leaves it.
-        // A Setext underline is also provisional: typing `- ` must not resize
-        // the preceding paragraph before the author finishes the list item.
-        const pendingLine = editingLines.has(start + index) && info.prefixes.some(prefix => prefix.kind === 'heading');
-        if (pendingLine) {
-          // Only the heading marker is provisional; an enclosing quote or list
-          // on the same line stays typeset.
-          info.prefixes = info.prefixes.filter(prefix => prefix.kind !== 'heading');
-          info.classes = info.classes.filter(name => !/^cm-lv-h[1-6]$/.test(name));
-        }
-        const classes = ['cm-live-line', ...info.classes];
-        if (index === 0 && token.type === 'heading_open' && !pendingHeading) classes.push(`cm-heading-${token.tag.slice(1)}`);
-        ranges.push(Decoration.line({ class: classes.join(' ') }).range(line.from));
-        // Code, formulas, HTML blocks and front matter are literal source.
-        if (info.literal) return;
-        if (info.plain) {
-          for (const mark of inlineMarks(line.text)) {
-            ranges.push(Decoration.mark({ class: 'cm-md-mark' }).range(line.from + mark.from, line.from + mark.to));
-          }
-          return;
-        }
-        for (const mark of info.marks) {
-          const markFrom = line.from + mark.from, markTo = line.from + mark.to;
-          const hidden = mark.kind === 'syntax' && mark.group >= 0 && !reveal.groups.has(mark.group);
-          if (hidden) {
-            ranges.push(Decoration.replace({ widget: hiddenMark }).range(markFrom, markTo));
-          } else {
-            ranges.push(Decoration.mark({ class: 'cm-md-mark' }).range(markFrom, markTo));
-          }
-        }
-        for (const style of info.styles) {
-          ranges.push(Decoration.mark({ class: `cm-lv-${style.kind}` }).range(line.from + style.from, line.from + style.to));
-        }
-        for (const replacement of info.replacements || []) {
-          const from = line.from + replacement.from, to = line.from + replacement.to;
-          if (reveal.groups.has(replacement.group)) ranges.push(Decoration.mark({ class: 'cm-md-mark' }).range(from, to));
-          else ranges.push(Decoration.replace({ widget: new RenderedInline(replacement.text) }).range(from, to));
-        }
-        for (const prefix of info.prefixes) {
-          const prefixFrom = line.from + prefix.from, prefixTo = line.from + prefix.to;
-          if (reveal.prefixes.has(prefix)) {
-            ranges.push(Decoration.mark({ class: 'cm-md-mark' }).range(prefixFrom, prefixTo));
-          } else if (prefix.kind === 'heading') {
-            ranges.push(Decoration.replace({ widget: hiddenMark }).range(prefixFrom, prefixTo));
-          } else {
-            // A quote owns an inline indentation/rule span, so prefixes remain
-            // ordered correctly for `- > item` as well as `> - item`. The line
-            // class only contributes the muted quote colour.
-            ranges.push(Decoration.replace({
-              widget: new PrefixWidget(prefix.kind, line.from + (prefix.checkOffset ?? 0), prefix.checked, prefix.label)
-            }).range(prefixFrom, prefixTo));
-          }
-        }
-      });
+      decorateActiveRange(start, end, token.type, token.tag);
       continue;
     }
     const text = state.doc.sliceString(from, to, '\n');
@@ -1182,6 +1199,13 @@ function liveDecorations(state, id) {
     // typeset (no Markdown revealed, no layout change) and is only tinted.
     const selected = selection.some(range => !range.empty && range.from <= from && range.to >= to);
     ranges.push(Decoration.replace({ widget: new MarkdownWidget(text, from, to, id, html, selected), block: true }).range(from, to));
+  }
+  // Link references (`[ref]: url`) and footnote definitions (`[^fn]: ...`)
+  // carry no top-level token.map in markdown-it; apply live-preview formatting
+  // so they never fall back to raw monospace text.
+  for (let lineIndex = 0; lineIndex < state.doc.lines; lineIndex++) {
+    if (coveredLines.has(lineIndex)) continue;
+    if (state.doc.line(lineIndex + 1).text.trim()) decorateActiveRange(lineIndex, lineIndex + 1);
   }
   return Decoration.set(ranges, true);
 }
@@ -1203,6 +1227,27 @@ const layoutMarker = ViewPlugin.fromClass(class {
       : view.state.doc.length > LIVE_PREVIEW_LIMIT ? 'source-fallback' : 'typeset';
   }
 });
+
+/** Enter rendered block widgets one line at a time instead of jumping past them on ArrowDown / ArrowUp. */
+function verticalBlockStep(view, forward) {
+  const { state } = view;
+  if (state.field(modeField, false)?.source) return false;
+  const range = state.selection.main;
+  if (!range.empty || state.selection.ranges.length !== 1) return false;
+  const line = state.doc.lineAt(range.head);
+  const targetNumber = forward ? line.number + 1 : line.number - 1;
+  if (targetNumber < 1 || targetNumber > state.doc.lines) return false;
+  const next = view.moveVertically(range, forward);
+  const nextLine = state.doc.lineAt(next.head).number;
+  const skipped = forward
+    ? (nextLine > targetNumber || next.head === range.head)
+    : (nextLine < targetNumber || next.head === range.head);
+  if (!skipped) return false;
+  const target = state.doc.line(targetNumber);
+  const col = Math.min(range.head - line.from, target.length);
+  view.dispatch({ selection: { anchor: target.from + col }, scrollIntoView: true });
+  return true;
+}
 
 /** Tab / Shift+Tab walk table cells when the caret is on a GFM table row. */
 function tableTab(view, backwards) {
@@ -1397,6 +1442,8 @@ export function createEditor(parent, doc, onChange, onSelection, onCommand, onIm
       EditorState.phrases.of(CHINESE_PHRASES),
       search({ top: true }),
       keymap.of([
+        { key: 'ArrowDown', run: view => verticalBlockStep(view, true) },
+        { key: 'ArrowUp', run: view => verticalBlockStep(view, false) },
         { key: 'Tab', run: view => tableTab(view, false) },
         { key: 'Shift-Tab', run: view => tableTab(view, true) },
         { key: 'Enter', run: paragraphEnter },

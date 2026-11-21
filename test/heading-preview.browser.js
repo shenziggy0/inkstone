@@ -12,14 +12,17 @@ export function runHeadingPreviewChecks() {
   const line = () => host.querySelector('.cm-line');
   try {
     for (let level = 1; level <= 6; level++) {
-      for (const suffix of ['', ' ', ' 标题']) {
-        const source = '#'.repeat(level) + suffix;
+      const bare = '#'.repeat(level);
+      set(bare);
+      check(getComputedStyle(line()).fontSize === '16px', `h${level} without space stays body size`);
+      for (const suffix of [' ', ' 标题']) {
+        const source = bare + suffix;
         set(source);
-        check(getComputedStyle(line()).fontSize === '16px', `h${level} must wait for line completion`);
+        check(!!host.querySelector(`.cm-lv-h${level}`), `h${level} typesets immediately after space`);
         check([...line().querySelectorAll('span')].every(node => !getComputedStyle(node).textDecorationLine.includes('underline')), 'heading text must not be underlined');
         check(editor.view.state.doc.toString() === source, 'preview must preserve source');
       }
-      set('#'.repeat(level) + ' 标题\n');
+      set(bare + ' 标题\n');
       const heading = host.querySelector(`h${level}`);
       check(!!heading, `h${level} renders after newline`);
       check(getComputedStyle(heading).borderBottomWidth === '0px', 'rendered heading must not add a rule');
