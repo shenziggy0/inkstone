@@ -703,6 +703,28 @@ class MarkdownWidget extends WidgetType {
   ignoreEvent() { return true; }
 }
 
+/** Keep the document-tail footnote section visible while the last block is active. */
+class FootnoteBlockWidget extends WidgetType {
+  constructor(html) { super(); this.html = html; }
+  eq(other) { return this.html === other.html; }
+  toDOM() {
+    const element = document.createElement('div');
+    element.className = 'md-widget prose';
+    element.innerHTML = this.html;
+    element.addEventListener('mousedown', event => {
+      const link = event.target.closest('a');
+      if (!link) return;
+      event.preventDefault();
+      element.dispatchEvent(new CustomEvent('inkstone:open-link', {
+        bubbles: true,
+        detail: { href: link.getAttribute('href') || '', modifier: !!(event.metaKey || event.ctrlKey) }
+      }));
+    });
+    return element;
+  }
+  ignoreEvent() { return true; }
+}
+
 // After a cell edit the widget is rebuilt by CodeMirror; Tab / Enter ask the
 // re-rendered table to continue editing in a neighbouring cell. The target is
 // remembered by block start (stable across a cell edit) until it is found.
@@ -812,7 +834,7 @@ class PrefixWidget extends WidgetType {
 // Rendering the whole document once is what gives every block the same parse
 // environment. Cache by (document id + text): selection changes recompute
 // decorations but must not re-parse the file.
-let blockCache = { key: '', blocks: [], tokens: [], document: null, math: null };
+let blockCache = { key: '', blocks: [], tokens: [], document: null, math: null, footnoteHtml: '' };
 const blockCacheKey = (id, source) => `${id}\u0000${mathNumberingEnabled() ? '1' : '0'}\u0000${source}`;
 function parsedFor(source, id) {
   const numbering = mathNumberingEnabled();
@@ -857,7 +879,7 @@ onLanguageLoaded(language => {
   // editor-level parse cache has to go too, or it would hand the old HTML back
   // without asking the renderer again.
   invalidateFenceLanguages([language]);
-  blockCache = { key: '', blocks: [], tokens: [], document: null, math: null };
+  blockCache = { key: '', blocks: [], tokens: [], document: null, math: null, footnoteHtml: '' };
   for (const view of previewViews) {
     if (!view.dom.isConnected) { previewViews.delete(view); continue; }
     view.dispatch({ effects: refreshEffect.of(true) });
@@ -1084,9 +1106,10 @@ function liveDecorations(state, id) {
   const mode = state.field(modeField);
   if (mode.source || state.doc.length > LIVE_PREVIEW_LIMIT) return Decoration.none;
   const source = state.doc.toString();
-  const { tokens, blocks, document, imageRoot } = parsedFor(source, id);
+  const { tokens, blocks, document, imageRoot, footnoteHtml } = parsedFor(source, id);
   const htmlByStart = new Map(blocks.map(block => [block.start, block.html]));
   const ranges = [], occupied = new Set(), coveredLines = new Set();
+  let lastBlockRendered = false;
   // Before any interaction, the caret at offset 0 must not turn the first
   // heading into an editable source line; the whole document is a reading view.
   const selection = mode.pristine || mode.hold ? [] : state.selection.ranges;
@@ -1186,6 +1209,7 @@ function liveDecorations(state, id) {
     // visible to place a caret.
     const active = selection.some(range =>
       (range.anchor >= from && range.anchor <= to) || (range.head >= from && range.head <= to));
+    lastBlockRendered = !active;
     // The active block stays editable, but reads as typeset prose: syntax
     // characters are removed from the layout until the caret comes near them,
     // and the content itself receives real typography (bold, italic, code…).
@@ -1206,6 +1230,9 @@ function liveDecorations(state, id) {
   for (let lineIndex = 0; lineIndex < state.doc.lines; lineIndex++) {
     if (coveredLines.has(lineIndex)) continue;
     if (state.doc.line(lineIndex + 1).text.trim()) decorateActiveRange(lineIndex, lineIndex + 1);
+  }
+  if (footnoteHtml && !lastBlockRendered) {
+    ranges.push(Decoration.widget({ widget: new FootnoteBlockWidget(footnoteHtml), block: true, side: 1 }).range(state.doc.length));
   }
   return Decoration.set(ranges, true);
 }

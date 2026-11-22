@@ -80,7 +80,8 @@ test('Typora parity: soft line breaks render as <br> and CJK punctuation flanks 
     ['使用**`code`**加粗代码', /使用<strong><code>code<\/code><\/strong>加粗代码/],
     ['中文*（斜体）*中文', /中文<em>（斜体）<\/em>中文/],
     ['中文==（高亮）==中文', /中文<mark>（高亮）<\/mark>中文/],
-    ['中文~~（删除）~~中文', /中文<s>（删除）<\/s>中文/]
+    ['中文~~（删除）~~中文', /中文<s>（删除）<\/s>中文/],
+    ['𠀀**（测试）**𠀀', /𠀀<strong>（测试）<\/strong>𠀀/]
   ];
   for (const [source, expected] of cjkCases) {
     assert.match(render(source).html, expected, source);

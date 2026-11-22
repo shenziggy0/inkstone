@@ -594,9 +594,13 @@ export function renderDocument(source, documentId, options = {}) {
     tableOffset += entry.tables;
     return { start: group.start, end: group.end, html };
   });
+  const footnoteStart = plan.tokens.findIndex(token => token.type === 'footnote_block_open');
+  const footnoteHtml = footnoteStart >= 0
+    ? finalizeHTML(parser.renderer.render(plan.tokens.slice(footnoteStart), parser.options, plan.env), documentId, plan.toc, plan.footnotes, { imageRoot: plan.imageRoot, chrome: plan.chrome })
+    : '';
   // Returning the tokens lets the editor reuse this single parse for its
   // decoration ranges instead of parsing the whole file on every caret move.
-  return { tokens: plan.tokens, blocks, stats, math: plan.math, imageRoot: plan.imageRoot };
+  return { tokens: plan.tokens, blocks, stats, math: plan.math, imageRoot: plan.imageRoot, footnoteHtml };
 }
 
 /**

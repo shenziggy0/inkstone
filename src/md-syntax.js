@@ -46,8 +46,8 @@ const Mark = {
       let end = pos;
       while (cx.char(end) === 0x3d) end++;
       const length = end - pos;
-      const before = pos > cx.offset ? cx.slice(pos - 1, pos) : '';
-      const after = cx.char(end) < 0 ? '' : cx.slice(end, end + 1);
+      const before = pos > cx.offset ? [...cx.slice(Math.max(cx.offset, pos - 2), pos)].at(-1) : '';
+      const after = cx.char(end) < 0 ? '' : [...cx.slice(end, Math.min(cx.end, end + 2))][0];
       const spaceBefore = !before || /\s/.test(before), spaceAfter = !after || /\s/.test(after);
       const punctBefore = PUNCTUATION.test(before), punctAfter = PUNCTUATION.test(after);
       const cjkBefore = CJK.test(before), cjkAfter = CJK.test(after);
@@ -71,8 +71,8 @@ function parseWithCjk(baseParser) {
     if (end >= 0 && next !== 0x5f /* _ */) {
       const part = cx.parts[cx.parts.length - 1];
       if (part && part.from === pos && part.to === end && typeof part.side === 'number') {
-        const before = pos > cx.offset ? cx.slice(pos - 1, pos) : '';
-        const after = cx.char(end) < 0 ? '' : cx.slice(end, end + 1);
+        const before = pos > cx.offset ? [...cx.slice(Math.max(cx.offset, pos - 2), pos)].at(-1) : '';
+        const after = cx.char(end) < 0 ? '' : [...cx.slice(end, Math.min(cx.end, end + 2))][0];
         if (after && !/\s/.test(after) && CJK.test(before)) part.side |= 1;
         if (before && !/\s/.test(before) && CJK.test(after)) part.side |= 2;
       }
@@ -247,11 +247,17 @@ export function documentLines(source) {
   // defined, exactly like the reading view. The scan is a deliberately cheap
   // approximation of markdown-it's block rule (it does not track fences).
   const references = new Set();
+  const footnotes = new Set();
   for (const match of text.matchAll(/^ {0,3}\[([^\]\n]+)\]:/gm)) {
     const label = match[1].trim();
-    if (!label.startsWith('^')) references.add(referenceLabel(label));
+    if (label.startsWith('^')) {
+      const name = label.slice(1);
+      if (name && !/\s/.test(name)) footnotes.add(name);
+    } else {
+      references.add(referenceLabel(label));
+    }
   }
-  return { source: text, lineStarts, references };
+  return { source: text, lineStarts, references, footnotes };
 }
 
 /** CommonMark's link-label comparison: whitespace collapsed, case folded. */

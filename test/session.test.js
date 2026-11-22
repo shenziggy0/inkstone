@@ -3,7 +3,38 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { WorkspaceState, recordRecent, pruneMissing, RECENT_FILES_LIMIT, RECENT_FOLDERS_LIMIT } from '../electron/session.cjs';
+import { WorkspaceState, recordRecent, pruneMissing, claimMacFolderAccessReset, RECENT_FILES_LIMIT, RECENT_FOLDERS_LIMIT } from '../electron/session.cjs';
+
+test('mac folder access reset is claimed once, including after identical reinstalls', async t => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'inkstone-mac-install-'));
+  t.after(() => fs.rm(home, { recursive: true, force: true }));
+  const userData = path.join(home, 'support');
+  const executable = path.join(home, 'Applications', 'Inkstone.app', 'Contents', 'MacOS', 'Inkstone');
+  await fs.mkdir(path.dirname(executable), { recursive: true });
+  const buildTime = new Date('2026-01-01T00:00:00Z');
+  await fs.writeFile(executable, 'same build');
+  await fs.utimes(executable, buildTime, buildTime);
+  assert.equal(await claimMacFolderAccessReset(userData, executable, home), true);
+  assert.equal(await claimMacFolderAccessReset(userData, executable, home), false);
+
+  const replacement = `${executable}.replacement`;
+  await fs.copyFile(executable, replacement);
+  await fs.utimes(replacement, buildTime, buildTime);
+  await fs.rename(replacement, executable);
+  assert.equal(await claimMacFolderAccessReset(userData, executable, home), true);
+  assert.equal(await claimMacFolderAccessReset(userData, executable, home), false);
+});
+
+test('a mac app outside Applications does not consume the install reset', async t => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'inkstone-mac-install-'));
+  t.after(() => fs.rm(home, { recursive: true, force: true }));
+  const userData = path.join(home, 'support');
+  const executable = path.join(home, 'Downloads', 'Inkstone.app', 'Contents', 'MacOS', 'Inkstone');
+  await fs.mkdir(path.dirname(executable), { recursive: true });
+  await fs.writeFile(executable, '');
+  assert.equal(await claimMacFolderAccessReset(userData, executable, home), false);
+  await assert.rejects(fs.stat(userData), { code: 'ENOENT' });
+});
 
 test('recent lists keep the newest entry first, never duplicate and stay capped', () => {
   let list = [];

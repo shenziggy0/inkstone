@@ -2241,6 +2241,7 @@ try {
   assert.match(insertedName, /^图片-示例-[0-9a-f]{8}\.png$/, `中文与空格的图片名应保留：${insertedName}`);
   const tempDirectory = path.join(root, 'profile', 'unsaved-assets', unsavedId);
   assert.equal(await exists(path.join(tempDirectory, 'assets', insertedName)), true, '未保存文档的图片应写入按文档 id 划分的临时目录');
+  await fs.mkdir(path.join(root, 'unsaved-save'), { recursive: true });
   const unsavedTarget = path.join(root, 'unsaved-save', '未保存文档.md');
   await app.evaluate(({ dialog }, filePath) => { dialog.showSaveDialog = async () => ({ canceled: false, filePath }); }, unsavedTarget);
   await page.locator('[data-command="save"]').click();

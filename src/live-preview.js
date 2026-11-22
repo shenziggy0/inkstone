@@ -114,19 +114,54 @@ function pickOrphanPosition(positions, editing, caretCols) {
   return positions[positions.length - 1];
 }
 
-function findSymmetricMatches(text, regex, codeRanges) {
+const DELIM_PUNCT = /\p{S}|\p{P}/u;
+const DELIM_CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u;
+
+function delimiterFlanking(text, from, to) {
+  const before = from > 0 ? [...text.slice(Math.max(0, from - 2), from)].at(-1) : '';
+  const after = to < text.length ? [...text.slice(to, Math.min(text.length, to + 2))][0] : '';
+  const spaceBefore = !before || /\s/.test(before);
+  const spaceAfter = !after || /\s/.test(after);
+  const punctBefore = Boolean(before) && DELIM_PUNCT.test(before);
+  const punctAfter = Boolean(after) && DELIM_PUNCT.test(after);
+  const cjkBefore = Boolean(before) && DELIM_CJK.test(before);
+  const cjkAfter = Boolean(after) && DELIM_CJK.test(after);
+  return {
+    canOpen: !spaceAfter && (!punctAfter || spaceBefore || punctBefore || cjkBefore),
+    canClose: !spaceBefore && (!punctBefore || spaceAfter || punctAfter || cjkAfter)
+  };
+}
+
+function findDelimiterMatches(text, regex, codeRanges, lineIndex) {
   const matches = [];
   for (const match of text.matchAll(regex)) {
     const from = match.index;
     const to = from + match[0].length;
     if (isEscaped(text, from)) continue;
     if (codeRanges.some(([a, b]) => from >= a && to <= b)) continue;
-    const before = from > 0 ? text[from - 1] : '';
-    const after = to < text.length ? text[to] : '';
-    if ((!before || /\s/.test(before)) && (!after || /\s/.test(after))) continue;
-    matches.push({ from, to });
+    const { canOpen, canClose } = delimiterFlanking(text, from, to);
+    if (!canOpen && !canClose) continue;
+    matches.push({ lineIndex, from, to, canOpen, canClose });
   }
   return matches;
+}
+
+function unpairedDelimiters(perLineMatches) {
+  const stack = [];
+  const unpaired = [];
+  for (const matches of perLineMatches) {
+    for (const item of matches) {
+      if (item.canClose && stack.length > 0) {
+        stack.pop();
+      } else if (item.canOpen) {
+        stack.push(item);
+      } else {
+        unpaired.push(item);
+      }
+    }
+  }
+  unpaired.push(...stack);
+  return unpaired;
 }
 
 /**
@@ -134,36 +169,8 @@ function findSymmetricMatches(text, regex, codeRanges) {
  * typing a lone `` ` `` or `**` never steals partners from closed syntax on
  * the same line or across lines.
  */
-export function isolateUnclosedDelimiters(text, editing, caretCols = [], blockTotals = null) {
-  let out = text;
-  const { multiRanges, singles } = scanCodeSpansAndSingleBackticks(out);
-  let orphanBacktick = -1;
-  if (singles.length % 2 === 1) {
-    orphanBacktick = pickOrphanPosition(singles, editing, caretCols);
-    if (orphanBacktick >= 0) out = replaceWithSpaces(out, orphanBacktick, orphanBacktick + 1);
-  }
-  if (!editing) return out;
-  const codeRanges = [...multiRanges];
-  const pairedSingles = singles.filter(pos => pos !== orphanBacktick);
-  for (let i = 0; i + 1 < pairedSingles.length; i += 2) {
-    codeRanges.push([pairedSingles[i], pairedSingles[i + 1] + 1]);
-  }
-  const specs = [
-    { key: 'strong', regex: /(?<!\*)\*\*(?!\*)/g },
-    { key: 'strike', regex: /(?<!~)~~(?!~)/g },
-    { key: 'mark', regex: /(?<!=)==(?!=)/g },
-    { key: 'em', regex: /(?<!\*)\*(?!\*)/g }
-  ];
-  for (const { key, regex } of specs) {
-    const matches = findSymmetricMatches(out, regex, codeRanges);
-    if (matches.length % 2 !== 1) continue;
-    const total = blockTotals ? blockTotals[key] : matches.length;
-    if (total % 2 !== 1 && matches.length < 3) continue;
-    const orphanPos = pickOrphanPosition(matches.map(m => m.from), true, caretCols);
-    const target = matches.find(m => m.from === orphanPos);
-    if (target) out = replaceWithSpaces(out, target.from, target.to);
-  }
-  return out;
+export function isolateUnclosedDelimiters(text, editing, caretCols = []) {
+  return maskBlockLines([text], 0, editing ? new Set([0]) : new Set(), new Map([[0, caretCols]]));
 }
 
 function maskBlockLines(texts, startLine, editingLines, caretLines) {
@@ -218,32 +225,22 @@ function maskBlockLines(texts, startLine, editingLines, caretLines) {
     }
     return { text: out, codeRanges };
   });
-  // Pass 2: isolate unclosed **, ~~, ==, * on editing lines when unbalanced across the block.
+  // Pass 2: isolate genuinely unpaired **, ~~, ==, * on editing lines without breaking paired spans.
   const specs = [
-    { key: 'strong', regex: /(?<!\*)\*\*(?!\*)/g },
-    { key: 'strike', regex: /(?<!~)~~(?!~)/g },
-    { key: 'mark', regex: /(?<!=)==(?!=)/g },
-    { key: 'em', regex: /(?<!\*)\*(?!\*)/g }
+    /(?<!\*)\*\*(?!\*)/g,
+    /(?<!~)~~(?!~)/g,
+    /(?<!=)==(?!=)/g,
+    /(?<!\*)\*(?!\*)/g
   ];
-  for (const { key, regex } of specs) {
-    let blockTotal = 0;
-    const perLine = backtickMasked.map((entry, index) => {
-      if (literalMask[index]) return [];
-      const matches = findSymmetricMatches(entry.text, regex, entry.codeRanges);
-      blockTotal += matches.length;
-      return matches;
-    });
-    for (let index = 0; index < backtickMasked.length; index++) {
-      if (literalMask[index] || !editingLines?.has(startLine + index)) continue;
-      const matches = perLine[index];
-      if (matches.length % 2 !== 1) continue;
-      if (blockTotal % 2 !== 1 && matches.length < 3) continue;
-      const cols = caretLines?.get(startLine + index) || [];
-      const orphanPos = pickOrphanPosition(matches.map(m => m.from), true, cols);
-      const target = matches.find(m => m.from === orphanPos);
-      if (target) {
-        backtickMasked[index].text = replaceWithSpaces(backtickMasked[index].text, target.from, target.to);
-      }
+  for (const regex of specs) {
+    const perLine = backtickMasked.map((entry, index) => (
+      literalMask[index] ? [] : findDelimiterMatches(entry.text, regex, entry.codeRanges, index)
+    ));
+    for (const target of unpairedDelimiters(perLine)) {
+      if (!editingLines?.has(startLine + target.lineIndex)) continue;
+      backtickMasked[target.lineIndex].text = replaceWithSpaces(
+        backtickMasked[target.lineIndex].text, target.from, target.to
+      );
     }
   }
   return backtickMasked.map(entry => entry.text).join('\n');
@@ -460,6 +457,7 @@ export function liveBlock(document, startLine, endLine, editingLines, caretLines
   };
 
   const references = document.references || new Set();
+  const footnotes = document.footnotes || new Set();
   const isDefined = label => references.has(referenceLabel(label));
 
   const link = (node, kind) => {
@@ -487,14 +485,16 @@ export function liveBlock(document, startLine, endLine, editingLines, caretLines
       if (!destination && !reference && linkMarks.length >= 2 && rawLabel.startsWith('^') && rawLabel.length > 1) {
         if (blockText[node.to] === ':') {
           mark(node.from, node.to + 1, 'soft', -1);
-        } else {
+          return;
+        }
+        if (footnotes.has(rawLabel.slice(1))) {
           const id = group(node.from, node.to, 'link');
           for (const bracket of linkMarks) mark(bracket.from, bracket.to, 'syntax', id);
           mark(labelFrom, labelFrom + 1, 'syntax', id);
           style(labelFrom + 1, labelTo, 'sup');
           style(labelFrom + 1, labelTo, 'link');
+          return;
         }
-        return;
       }
       for (const bracket of linkMarks) mark(bracket.from, bracket.to, 'soft', -1);
       for (const child of others) inlineNode(child);
@@ -678,10 +678,12 @@ export function liveBlock(document, startLine, endLine, editingLines, caretLines
           else mark(ref.from, ref.to, 'soft', -1);
           break;
         case 'LinkReference': {
+          let isFootnoteDef = false;
           for (let child = ref.node.firstChild; child; child = child.nextSibling) {
+            if (child.name === 'LinkLabel' && textOf(child).startsWith('[^')) isFootnoteDef = true;
             if (child.name === 'LinkLabel' || child.name === 'LinkMark' || child.name === 'LinkTitle') {
               mark(child.from, child.to, 'soft', -1);
-            } else if (child.name === 'URL') {
+            } else if (child.name === 'URL' && !isFootnoteDef) {
               style(child.from, child.to, 'link');
             }
           }

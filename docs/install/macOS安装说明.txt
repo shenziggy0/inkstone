@@ -5,6 +5,9 @@ Inkstone（墨页）macOS 安装与更新说明
 2. 将 Inkstone.app 拖到 Applications（应用程序），选择替换旧版。
 3. 从“应用程序”打开 Inkstone，不要直接从本安装盘运行。
 
+安装或覆盖后的首次启动，Inkstone 会尝试重置自己的“桌面、文稿、下载”访问授权。
+再次访问时，macOS 可能要求你重新授权。重置不会清除文档或设置，普通重启也不会重置权限。
+
 出现“已损坏，无法打开”或“无法验证开发者”
 --------------------------------------
 此安装包里的 Inkstone.app 做了临时签名（ad-hoc），没有 Apple Developer ID 签名，也没有公证。
@@ -31,6 +34,11 @@ Mac installation (English)
 --------------------------
 Quit the old Inkstone. Drag Inkstone.app into Applications and replace it.
 Launch it from Applications, not from this disk image.
+
+On the first launch after an install or replacement, Inkstone attempts to reset
+its own Desktop, Documents and Downloads permissions. macOS may ask again when
+Inkstone accesses those folders. Normal restarts do not reset permissions.
+Your documents and preferences are not erased.
 
 This build is ad-hoc signed only. It is not Developer ID signed or notarized.
 If macOS says the app is damaged or from an unidentified developer, first

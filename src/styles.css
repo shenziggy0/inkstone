@@ -116,11 +116,11 @@ summary[data-tree-path] { user-select: none; }
 /* Live preview: syntax disappears from the layout, content is typeset. */
 .cm-hidden-mark { display: inline-block; width: 0; height: 0; overflow: hidden; }
 .cm-prefix { display: inline-block; font-family: var(--font-body); font-style: normal; font-weight: 400; color: var(--color-ink); user-select: none; white-space: nowrap; text-indent: 0; }
-.cm-prefix-bullet { width: 1.5em; text-align: center; }
+.cm-prefix-bullet { width: 1.6em; text-align: center; }
 .cm-prefix-ordered { min-width: 2em; width: auto; text-align: right; padding-right: .45em; margin-right: .1em; font-variant-numeric: tabular-nums; }
-.cm-prefix-task { width: 1.6em; color: var(--color-focus); cursor: pointer; }
+.cm-prefix-task { width: 1.6em; text-align: center; color: var(--color-focus); cursor: pointer; }
 .cm-prefix-hr { display: block; width: 100%; height: 1px; margin: .8em 0; background: var(--color-rule); }
-.cm-prefix-quote { width: 1em; height: 1.35em; vertical-align: -.2em; box-shadow: inset 3px 0 var(--color-rule); }
+.cm-prefix-quote { width: 1em; height: 1.65em; vertical-align: -.35em; box-shadow: inset 3px 0 var(--color-rule); }
 /* A rule that shares its line with a quote or list marker keeps those layers:
    the line is laid out as one row and the rule fills the remaining width,
    instead of pushing a block below the marker widgets. The row layout only

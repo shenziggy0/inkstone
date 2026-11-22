@@ -481,15 +481,38 @@ test('bracket math blocks stay literal and unclosed delimiters never steal close
   const sameLine = '**新开 **已加粗**';
   const sameBlock = liveBlock(documentLines(sameLine), 0, 1, new Set([0]), new Map([[0, [4]]]));
   assert.deepEqual(sameBlock.lines[0].styles.map(s => sameLine.slice(s.from, s.to)), ['已加粗']);
+
+  // An intraword `*` like `2*3` on an editing line must not break a closed `*italic*`.
+  const exprLine = '2*3 *italic*';
+  const exprBlock = liveBlock(documentLines(exprLine), 0, 1, new Set([0]), new Map([[0, [exprLine.length]]]));
+  assert.deepEqual(exprBlock.lines[0].styles.map(s => exprLine.slice(s.from, s.to)), ['italic']);
+
+  // An inline bold followed by a multi-line bold must keep both intact when editing line 0.
+  const multiBold = '**第一行** 和 **跨行\n第二行**';
+  const multiBlock = liveBlock(documentLines(multiBold), 0, 2, new Set([0]), new Map([[0, [0]]]));
+  assert.deepEqual(multiBlock.lines[0].styles.map(s => multiBold.split('\n')[0].slice(s.from, s.to)), ['第一行', '跨行']);
+  assert.deepEqual(multiBlock.lines[1].styles.map(s => multiBold.split('\n')[1].slice(s.from, s.to)), ['第二行']);
 });
 
-test('footnote references and link references format cleanly in active blocks', () => {
-  const fnRef = liveLine('正文[^fn1]结束');
-  assert.ok(fnRef.styles.some(s => s.kind === 'sup' && '正文[^fn1]结束'.slice(s.from, s.to) === 'fn1'));
-  assert.ok(fnRef.styles.some(s => s.kind === 'link' && '正文[^fn1]结束'.slice(s.from, s.to) === 'fn1'));
-  assert.equal(fnRef.marks.filter(m => m.kind === 'syntax').length, 3);
+test('footnote references, definitions, link references and CJK surrogate pairs format cleanly', () => {
+  const docWithFn = documentLines('正文[^fn1]结束\n\n[^fn1]: 脚注说明');
+  const definedLine = liveBlock(docWithFn, 0, 1, new Set([0])).lines[0];
+  assert.ok(definedLine.styles.some(s => s.kind === 'sup' && '正文[^fn1]结束'.slice(s.from, s.to) === 'fn1'));
+  assert.ok(definedLine.styles.some(s => s.kind === 'link' && '正文[^fn1]结束'.slice(s.from, s.to) === 'fn1'));
+  assert.equal(definedLine.marks.filter(m => m.kind === 'syntax').length, 3);
+
+  const fnDef = liveBlock(docWithFn, 2, 3, new Set([2])).lines[0];
+  assert.equal(fnDef.styles.some(s => s.kind === 'link'), false, '脚注定义正文不应被染成超链接');
+
+  const undefFn = liveLine('正文[^missing]结束');
+  assert.equal(undefFn.styles.length, 0, '未定义脚注不应渲染为上标链接');
+  assert.equal(undefFn.marks.filter(m => m.kind === 'syntax').length, 0);
 
   const linkRef = liveLine('[ref-id]: https://example.com "Title"');
   assert.ok(linkRef.styles.some(s => s.kind === 'link' && '[ref-id]: https://example.com "Title"'.slice(s.from, s.to) === 'https://example.com'));
   assert.ok(linkRef.marks.some(m => m.kind === 'soft' && '[ref-id]: https://example.com "Title"'.slice(m.from, m.to) === '[ref-id]'));
+
+  const surrogateLine = '𠀀**（测试）**𠀀';
+  const surrogate = liveLine(surrogateLine);
+  assert.ok(surrogate.styles.some(s => s.kind === 'strong' && surrogateLine.slice(s.from, s.to) === '（测试）'));
 });

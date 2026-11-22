@@ -148,4 +148,23 @@ class WorkspaceState {
   }
 }
 
-module.exports = { WorkspaceState, recordRecent, pruneMissing, RECENT_FILES_LIMIT, RECENT_FOLDERS_LIMIT, SESSION_FILES_LIMIT };
+async function claimMacFolderAccessReset(userData, executable, home) {
+  const relative = path.join('Inkstone.app', 'Contents', 'MacOS', 'Inkstone');
+  if (executable !== path.join('/Applications', relative) && executable !== path.join(home, 'Applications', relative)) return false;
+
+  // The inode changes even when Finder replaces the app with the same build.
+  const { ino, birthtimeNs, mtimeNs } = await fs.stat(executable, { bigint: true });
+  const install = `${ino}:${birthtimeNs}:${mtimeNs}`;
+  const marker = path.join(userData, 'mac-folder-access-install');
+  const previous = await fs.readFile(marker, 'utf8').catch(error => {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  });
+  if (previous === install) return false;
+  // Record the attempt first so a failed or interrupted reset cannot erase new choices on restart.
+  await fs.mkdir(userData, { recursive: true });
+  await atomicWrite(marker, install);
+  return true;
+}
+
+module.exports = { WorkspaceState, recordRecent, pruneMissing, claimMacFolderAccessReset, RECENT_FILES_LIMIT, RECENT_FOLDERS_LIMIT, SESSION_FILES_LIMIT };

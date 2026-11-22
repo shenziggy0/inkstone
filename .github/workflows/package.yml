@@ -33,6 +33,7 @@ jobs:
     outputs:
       tag: ${{ steps.version.outputs.TAG }}
       version: ${{ steps.version.outputs.VERSION }}
+      is_exact_tag: ${{ steps.version.outputs.IS_EXACT_TAG }}
     strategy:
       fail-fast: false
       matrix:
@@ -102,8 +103,11 @@ jobs:
           echo "Version: ${VERSION} (tag: ${RAW_TAG})"
           echo "TAG=${RAW_TAG}" >> "$GITHUB_OUTPUT"
           echo "VERSION=${VERSION}" >> "$GITHUB_OUTPUT"
-          if [ "$TAG_COMMIT" != "$HEAD_COMMIT" ]; then
-            echo "::warning::HEAD ${HEAD_COMMIT} 并不正好在 tag ${RAW_TAG}（${TAG_COMMIT}）上，本次构建包含该 tag 之后的提交。"
+          if [ "$TAG_COMMIT" = "$HEAD_COMMIT" ]; then
+            echo "IS_EXACT_TAG=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "IS_EXACT_TAG=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::HEAD ${HEAD_COMMIT} 并不正好在 tag ${RAW_TAG}（${TAG_COMMIT}）上，本次构建包含该 tag 之后的提交，将仅保留 Actions 产物，不自动挂载 Release。"
           fi
 
       - name: Set package version
@@ -184,6 +188,7 @@ jobs:
   draft-release:
     name: upload assets to draft release
     needs: package
+    if: needs.package.outputs.is_exact_tag == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -218,8 +223,12 @@ jobs:
           set -euo pipefail
           WIN_ZIP="release-assets/inkstone-${VERSION}-windows-x64.zip"
           MAC_ZIP="release-assets/inkstone-${VERSION}-macos-arm64.zip"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release ${TAG} already exists; uploading assets with --clobber..."
+          if IS_DRAFT=$(gh release view "$TAG" --json isDraft --jq '.isDraft' 2>/dev/null); then
+            if [ "$IS_DRAFT" != "true" ]; then
+              echo "::error::Release ${TAG} 已正式发布（isDraft=${IS_DRAFT}），禁止覆盖其安装包。请推送新的版本 tag 再触发打包。"
+              exit 1
+            fi
+            echo "Draft release ${TAG} already exists; uploading assets with --clobber..."
             gh release upload "$TAG" "$WIN_ZIP" "$MAC_ZIP" --clobber
           else
             echo "Creating draft release for ${TAG}..."

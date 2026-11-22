@@ -40,7 +40,7 @@ test('save failure retains the dirty document and original file', async t => {
   const { root, store } = await fixture(t), file = path.join(root, 'note.md');
   await fs.writeFile(file, 'old'); const doc = await store.open(file);
   await store.update(doc.id, 'new');
-  await assert.rejects(store.save(doc.id, path.join(root, 'missing', 'new.md')));
+  await assert.rejects(store.save(doc.id, path.join(root, 'missing', 'new.md')), /文件夹不存在/);
   assert.equal(store.get(doc.id).dirty, true);
   assert.equal(await fs.readFile(file, 'utf8'), 'old');
 });

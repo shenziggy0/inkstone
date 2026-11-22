@@ -9,7 +9,7 @@ const { AsyncLocalStorage } = require('node:async_hooks');
 const { DocumentStore, atomicWrite, inside, listMarkdown, frontMatterImageRoot } = require('./store.cjs');
 const { parseAssetURL, resolveAssetFile, resolveDocumentLink, imageMime, unsavedAssetsDirectory, isNetworkPath, isNetworkFileURL, isExecutableExtension } = require('./assets.cjs');
 const { searchFolder, validateEntryName, isMarkdownFile } = require('./search.cjs');
-const { WorkspaceState } = require('./session.cjs');
+const { WorkspaceState, claimMacFolderAccessReset } = require('./session.cjs');
 const { parseDocumentPaths } = require('./argv.cjs');
 const { DEFAULT_PDF_EXPORT, normalizePdfExport, normalizePdfPresets, buildPdfPrintOptions, pdfPageCSS, checkPngSize, PNG_LIMITS } = require('./export-settings.cjs');
 const { hasConfiguredImageRoot, rewriteRootImages } = require('./pandoc-ast.cjs');
@@ -1739,6 +1739,19 @@ else {
     if (first) { first.win.show(); first.win.focus(); command('system-open'); }
   });
   app.whenReady().then(async () => {
+    if (MAC && app.isPackaged && !process.env.INKSTONE_TEST_USER_DATA) {
+      try {
+        // Clear stale grants before loading recents or restoring protected files.
+        if (await claimMacFolderAccessReset(app.getPath('userData'), process.execPath, app.getPath('home'))) {
+          for (const service of ['SystemPolicyDesktopFolder', 'SystemPolicyDocumentsFolder', 'SystemPolicyDownloadsFolder']) {
+            await run('/usr/bin/tccutil', ['reset', service, 'app.inkstone.editor'], { timeout: 2000 })
+              .catch(error => console.warn(`未能重置墨页的 macOS 权限 ${service}：`, error.message));
+          }
+        }
+      } catch (error) {
+        console.warn('未能检查墨页的 macOS 安装状态：', error.message);
+      }
+    }
     try {
       const stored = JSON.parse(await fs.readFile(settingsPath(), 'utf8'));
       preferences = {

@@ -164,7 +164,11 @@ class DocumentStore {
       // Canonicalize before checking open-document identity or disk conflicts.
       const file = await fs.realpath(requestedFile).catch(async error => {
         if (error.code !== 'ENOENT') throw error;
-        return path.join(await fs.realpath(path.dirname(requestedFile)), path.basename(requestedFile));
+        const parent = await fs.realpath(path.dirname(requestedFile)).catch(dirError => {
+          if (dirError.code === 'ENOENT') throw new Error('保存位置所在的文件夹不存在。');
+          throw dirError;
+        });
+        return path.join(parent, path.basename(requestedFile));
       });
       const previous = doc.path;
       const sameFile = previous && pathKey(previous) === pathKey(file);
