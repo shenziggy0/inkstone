@@ -20,9 +20,9 @@ try {
   page.setDefaultTimeout(15000);
   page.on('pageerror', error => errors.push(error.message));
   await page.locator('.cm-content').waitFor();
-  // ── Iteration 10: the default shell must look like Typora, not an IDE ──
+  // ── Iteration 10: the default writing layout keeps the manuscript prominent ──
   assert.equal(await page.evaluate(() => document.documentElement.dataset.ui), 'typora', '默认应为 Typora 极简外观');
-  assert.equal(await page.locator('.brand').isVisible(), false, '品牌栏不应占据标题栏');
+  assert.equal(await page.locator('.brand').isVisible(), true, '墨页标识应位于单行标题栏');
   assert.equal(await page.locator('.tabbar').isVisible(), false, '默认不应有标签栏');
   assert.equal(await page.locator('.formatbar').isVisible(), false, '默认不应有排版工具栏');
   assert.equal(await page.locator('.sidebar').isVisible(), false, '侧栏默认隐藏，像 Typora 首次打开');
@@ -39,14 +39,17 @@ try {
       editorWidth: root.getPropertyValue('--editor-width').trim()
     };
   });
-  assert.equal(shell.topbar, 38, '极简标题栏应为 38px');
+  assert.equal(shell.topbar, 64, '极简标题栏应为 64px');
   assert.equal(shell.fontSize, '16px', '正文默认字号应为 16px');
   assert.ok(Math.abs(parseFloat(shell.leading) - 25.6) < 0.6, `正文行高应为 1.6，实际 ${shell.leading}`);
-  assert.equal(shell.paper, 'rgb(255, 255, 255)', '浅色主题应为纯白纸面');
+  assert.equal(shell.paper, 'rgb(255, 255, 255)', '浅色主题应使用白色纸面');
   assert.equal(shell.editorSize, '16px');
   assert.equal(shell.editorWidth, '860px');
   assert.ok(shell.contentWidth <= 860 && shell.contentWidth >= 800, `正文列宽应约 860px，实际 ${shell.contentWidth}`);
   await page.waitForFunction(() => document.querySelectorAll('.md-widget').length >= 3);
+  const titleInset = await page.locator('#editor-host .md-widget h1').first().evaluate(heading =>
+    heading.getBoundingClientRect().top - document.querySelector('#editor-host').getBoundingClientRect().top);
+  assert.ok(titleInset >= 0 && titleInset <= 64, `欢迎文档应直接从标题开始，实际顶部留白 ${titleInset}px`);
   assert.equal(await page.locator('.cm-live-line').count(), 0, '刚打开且未交互的文档应整篇渲染，不展开活跃块源码');
   await page.locator('.topbar [data-command="sidebar"]').click();
   assert.ok(await page.locator('.sidebar').isVisible(), '侧栏仍应能一键打开');
@@ -64,7 +67,7 @@ try {
   assert.deepEqual(welcomeShell.listed, ['欢迎使用.md'], '欢迎页应出现在侧栏的已打开文档中');
   console.log('STEP welcome page starts unmodified as 欢迎使用.md');
   if (process.platform !== 'darwin') {
-    // One 38px row: the application topbar is the title bar, the native menu bar
+    // One 64px row: the application topbar is the title bar, the native menu bar
     // is hidden and the system window buttons sit in a theme-aware overlay.
     const shellInfo = await app.evaluate(({ BrowserWindow }) => {
       const win = BrowserWindow.getAllWindows()[0];
@@ -85,7 +88,7 @@ try {
         controls: parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--titlebar-controls-width'))
       };
     });
-    assert.equal(bar.height, 38, '应用 topbar 就是标题栏，高度应为 38px');
+    assert.equal(bar.height, 64, '应用 topbar 就是标题栏，高度应为 64px');
     assert.equal(bar.drag, 'drag', '标题栏必须是窗口拖动区域');
     assert.equal(bar.interactive, 'no-drag', '标题栏按钮不得落在拖动区域');
     assert.notEqual(bar.menuDisplay, 'none', 'Windows / Linux 上应显示“菜单”按钮');
@@ -112,14 +115,14 @@ try {
     await page.waitForTimeout(200);
     const darkOverlay = await app.evaluate(() => globalThis.__overlays.at(-1) || null);
     assert.ok(darkOverlay, '切换主题后必须调用 setTitleBarOverlay');
-    assert.equal(darkOverlay.height, 38, '标题栏覆盖层高度应保持 38px');
-    assert.equal(darkOverlay.color, '#282c34', `深色主题下窗口按钮区应改为深色，实际 ${JSON.stringify(darkOverlay)}`);
-    assert.ok(darkOverlay.symbolColor && darkOverlay.symbolColor !== '#3b3f46', '深色模式下窗口按钮符号必须换色才可见');
+    assert.equal(darkOverlay.height, 64, '标题栏覆盖层高度应保持 64px');
+    assert.equal(darkOverlay.color, '#191b26', `深色主题下窗口按钮区应改为深色，实际 ${JSON.stringify(darkOverlay)}`);
+    assert.ok(darkOverlay.symbolColor === '#e6e7f0', '深色模式下窗口按钮符号必须换色才可见');
     await page.locator('[data-command="theme"]').click();
     await page.locator('[data-command="theme"]').click();
     await page.waitForFunction(() => document.documentElement.dataset.theme === 'light');
     const lightOverlay = await app.evaluate(() => globalThis.__overlays.at(-1));
-    assert.equal(lightOverlay.color, '#ffffff', '回到浅色主题后窗口按钮区颜色也要跟着回来');
+    assert.equal(lightOverlay.color, '#eef0f7', '回到浅色主题后窗口按钮区颜色也要跟着回来');
     await app.evaluate(({ BrowserWindow }) => {
       const win = BrowserWindow.getAllWindows()[0];
       if (globalThis.__originalOverlay) win.setTitleBarOverlay = globalThis.__originalOverlay;
@@ -131,7 +134,7 @@ try {
     await page.evaluate(() => window.desktop.fullscreen());
     await page.waitForFunction(() => !document.body.classList.contains('is-fullscreen'), null, { timeout: 10000 });
     assert.ok(await page.evaluate(() => parseFloat(getComputedStyle(document.querySelector('.topbar')).paddingRight)) >= bar.controls, '退出全屏后必须重新让出窗口按钮的位置');
-    console.log('STEP Windows title bar: one 38px row, native menu popup, theme-aware overlay');
+    console.log('STEP Windows title bar: one 64px row, native menu popup, theme-aware overlay');
   }
   // The dense workbench stays available for users who want tabs / toolbar.
   await page.locator('[data-command="settings"]').click();
@@ -250,12 +253,12 @@ try {
   assert.match(await page.locator('.md-widget .front-matter').textContent(), /title/);
   const tocEntries = await page.locator('.md-widget .toc li').count();
   assert.ok(tocEntries >= 2, `[TOC] 应列出全文标题，实际 ${tocEntries}`);
-  assert.deepEqual(await page.locator('.md-widget .toc a').evaluateAll(nodes => nodes.map(node => node.getAttribute('href'))), ['#标题', '#标题-1']);
+  assert.deepEqual(await page.locator('.md-widget .toc a').evaluateAll(nodes => nodes.map(node => node.getAttribute('href'))), ['#标题', '#标题-2']);
   assert.equal(await page.locator('.md-widget .footnote-ref').count(), 1);
   assert.match(await page.locator('.md-widget .footnote-ref a').getAttribute('title'), /脚注内容/);
   assert.equal(await page.locator('.md-widget a[href="https://example.com/ref"]').count(), 1);
   assert.equal(await page.locator('.md-widget blockquote.alert-note').count(), 1);
-  assert.deepEqual(await page.locator('.md-widget h1').evaluateAll(nodes => nodes.map(node => node.id)), ['标题', '标题-1']);
+  assert.deepEqual(await page.locator('.md-widget h1').evaluateAll(nodes => nodes.map(node => node.id)), ['标题', '标题-2']);
   assert.ok(await page.locator('.md-widget .katex').count() >= 2, '应同时支持 \\(…\\) 与 $…$ 公式');
   console.log('STEP cross-block rendering parity');
   // User CSS themes live in the app's userData/themes directory.
@@ -832,7 +835,7 @@ try {
   await page.waitForFunction(() => document.querySelectorAll('.md-widget').length >= 2, { timeout: 8000 });
   if (process.platform === 'darwin') assert.ok(await page.evaluate(() => document.body.classList.contains('frameless')), 'macOS 应使用沉浸式标题栏');
   assert.match(await page.locator('#encoding').textContent(), /UTF-8 · LF/);
-  assert.match(await page.locator('#breadcrumb').textContent(), /§\s*(章节标题|小节标题)/, '状态栏应显示当前章节面包屑');
+  assert.equal(await page.locator('#breadcrumb').textContent(), '小节标题', '状态栏应显示当前章节面包屑');
   console.log('STEP frameless chrome + enhanced status bar');
   // Code blocks expose a one-click copy affordance.
   await app.evaluate(async ({ clipboard }) => clipboard.clear());
@@ -939,7 +942,7 @@ try {
     reference: document.querySelector('.md-widget a[href="https://example.com/ref"]')?.textContent || '',
     footnote: document.querySelector('.md-widget sup.footnote-ref a')?.getAttribute('title') || ''
   }));
-  assert.deepEqual(bigTop.headings, ['重复标题', '重复标题-1'], `220k 文档的重复标题锚点必须保持编号，实际 ${JSON.stringify(bigTop.headings)}`);
+  assert.deepEqual(bigTop.headings, ['重复标题', '重复标题-2'], `220k 文档的重复标题锚点必须保持编号，实际 ${JSON.stringify(bigTop.headings)}`);
   assert.equal(bigTop.reference, '引用链接', '220k 文档必须解析文末的引用式链接定义');
   assert.equal(bigTop.footnote, '脚注内容', '220k 文档的脚注提示必须带出文末定义');
   // The end of the file must be reachable and still render blocks around the
@@ -1829,12 +1832,12 @@ try {
     return {
       widgets: widgets.length,
       toc: [...host.querySelectorAll('.toc a')].map(link => link.getAttribute('href')),
-      duplicate: !!host.querySelector('[id="重复标题-1"]'),
+      duplicate: !!host.querySelector('[id="重复标题-2"]'),
       footnote: host.querySelector('sup.footnote-ref a')?.getAttribute('title') || '',
       reference: host.querySelector('.md-widget a[href="https://example.com/ref"]')?.textContent || ''
     };
   });
-  assert.deepEqual(beforeTyping.toc, ['#增量渲染', '#重复标题', '#重复标题-1'], `[TOC] 应列出全部标题：${JSON.stringify(beforeTyping.toc)}`);
+  assert.deepEqual(beforeTyping.toc, ['#增量渲染', '#重复标题', '#重复标题-2'], `[TOC] 应列出全部标题：${JSON.stringify(beforeTyping.toc)}`);
   assert.equal(beforeTyping.duplicate, true, '重复标题应有编号锚点');
   assert.equal(beforeTyping.footnote, '脚注定义', '脚注引用应带上定义文本作为悬浮提示');
   assert.equal(beforeTyping.reference, '链接', '引用式链接应跨块解析');
@@ -3237,10 +3240,9 @@ try {
       assert.match(editPrompts[0], /第一份文档\.md/, '提示必须使用真实文件名');
       console.log('STEP welcome page stays pristine, the first opened file replaces it, edits make it dirty');
     } finally {
-      const closed = firstRun.waitForEvent('close').catch(() => {});
-      await firstRun.evaluate(({ app }) => app.exit(0)).catch(() => {});
-      await closed;
-      await firstRun.close().catch(() => {});
+      // The second launch reuses this profile. Let the normal quit flush the
+      // session after closing the last file before checking the welcome page.
+      await firstRun.close();
     }
     const secondRun = await electron.launch({ args: [project, '--no-sandbox', '--disable-gpu'], env: welcomeEnv });
     try {

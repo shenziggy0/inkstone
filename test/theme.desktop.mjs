@@ -82,6 +82,7 @@ try {
       editorFont: getComputedStyle(editor).fontFamily,
       editorBackground: getComputedStyle(editor).backgroundColor,
       contentColor: getComputedStyle(content).color,
+      paperBackground: getComputedStyle(content).backgroundColor,
       h1Size: getComputedStyle(h1).fontSize,
       h1Color: getComputedStyle(h1).color,
       h1Border: getComputedStyle(h1).borderBottomWidth,
@@ -102,6 +103,7 @@ try {
   assert.equal(themeState.contentWidth, '720px');
   assert.match(themeState.editorFont, /Fixture Serif/);
   assert.equal(themeState.editorBackground, 'rgb(244, 241, 234)');
+  assert.equal(themeState.paperBackground, themeState.editorBackground);
   assert.equal(themeState.contentColor, 'rgb(28, 42, 48)');
   assert.equal(themeState.h1Size, '38.4px');
   assert.equal(themeState.h1Color, 'rgb(24, 58, 74)');

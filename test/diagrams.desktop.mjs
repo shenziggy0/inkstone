@@ -206,9 +206,8 @@ try {
   assert.deepEqual(print.unsafe, []);
 
   // Raster evidence that the diagrams reached the PDF itself. The sequence
-  // notes fill with --color-code (#f6f8fa), while the actor outlines and
-  // lifelines use --color-muted (#777777); neither colour appears in ordinary
-  // print text, so a page without the native diagrams cannot contain them.
+  // Read the actual theme colours used by the diagram, so a palette change
+  // keeps testing the same note fill and lifelines in the printed PDF.
   if (process.platform === 'darwin') {
     const bmpPath = path.join(root, 'diagram-sample.bmp');
     try {
@@ -221,14 +220,27 @@ try {
       const bpp = bmp.readUInt16LE(28);
       assert.equal(bpp, 32, 'sips 应输出 32 位 BMP');
       let soft = 0, muted = 0;
+      const [noteFill, lineInk, paper] = await page.evaluate(() => {
+        const probe = document.createElement('span');
+        document.body.append(probe);
+        const colors = ['--color-code', '--color-muted', '--color-paper'].map(token => {
+          probe.style.color = `var(${token})`;
+          return getComputedStyle(probe).color.match(/\d+/g).map(Number);
+        });
+        probe.remove();
+        return colors;
+      });
+      const near = (r, g, b, color) => Math.abs(r - color[0]) <= 2 && Math.abs(g - color[1]) <= 2 && Math.abs(b - color[2]) <= 2;
+      // At print resolution a one-pixel lifeline can straddle two pixels.
+      const halfInk = lineInk.map((channel, i) => (channel + paper[i]) / 2);
       for (let y = 0; y < height; y++) {
         const row = offset + (rawHeight < 0 ? y : height - 1 - y) * width * 4;
         for (let x = 0; x < width; x++) {
           const at = row + x * 4;
           const blue = bmp[at], green = bmp[at + 1], red = bmp[at + 2], alpha = bmp[at + 3];
           if (alpha < 200) continue;
-          if (Math.abs(red - 246) <= 2 && Math.abs(green - 248) <= 2 && Math.abs(blue - 250) <= 2) soft++;
-          if (Math.abs(red - 119) <= 2 && Math.abs(green - 119) <= 2 && Math.abs(blue - 119) <= 2) muted++;
+          if (near(red, green, blue, noteFill)) soft++;
+          if (near(red, green, blue, lineInk) || near(red, green, blue, halfInk)) muted++;
         }
       }
       assert.ok(soft > 1000, `PDF 第一页应包含时序图注释底色，实际 ${soft} 像素`);
@@ -283,7 +295,8 @@ try {
   await page.waitForFunction(() => {
     const svg = document.querySelector('.md-widget pre.diagram[data-diagram="sequence"] svg');
     if (!svg) return false;
-    return [...svg.querySelectorAll('[stroke]')].some(node => /171,\s*178,\s*191|127,\s*132,\s*142/.test(node.getAttribute('stroke') || ''));
+    const ink = getComputedStyle(document.body).color;
+    return [...svg.querySelectorAll('path[stroke]')].some(node => getComputedStyle(node).stroke === ink);
   }, null, { timeout: 20000 });
   const refreshed = await page.evaluate(() => ({
     processed: [...document.querySelectorAll('.md-widget pre.diagram[data-processed="true"] svg')].length,

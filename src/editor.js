@@ -1173,7 +1173,8 @@ function liveDecorations(state, id) {
       for (const prefix of info.prefixes) {
         const prefixFrom = line.from + prefix.from, prefixTo = line.from + prefix.to;
         if (reveal.prefixes.has(prefix)) {
-          ranges.push(Decoration.mark({ class: 'cm-md-mark' }).range(prefixFrom, prefixTo));
+          const markerClass = prefix.kind === 'ordered' ? 'cm-md-mark cm-ordered-source' : 'cm-md-mark';
+          ranges.push(Decoration.mark({ class: markerClass }).range(prefixFrom, prefixTo));
         } else if (prefix.kind === 'heading') {
           ranges.push(Decoration.replace({ widget: hiddenMark }).range(prefixFrom, prefixTo));
         } else {

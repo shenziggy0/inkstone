@@ -17,6 +17,7 @@ let app;
 
 try {
   const rows = Array.from({ length: 3100 }, (_, i) => `line ${i + 1}`);
+  rows[0] = '[旧跨文档链接](headings.md#same-1)';
   await fs.writeFile(historyFile, rows.join('\n'));
   const store = new DocumentStore(path.join(profile, 'recovery'), { historyDirectory: path.join(profile, 'history') });
   const { id } = await store.open(historyFile);
@@ -24,7 +25,7 @@ try {
   await store.update(id, rows.join('\n'));
   await store.save(id);
 
-  await fs.writeFile(headingFile, '[TOC]\n\n# Same\n\nKeep this paragraph.\n\n# Other\n\nFinish here.\n');
+  await fs.writeFile(headingFile, '[TOC]\n\n# Same\n\nKeep this paragraph.\n\n# Other\n\nFinish here.\n\n[新链接](#same-2) · [旧链接](#same-1)\n');
   app = await electron.launch({
     args: [path.resolve(import.meta.dirname, '..'), '--no-sandbox', '--disable-gpu', historyFile, headingFile],
     env
@@ -43,8 +44,14 @@ try {
   for (let i = 0; i < 'Other'.length; i++) await page.keyboard.press('Shift+ArrowLeft');
   await page.keyboard.insertText('Same');
   await page.locator('.md-widget p').filter({ hasText: 'Finish here.' }).click();
-  assert.deepEqual(await headings.evaluateAll(elements => elements.map(element => element.id)), ['same', 'same-1']);
-  assert.deepEqual(await page.locator('.md-widget .toc a').evaluateAll(elements => elements.map(element => element.getAttribute('href'))), ['#same', '#same-1']);
+  assert.deepEqual(await headings.evaluateAll(elements => elements.map(element => element.id)), ['same', 'same-2']);
+  assert.deepEqual(await page.locator('.md-widget .toc a').evaluateAll(elements => elements.map(element => element.getAttribute('href'))), ['#same', '#same-2']);
+  assert.equal(await page.locator('.md-widget h1#same-2 a[name="same-1"]').count(), 1);
+  for (const label of ['新链接', '旧链接']) {
+    await page.getByRole('link', { name: label, exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('#position').textContent.startsWith('行 7，'));
+    await page.locator('.md-widget p').filter({ hasText: 'Finish here.' }).click();
+  }
   console.log('R9：增量修改第二个标题后，正文和目录锚点唯一且一致');
 
   await command('previous-document');
@@ -65,6 +72,11 @@ try {
   assert.deepEqual(await page.locator('.diff-view .diff-add code').allTextContents(), ['changed line 3099']);
   assert.equal(await page.locator('.diff-view .diff-line code').last().textContent(), 'line 3100');
   console.log('R7：大文档按批追加直至全文末尾，显示第 3099 行变更及降级提示');
+  await page.keyboard.press('Escape');
+  await page.getByRole('link', { name: '旧跨文档链接', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('#location').textContent.includes('headings.md') && document.querySelector('#position').textContent.startsWith('行 7，'));
+  console.log('PASS 新旧片段及跨文档旧链接均定位到第二个标题');
+
 } finally {
   if (app) {
     const stopped = app.waitForEvent('close', { timeout: 15000 });

@@ -1,5 +1,8 @@
-/* Hallmark · macrostructure: Workbench · tone: technical · anchor hue: neutral */
 @import '../tokens.css';
+:root {
+  --list-indent: 1.6em;
+  --list-item-gap: .2em;
+}
 * { box-sizing: border-box; }
 html, body { margin: 0; overflow-x: clip; height: 100%; }
 body { font: var(--text-base)/1.5 var(--font-body); color: var(--color-ink); background: var(--color-paper); }
@@ -15,20 +18,6 @@ input[type="checkbox"] { accent-color: var(--color-accent); width: 16px; height:
 svg { flex: 0 0 auto; }
 [hidden] { display: none !important; }
 #app { height: 100%; display: flex; flex-direction: column; }
-.topbar { height: 56px; flex: 0 0 auto; border-bottom: 1px solid var(--color-rule); display: flex; align-items: center; padding: 0 var(--space-lg); gap: var(--space-lg); background: var(--color-surface); }
-.brand { width: 202px; flex-shrink: 0; display: flex; align-items: center; gap: var(--space-md); font-weight: 600; }
-.brand-mark { font-size: 22px; font-weight: 650; }
-.brand small { margin-left: var(--space-sm); font: 10px var(--font-code); letter-spacing: .08em; color: var(--color-muted); }
-.top-actions { display: flex; align-items: center; gap: var(--space-xs); }
-.icon-button { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; flex-shrink: 0; color: var(--color-muted); }
-.document-location { flex: 1; text-align: center; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-xs); color: var(--color-muted); }
-.export-button { display: flex; gap: var(--space-sm); align-items: center; padding: 6px var(--space-md); border: 1px solid var(--color-rule); margin: 0 var(--space-sm); }
-.workspace { display: flex; flex: 1; min-height: 0; }
-.sidebar { width: 240px; flex: 0 0 240px; background: var(--color-sidebar); border-right: 1px solid var(--color-rule); display: flex; flex-direction: column; }
-.sidebar-tabs { display: flex; gap: var(--space-xl); padding: 0 var(--space-xl); height: 45px; border-bottom: 1px solid var(--color-rule); flex-shrink: 0; }
-.sidebar-tabs button { border-radius: 0; font-size: var(--text-sm); color: var(--color-muted); padding: 0 3px; }
-.sidebar-tabs button[aria-selected="true"] { color: var(--color-ink); border-bottom: 2px solid var(--color-accent); }
-.sidebar-context { display: flex; align-items: center; justify-content: space-between; margin: var(--space-lg) var(--space-lg) var(--space-sm) var(--space-xl); color: var(--color-muted); font-size: var(--text-xs); }
 .filter-label { padding: 0 var(--space-lg) var(--space-md); }
 .filter-label input { width: 100%; font-size: var(--text-xs); }
 #side-content { flex: 1; min-height: 0; overflow: auto; padding: 0 var(--space-sm); }
@@ -37,6 +26,8 @@ svg { flex: 0 0 auto; }
 .outline-item.level-1 { font-weight: 650; color: var(--color-ink); margin-bottom: var(--space-sm); }
 .outline-item.level-2 { color: var(--color-ink); margin-top: var(--space-md); }
 .outline-item span, .file-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.outline-item small { font: 10px var(--font-code); color: var(--color-muted); }
+.outline-item[aria-current] { background: var(--color-selected); color: var(--color-accent); font-weight: 650; }
 .file-item svg { width: 15px; height: 15px; color: var(--color-muted); }
 summary { display: flex; align-items: center; gap: var(--space-sm); cursor: pointer; min-height: 36px; font-size: var(--text-sm); }
 summary::before { content: '›'; color: var(--color-muted); }
@@ -68,31 +59,12 @@ summary[data-tree-path] { user-select: none; }
 .md-live-preview-label { font-size: 11px; letter-spacing: .04em; color: var(--color-muted); margin-bottom: var(--space-sm); }
 .md-live-preview-body { overflow-x: auto; cursor: text; }
 .md-live-preview-error { margin: 0; color: var(--color-syntax-keyword); font-size: var(--text-sm); }
-:root[data-ui="typora"] .folder-search { padding: 0 12px 8px; }
-.sidebar-footer { margin-top: auto; padding: var(--space-lg) var(--space-xl); border-top: 1px solid var(--color-rule); color: var(--color-muted); font-size: var(--text-xs); }
-.sidebar-footer button { display: flex; justify-content: space-between; padding: var(--space-sm) 0; width: 100%; }
-.sidebar-footer > span { font-size: 11px; }
-.main-pane { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-.tabbar { display: flex; align-items: center; height: 45px; border-bottom: 1px solid var(--color-rule); padding-right: var(--space-sm); }
-#document-tabs { display: flex; min-width: 0; flex: 1; height: 100%; overflow: auto; scrollbar-width: thin; }
-.document-tab { display: flex; border-right: 1px solid var(--color-rule); padding-right: var(--space-sm); min-width: 140px; max-width: 240px; }
-.document-tab.active { background: var(--color-surface); box-shadow: inset 0 -2px var(--color-accent); }
-.document-tab > button:first-child { display: flex; align-items: center; gap: var(--space-sm); min-width: 0; padding: 0 var(--space-md); flex: 1; font-size: var(--text-xs); }
-.document-tab > button:first-child > span:first-of-type { overflow: hidden; text-overflow: ellipsis; }
-.document-tab svg { width: 14px; height: 14px; color: var(--color-muted); }
-.dirty-mark { font-size: 7px; }
-.close-tab { width: 24px; align-self: center; height: 24px; display: grid; place-items: center; }
-.formatbar { min-height: 42px; display: flex; align-items: center; padding: 0 var(--space-lg); gap: 2px; border-bottom: 1px solid var(--color-rule); overflow-x: auto; flex-shrink: 0; }
-.formatbar > button { min-width: 32px; min-height: 30px; font-size: var(--text-xs); padding: 4px var(--space-sm); }
-.divider { height: 14px; border-left: 1px solid var(--color-rule); margin: 0 var(--space-sm); }
-.format-spacer { flex: 1; }
-#mode-label { font-size: 11px; color: var(--color-muted); white-space: nowrap; padding-left: var(--space-md); }
 #editor-host { flex: 1; min-height: 0; overflow: hidden; }
 .editor-mount, .cm-editor { height: 100%; }
 .cm-editor { font-size: var(--editor-size); background: var(--color-paper); color: var(--color-ink); }
 .cm-editor.cm-focused { outline: none; }
 .cm-scroller { overflow: auto !important; font-family: var(--font-body) !important; line-height: var(--editor-leading) !important; }
-/* Typora's #write: an 860px column, 30px side padding and a 100px tail. */
+/* Give the final manuscript line some breathing room when scrolled to the end. */
 .cm-editor .cm-content { max-width: var(--editor-width); width: calc(100% - 60px); margin: 0 auto; flex: 1 1 auto; padding: 30px 30px 100px !important; caret-color: var(--color-ink); }
 .cm-line { padding: 0 !important; font-family: var(--font-code); font-size: .9em; overflow-wrap: anywhere; }
 .cm-activeLine { background: transparent !important; }
@@ -142,7 +114,27 @@ summary[data-tree-path] { user-select: none; }
 .cm-line.cm-lv-list { padding-left: .15em !important; }
 .cm-line.cm-lv-list:not(.cm-lv-quote):not(.cm-lv-hr):has(> .cm-prefix-bullet),
 .cm-line.cm-lv-list:not(.cm-lv-quote):not(.cm-lv-hr):has(> .cm-prefix-task) { padding-left: 1.75em !important; text-indent: -1.6em; }
-.cm-line.cm-lv-list.cm-lv-ordered:not(.cm-lv-quote):not(.cm-lv-hr):has(> .cm-prefix-ordered) { padding-left: 2.25em !important; text-indent: -2.1em; }
+/* Match ol padding + li padding for both the first line and wrapped lines.
+   The number occupies that same gutter even when its Markdown is editable. */
+.cm-line.cm-lv-ordered:not(.cm-lv-quote, .cm-lv-hr):has(> :is(.cm-prefix-ordered, .cm-ordered-source)) {
+  --ordered-gutter: calc(var(--list-indent) + var(--list-item-gap));
+  padding-left: var(--ordered-gutter) !important;
+  text-indent: calc(0px - var(--ordered-gutter));
+}
+.cm-lv-ordered:not(.cm-lv-quote, .cm-lv-hr) > :is(.cm-prefix-ordered, .cm-ordered-source) {
+  display: inline-flex;
+  justify-content: flex-end;
+  width: var(--ordered-gutter);
+  min-width: 0;
+  margin: 0;
+  padding-right: calc(var(--list-item-gap) + .25em);
+  text-indent: 0;
+  white-space: pre;
+  font-size: inherit;
+}
+.cm-lv-ordered:not(.cm-lv-quote, .cm-lv-hr) > .cm-ordered-source {
+  padding-right: var(--list-item-gap);
+}
 .cm-line.cm-lv-table, .cm-line.cm-lv-fence { font-family: var(--font-code); font-size: .9em; }
 .cm-editor .cm-lv-strong { font-weight: 700; }
 .cm-editor .cm-lv-em { font-style: italic; }
@@ -178,8 +170,8 @@ summary[data-tree-path] { user-select: none; }
 .code-language { display: block; color: var(--color-muted); position: absolute; top: 6px; right: 12px; font: 10px var(--font-code); }
 .prose blockquote { border-left: 4px solid var(--color-rule); padding: .2em 1em; color: var(--color-muted); }
 .prose blockquote:empty { min-height: 1.6em; }
-.prose ul, .prose ol { padding-left: 1.6em; }
-.prose li { padding-left: .2em; }
+.prose ul, .prose ol { padding-left: var(--list-indent); }
+.prose li { padding-left: var(--list-item-gap); }
 /* markdown-it-task-lists tags the whole <ul> when any item is a checkbox.
    Removing the marker there would also strip bullets from ordinary items. */
 .prose .contains-task-list { padding-left: 1.6em; }
@@ -232,13 +224,6 @@ summary[data-tree-path] { user-select: none; }
 .hljs-number, .hljs-type, .hljs-built_in { color: var(--color-syntax-number); }
 .hljs-title, .hljs-function, .hljs-attr { color: var(--color-syntax-function); }
 .hljs-comment { color: var(--color-muted); font-style: italic; }
-.statusbar { min-height: 32px; border-top: 1px solid var(--color-rule); display: flex; align-items: center; gap: var(--space-lg); padding: 0 var(--space-lg); color: var(--color-muted); font-size: 11px; }
-.statusbar > span { white-space: nowrap; }
-.statusbar button { display: grid; place-items: center; height: 28px; width: 28px; }
-.statusbar svg { width: 15px; height: 15px; }
-.status-spacer { flex: 1; }
-.status-error { color: var(--color-error); }
-.sidebar-hidden .sidebar { display: none; }
 .focus-mode .md-widget { opacity: .35; transition: opacity var(--dur-micro) var(--ease-out); }
 .focus-mode .md-widget:hover { opacity: 1; }
 .typewriter-mode .cm-content { padding-top: 35vh !important; padding-bottom: 45vh !important; }
@@ -247,16 +232,6 @@ summary[data-tree-path] { user-select: none; }
 .empty-state button { margin-top: var(--space-lg); }
 .primary { background: var(--color-accent); color: var(--color-on-accent); border: 1px solid var(--color-accent); padding: var(--space-sm) var(--space-lg); }
 .primary:hover { opacity: .88; background: var(--color-accent); }
-#notification { position: fixed; bottom: 48px; left: 50%; transform: translateX(-50%); max-width: min(600px,90vw); background: var(--color-surface); padding: var(--space-md) var(--space-xl); border: 1px solid var(--color-rule); box-shadow: 0 6px 28px var(--color-shadow); border-radius: var(--radius-md); z-index: 100; font-size: var(--text-sm); }
-#notification.error { color: var(--color-error); }
-dialog { width: min(480px,calc(100vw - 32px)); border: 1px solid var(--color-rule); border-radius: var(--radius-lg); padding: var(--space-xl); background: var(--color-surface); color: var(--color-ink); max-height: 90vh; }
-dialog::backdrop { background: var(--color-backdrop); }
-.dialog-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: var(--space-lg); }
-.dialog-heading h2 { font-size: var(--text-lg); margin: 0; }
-.dialog-description { color: var(--color-muted); }
-#preferences > label { display: flex; align-items: center; justify-content: space-between; gap: var(--space-lg); min-height: 48px; }
-#preferences input[type="number"], #preferences select { width: 130px; }
-.dialog-actions { margin-top: var(--space-xl); display: flex; justify-content: flex-end; }
 .export-options { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: var(--space-sm); }
 .export-options button { border: 1px solid var(--color-rule); padding: var(--space-lg); text-align: left; }
 .export-options strong { display: block; font: 600 var(--text-md) var(--font-code); }
@@ -265,7 +240,7 @@ dialog::backdrop { background: var(--color-backdrop); }
 .menu-list button { padding: var(--space-md); text-align: left; }
 .help-text { line-height: 1.85; color: var(--color-muted); }
 kbd { font: .9em var(--font-code); color: var(--color-ink); }
-.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.sr-only { pointer-events: none; position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 .print-document { display: none; }
 /* ── Typora parity: metadata, alerts, equation numbers, history ───────── */
 .checkbox-label { cursor: pointer; }
@@ -337,24 +312,6 @@ kbd { font: .9em var(--font-code); color: var(--color-ink); }
 #dialog:has(.emoji-grid) { width: min(560px, calc(100vw - 32px)); }
 .quick-item { display: flex; flex-direction: column; gap: 2px; text-align: left; }
 .quick-item span { color: var(--color-muted); font-size: var(--text-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-@media (max-width: 1000px) { .sidebar { width: 208px; flex-basis: 208px; } .brand { width: 170px; } .document-location { display: none; } .topbar { justify-content: space-between; } .cm-content { width: calc(100% - 48px); } }
-@media (max-width: 768px) { .sidebar { display: none; } .sidebar-hidden .sidebar { display: flex; position: absolute; top: 56px; bottom: 0; z-index: 10; box-shadow: 8px 0 20px var(--color-shadow); } .brand { width: auto; } .brand small { display: none; } .topbar { gap: var(--space-xs); padding: 0 var(--space-sm); } .top-actions { gap: 0; } #mode-label { display: none; } .cm-content { width: calc(100% - 40px); padding-top: 32px !important; } }
-@media (max-width: 480px) { .brand > span:last-child { display: none; } .topbar .icon-button { width: 30px; } .export-button { margin: 0 2px; padding: 6px; } .export-button span { display: none; } .statusbar { gap: var(--space-sm); padding: 0 var(--space-sm); } #position { display: none; } #save-status { max-width: 110px; overflow: hidden; text-overflow: ellipsis; } .cm-content { width: calc(100% - 32px); } }
-@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
-/* ── Frameless chrome, command palette, prose affordances ─────────────── */
-:root { --sidebar-width: 240px; }
-.sidebar { width: var(--sidebar-width); flex: 0 0 var(--sidebar-width); }
-.sidebar-resizer { flex: 0 0 5px; margin: 0 -2px; cursor: col-resize; position: relative; z-index: 3; }
-.sidebar-resizer::after { content: ''; position: absolute; inset: 0 2px; background: transparent; transition: background var(--dur-micro) var(--ease-out); }
-.sidebar-resizer:hover::after, .sidebar-resizer:active::after { background: var(--color-focus); opacity: .45; }
-.sidebar-hidden .sidebar, .sidebar-hidden .sidebar-resizer { display: none; }
-.frameless .topbar { padding-left: 92px; }
-.frameless .brand { width: 168px; }
-.sidebar-tabs { gap: var(--space-lg); }
-.hide-formatbar .formatbar { display: none; }
-.status-breadcrumb { min-width: 0; max-width: 220px; overflow: hidden; text-overflow: ellipsis; color: var(--color-ink); opacity: .75; }
-#selection-status { color: var(--color-accent); }
-#encoding { font: 10px var(--font-code); opacity: .7; }
 .article-item { display: flex; flex-direction: column; gap: 2px; width: 100%; text-align: left; padding: var(--space-md) 12px; border-left: 2px solid transparent; }
 .article-item strong { font-size: var(--text-sm); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .article-item span { font-size: 11px; color: var(--color-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -366,7 +323,7 @@ kbd { font: .9em var(--font-code); color: var(--color-ink); }
 #dialog:has(.quick-list) { width: min(560px, calc(100vw - 32px)); }
 #dialog:has(.lightbox-image) { width: min(920px, calc(100vw - 32px)); }
 .lightbox-image { display: block; max-width: 100%; max-height: 70vh; margin: auto; }
-.code-copy { position: absolute; top: 5px; right: 12px; z-index: 1; font: 10px var(--font-code); color: var(--color-muted); padding: 2px 8px; border: 1px solid var(--color-rule); border-radius: var(--radius-sm); background: var(--color-surface); opacity: 0; transition: opacity var(--dur-micro) var(--ease-out); }
+.code-copy { position: absolute; top: 5px; right: 12px; z-index: 1; font: 10px var(--font-code); color: var(--color-muted); padding: 2px 8px; border: 1px solid var(--color-rule); border-radius: var(--radius-sm); background: var(--color-surface); opacity: var(--copy-button-opacity, 0); transition: opacity var(--dur-micro) var(--ease-out); }
 .prose pre.code-block:hover .code-copy, .code-copy:focus-visible { opacity: 1; }
 .prose .code-language { right: 76px; }
 /* Typora keeps the page clean: no anchor glyphs or hover rails on blocks. */
@@ -400,63 +357,6 @@ kbd { font: .9em var(--font-code); color: var(--color-ink); }
 .outline-item[draggable="true"] { cursor: grab; }
 .outline-item.dragging { opacity: .45; }
 .outline-item.drop-target { background: var(--color-selected); box-shadow: inset 0 -2px var(--color-accent); }
-@media (max-width: 1000px) { .sidebar { width: min(var(--sidebar-width), 208px); flex-basis: min(var(--sidebar-width), 208px); } .frameless .brand { width: 140px; } }
-/* ── Default Typora-like chrome ───────────────────────────────────────────
-   One 38px title bar, no brand strip, no tab strip, no formatting toolbar,
-   a 24px word-count footer, and a paper-coloured writing surface. The dense
-   workbench remains available through Preferences → 界面外观 / 命令面板. */
-:root[data-ui="typora"] .topbar {
-  position: relative; height: 38px; padding: 0 10px; gap: 8px;
-  border-bottom: 0; background: var(--color-paper); user-select: none;
-}
-:root[data-ui="typora"] body.frameless .topbar { padding-left: 78px; }
-:root[data-ui="typora"] .brand { display: none; }
-:root[data-ui="typora"] .top-actions { gap: 0; }
-:root[data-ui="typora"] .top-actions:last-child { margin-left: auto; }
-:root[data-ui="typora"] .document-location {
-  position: absolute; left: 50%; transform: translateX(-50%); flex: none;
-  max-width: 42vw; font-size: 12px; font-weight: 500; color: var(--color-muted);
-}
-:root[data-ui="typora"] .topbar .icon-button,
-:root[data-ui="typora"] .topbar .export-button {
-  width: 28px; height: 28px; padding: 0; margin: 0; border: 0;
-  display: inline-flex; align-items: center; justify-content: center;
-  color: var(--color-muted); opacity: .72; border-radius: var(--radius-sm);
-}
-:root[data-ui="typora"] .topbar .icon-button:hover,
-:root[data-ui="typora"] .topbar .export-button:hover { opacity: 1; background: var(--color-hover); }
-:root[data-ui="typora"] .topbar .icon-button svg,
-:root[data-ui="typora"] .topbar .export-button svg { width: 16px; height: 16px; }
-:root[data-ui="typora"] .export-button span { display: none; }
-:root[data-ui="typora"] .tabbar,
-:root[data-ui="typora"] .formatbar { display: none; }
-:root[data-ui="typora"] .statusbar {
-  min-height: 24px; height: 24px; padding: 0 10px; gap: 10px;
-  border-top: 0; background: var(--color-paper); font-size: 11px;
-}
-:root[data-ui="typora"] .statusbar > #save-status,
-:root[data-ui="typora"] .statusbar > #breadcrumb,
-:root[data-ui="typora"] .statusbar > #position,
-:root[data-ui="typora"] .statusbar > #encoding { display: none; }
-:root[data-ui="typora"] .statusbar button { width: 22px; height: 22px; opacity: .4; }
-:root[data-ui="typora"] .statusbar button:hover { opacity: 1; background: var(--color-hover); }
-:root[data-ui="typora"] .statusbar svg { width: 13px; height: 13px; }
-:root[data-ui="typora"] .sidebar { background: var(--color-sidebar); border-right-color: var(--color-rule); }
-:root[data-ui="typora"] .sidebar-tabs { height: 34px; border-bottom: 0; padding: 0 16px; gap: 18px; }
-:root[data-ui="typora"] .sidebar-tabs button { font-size: 12px; }
-:root[data-ui="typora"] .sidebar-tabs button[aria-selected="true"] { border-bottom: 0; font-weight: 600; }
-:root[data-ui="typora"] .sidebar-context,
-:root[data-ui="typora"] .sidebar-footer { display: none; }
-:root[data-ui="typora"] .outline-item,
-:root[data-ui="typora"] .file-item { min-height: 28px; font-size: 12px; border-radius: var(--radius-sm); }
-:root[data-ui="typora"] .cm-editor .cm-content { width: calc(100% - 60px); max-width: var(--editor-width); padding: 30px 30px 100px !important; }
-:root[data-ui="typora"] .typewriter-mode .cm-content { padding-top: 35vh !important; padding-bottom: 45vh !important; }
-:root[data-ui="typora"] #notification { bottom: 32px; }
-@media (max-width: 768px) {
-  :root[data-ui="typora"] .sidebar { position: absolute; top: 38px; bottom: 24px; left: 0; z-index: 10; box-shadow: 8px 0 20px var(--color-shadow); }
-  :root[data-ui="typora"] .sidebar-hidden .sidebar { display: none; }
-  :root[data-ui="typora"] .sidebar-hidden .sidebar-resizer { display: none; }
-}
 @media print {
   @page { size: A4; margin: 20mm 18mm; }
   html, body, #app { height: auto !important; overflow: visible !important; background: var(--color-surface); }
@@ -467,54 +367,3 @@ kbd { font: .9em var(--font-code); color: var(--color-ink); }
   .print-document pre { white-space: pre-wrap; }
   .print-document a { color: inherit; }
 }
-
-/* ── Native title bar (Windows / Linux) ───────────────────────────────────
-   The window is frameless with a native overlay for the system window buttons,
-   so the application topbar *is* the title bar: the bar drags the window, its
-   controls do not, and the right edge keeps the native buttons clear. */
-.app-menu-button { display: none; }
-/* The typora block above sets `padding` as a shorthand with three class-level
-   selectors, so these overrides repeat the attribute selector to win. */
-body.titlebar-overlay .topbar,
-:root[data-ui="typora"] body.titlebar-overlay .topbar {
-  -webkit-app-region: drag;
-  padding-right: calc(var(--titlebar-controls-width, 0px) + 10px);
-}
-body.titlebar-overlay .topbar button,
-body.titlebar-overlay .topbar input,
-body.titlebar-overlay .topbar a,
-body.titlebar-overlay .app-menu-button { -webkit-app-region: no-drag; }
-body.titlebar-overlay .app-menu-button {
-  display: inline-flex; align-items: center; height: 26px; padding: 0 8px; margin-right: 4px;
-  font-size: 12px; color: var(--color-muted); border-radius: var(--radius-sm);
-}
-body.titlebar-overlay .app-menu-button:hover { background: var(--color-hover); color: var(--color-ink); }
-/* Full screen hides the overlay buttons, so their reserved space goes away. */
-body.titlebar-overlay.is-fullscreen .topbar,
-:root[data-ui="typora"] body.titlebar-overlay.is-fullscreen .topbar { padding-right: 10px; }
-body.titlebar-overlay.is-fullscreen .app-menu-button { display: none; }
-
-/* ── Open documents (sidebar) ─────────────────────────────────────────────
-   The tab strip is hidden in the default appearance; this list keeps every
-   open document reachable, including their close buttons. */
-.open-documents {
-  flex: 0 0 auto; max-height: 38%; display: flex; flex-direction: column;
-  padding: 2px var(--space-sm) 6px; border-bottom: 1px solid var(--color-rule);
-}
-.open-documents-heading { padding: 4px 8px 2px; font-size: var(--text-xs); color: var(--color-muted); }
-#open-documents { min-height: 0; overflow: auto; scrollbar-width: thin; }
-.open-document { display: flex; align-items: center; border-radius: var(--radius-sm); }
-.open-document:hover { background: var(--color-hover); }
-.open-document-name {
-  display: flex; align-items: center; gap: var(--space-sm); flex: 1; min-width: 0;
-  min-height: 30px; padding: 4px 6px; font-size: var(--text-sm); color: var(--color-muted); text-align: left;
-}
-.open-document-name span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.open-document-name svg { width: 14px; height: 14px; color: var(--color-muted); }
-.open-document-name[aria-current="true"] { color: var(--color-ink); font-weight: 600; }
-.open-document-close { display: grid; place-items: center; width: 22px; height: 22px; flex: 0 0 auto; color: var(--color-muted); opacity: .35; }
-.open-document:hover .open-document-close,
-.open-document-close:focus-visible { opacity: 1; }
-.open-document-close svg { width: 12px; height: 12px; }
-:root[data-ui="typora"] .open-documents-heading { font-size: 11px; }
-:root[data-ui="typora"] .open-document-name { min-height: 28px; font-size: 12px; }

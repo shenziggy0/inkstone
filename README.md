@@ -9,7 +9,10 @@
 适用于 macOS、Windows 和 Linux。
 
 <p align="center">
-  <img src="docs/evidence/ui-light-2026-11-07.png" alt="墨页浅色界面" width="880">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/evidence/inkstone-glass-dark.webp">
+    <img src="docs/evidence/inkstone-glass-light.webp" alt="墨页的文稿库、浮动工具栏和写作区" width="880">
+  </picture>
 </p>
 
 ## 功能
@@ -19,7 +22,7 @@
 - **技术文档语法**：GFM 表格（就地输入、Enter 追加行、Tab 走单元格、拖动列宽）、KaTeX 公式、Mermaid 图表、代码高亮（常用语言内置，其余按需加载）。
 - **文件与工作区**：文件树、文件夹全文搜索、最近文件、会话恢复、崩溃恢复、保存历史与逐行 diff、外部修改提示。
 - **链接与图片**：本地 `.md` 链接支持跨文档锚点，源码中的行内链接可用 Ctrl/Cmd+点击打开。图片迁移支持标题、尖括号和引用式写法；首次保存会保全临时图片，跨目录另存或移动时会复制文档引用的本地 `assets/` 图片。
-- **界面**：默认是 38px 单行标题栏和纯白纸面；偏好设置可切回带标签栏与工具栏的工作台外观。中文界面，命令面板（`Ctrl/Cmd+P`）、大纲、专注/打字机模式、自定义 CSS 主题（含 `#write` 的 Typora 主题走受限正文映射）。
+- **界面**采用 iOS 风格的半透明工具栏和分段导航。默认打开简洁写作布局，可在偏好设置中启用带标签和排版工具的完整工作台。窄窗口使用抽屉式文稿库，手机宽度下可下拉收起设置面板。外观支持跟随系统、浅色、深色、纸张与自定义 CSS 主题，并响应系统的减少动态效果与降低透明度设置。中文命令面板（`Ctrl/Cmd+P`）、大纲、专注与打字机模式均可使用，兼容的 Typora 主题通过 `#write` 映射到正文。
 - **导出**：自包含 HTML、无样式 HTML、整篇 PNG、PDF（大纲、页眉页脚、页码、纸张与页边距预设），以及复制为 Markdown/HTML。Pandoc 未安装时，对应格式会降级并提示。
 
 ## 当前进度
@@ -146,7 +149,7 @@ inkstone/
 
 ## 已知限制
 
-- 活动块由 CodeMirror 编辑 Markdown 源码，不是 typora 式的可编辑渲染 DOM。超长文档超过排版阈值（约 20 万字符）时回退为源码模式。
+- 活动块由 CodeMirror 编辑 Markdown 源码，不是 typora 式的可编辑渲染 DOM。文档超过 260,000 个 UTF-16 码元时回退为源码模式。
 - 常规 Markdown 表格支持就地编辑、行列重排和调整列宽。混合原始 HTML 的表格保留源码编辑。
 - 公式引擎是 KaTeX，宏支持范围与 MathJax 不同。PDF / PNG 已在 macOS 自动化中验证，Windows 实机的字体替换与打印视口仍需复测。Pandoc 未安装时，DOCX / ODT / EPUB / LaTeX / RST 只能降级提示。
 - 同一应用进程的多个窗口按真实文件路径协调保存。多个进程之间仍使用磁盘版本检测，无法保证其他程序不会在检查与替换之间写入。

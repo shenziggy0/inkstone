@@ -13,7 +13,7 @@ export function browserBridge() {
     setTimeout(() => URL.revokeObjectURL(url), 10000);
   };
   const actions = {
-    bootstrap: () => ({ documents: [], preferences: { theme: 'light', fontSize: 16, lineWidth: 860, autoSave: false, focus: false, typewriter: false, spellcheck: true, mathNumbering: false, headingNumbering: false, sidebarWidth: 240, zoomLevel: 0, windowBounds: null, windowMaximized: false, showFormatbar: true, uiMode: 'typora', sidebarVisible: false, pdfExport: { header: '', footer: '', pageNumbers: false, pageSize: 'css', landscape: false, margins: 'css' }, pdfPresets: [] }, platform: mac ? 'darwin' : 'win32', titleBar: { overlay: false, height: 38, controlsWidth: 0, trashName: mac ? '废纸篓' : '回收站' } }),
+    bootstrap: () => ({ documents: [], preferences: { theme: 'light', fontSize: 16, lineWidth: 860, autoSave: false, focus: false, typewriter: false, spellcheck: true, mathNumbering: false, headingNumbering: false, sidebarWidth: 240, zoomLevel: 0, windowBounds: null, windowMaximized: false, showFormatbar: true, uiMode: 'typora', sidebarVisible: false, workbenchSidebarVisible: true, pdfExport: { header: '', footer: '', pageNumbers: false, pageSize: 'css', landscape: false, margins: 'css' }, pdfPresets: [] }, platform: mac ? 'darwin' : 'win32', titleBar: { overlay: false, height: 64, controlsWidth: 0, trashName: mac ? '废纸篓' : '回收站' } }),
     newDocument: (content, name) => create(content, name || '未命名.md', name ? false : !!content),
     updateDocument(id, content) { const doc = docs.get(id); doc.content = content; doc.dirty = true; return { ...doc }; },
     async openDocument() {

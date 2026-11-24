@@ -1,4 +1,7 @@
 import './styles.css';
+import './workspace.css';
+import { workspaceHTML, toolbarMenuHTML, preferencesHTML, installGlassHighlights, installSheetDrag } from './workspace.js';
+import { icon } from './icons.js';
 import 'katex/dist/katex.min.css';
 import { createEditor } from './editor.js';
 import { escapeHTML, headings, statistics, renderMarkdown, renderDiagrams, refreshDiagrams, tableSourceRanges, setMathNumbering, setImageRootSetting, setFrontMatterImageRoot } from './markdown.js';
@@ -18,7 +21,7 @@ const native = !!window.desktop;
 const bridge = window.desktop || browserBridge();
 const documents = new Map();
 let activeId, folder, prefs, sideMode = 'outline', sourceMode = false, busy = false;
-let customThemes = [], selectedHistory = null, lastThemeKey = null, lastUiMode = null, customThemeSeq = 0;
+let customThemes = [], selectedHistory = null, lastThemeKey = null, customThemeSeq = 0;
 let capabilities = { installed: false, version: null, platform: '' }, imageContext = null;
 let pendingTable = null, quickFiles = [];
 // Folder-wide search state. The query survives a sidebar redraw so results can
@@ -32,67 +35,19 @@ let recentFiles = [], lastSessionKey = '', quitting = false;
 let welcomeId = null;
 // Filled from bootstrap: which title bar the main process draws, and the
 // platform-specific name of the deleted-files location.
-let titleBarInfo = { overlay: false, height: 38, controlsWidth: 0, trashName: '废纸篓' };
+let titleBarInfo = { overlay: false, height: 64, controlsWidth: 0, trashName: '废纸篓' };
 let appPlatform = '';
 const trashName = () => titleBarInfo.trashName || '废纸篓';
 const $ = selector => document.querySelector(selector);
-const icons = {
-  panel: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/>',
-  file: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/>',
-  folder: '<path d="M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
-  plus: '<path d="M12 5v14M5 12h14"/>',
-  search: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/>',
-  code: '<path d="m8 6-6 6 6 6m8-12 6 6-6 6m-3-15-2 18"/>',
-  arrow: '<path d="M12 16V3m-5 5 5-5 5 5M4 14v6h16v-6"/>',
-  settings: '<path d="M4 7h16M4 17h16"/><circle cx="8" cy="7" r="3"/><circle cx="16" cy="17" r="3"/>',
-  moon: '<path d="M20 15a9 9 0 0 1-11-11 9 9 0 1 0 11 11Z"/>',
-  save: '<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h12l4 4v12a2 2 0 0 1-2 2Z"/><path d="M7 3v6h10V3M7 21v-8h10v8"/>',
-  focus: '<path d="M3 8V3h5m8 0h5v5m0 8v5h-5m-8 0H3v-5"/><circle cx="12" cy="12" r="3"/>',
-  close: '<path d="m6 6 12 12M6 18 18 6"/>',
-  more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
-  image: '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8" cy="8" r="1.5"/><path d="m21 15-5-5L5 21"/>',
-  filePlus: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M9 15h6m-3-3v6"/>',
-  folderPlus: '<path d="M3 7V5a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 11v6m-3-3h6"/>',
-  refresh: '<path d="M21 12a9 9 0 1 1-3-6.7M21 4v5h-5"/>'
-};
-const icon = name => `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name] || icons.file}</svg>`;
-const button = (command, label, glyph) => `<button class="icon-button" data-command="${command}" aria-label="${label}" title="${label}">${icon(glyph)}</button>`;
-
-$('#app').innerHTML = `
-  <header class="topbar">
-    <button class="app-menu-button" data-command="app-menu" aria-label="菜单" title="菜单">菜单</button>
-    <div class="brand"><span class="brand-mark">墨</span><span>墨页 <small>INKSTONE</small></span></div>
-    <div class="top-actions">${button('sidebar', '切换侧边栏', 'panel')}${button('new', '新建文档', 'plus')}${button('open', '打开文档', 'folder')}</div>
-    <div class="document-location" id="location">未命名.md</div>
-    <div class="top-actions">${button('find', '查找与替换', 'search')}${button('source', '切换源码模式', 'code')}${button('save', '保存文档', 'save')}<button class="export-button" data-command="export">${icon('arrow')}<span>导出</span></button>${button('settings', '偏好设置', 'settings')}</div>
-  </header>
-  <div class="workspace">
-    <aside class="sidebar" aria-label="文件与大纲">
-      <div class="sidebar-tabs" role="tablist"><button role="tab" data-side="outline" aria-selected="true">大纲</button><button role="tab" data-side="files" aria-selected="false">文件</button><button role="tab" data-side="articles" aria-selected="false">文章</button><button role="tab" data-side="search" aria-selected="false">搜索</button></div>
-      <div class="sidebar-context"><span id="side-title">文档结构</span>${button('folder', '打开文件夹', 'folder')}</div>
-      <label class="filter-label" hidden><span class="sr-only">筛选文件</span><input id="file-filter" placeholder="筛选文件…" type="search"></label>
-      <section class="open-documents" aria-label="已打开文档">
-        <div class="open-documents-heading">已打开文档</div>
-        <div id="open-documents" role="list" aria-label="已打开文档列表"></div>
-      </section>
-      <nav id="side-content" aria-label="文档大纲"></nav>
-      <div class="sidebar-footer"><button data-command="help">使用说明 <span>↗</span></button><span>${native ? '本地工作空间' : '浏览器开发预览'}</span></div>
-    </aside>
-    <div class="sidebar-resizer" id="sidebar-resizer" role="separator" aria-label="调整侧边栏宽度"></div>
-    <main class="main-pane">
-      <div class="tabbar"><div id="document-tabs" role="tablist" aria-label="打开的文档"></div>${button('new', '新建文档', 'plus')}${button('document-menu', '文档操作', 'more')}</div>
-      <div class="formatbar" role="toolbar" aria-label="排版工具">
-        <button data-command="heading-1" title="一级标题">H1</button><button data-command="heading-2" title="二级标题">H2</button><span class="divider"></span><button data-command="bold" aria-label="粗体"><b>B</b></button><button data-command="italic" aria-label="斜体"><i>I</i></button><button data-command="strike" aria-label="删除线"><s>S</s></button><button data-command="inline-code" aria-label="行内代码">&lt;/&gt;</button><span class="divider"></span><button data-command="link">链接</button><button data-command="table">表格</button><button data-command="code">代码</button><button data-command="math">公式</button><button data-command="diagram">图表</button>${button('image', '插入图片', 'image')}<span class="format-spacer"></span><span id="mode-label">即时渲染</span>
-      </div>
-      <div id="editor-host"></div>
-      <footer class="statusbar"><span id="save-status" role="status">就绪</span><span id="breadcrumb" class="status-breadcrumb"></span><span class="status-spacer"></span><span id="selection-status"></span><span id="position">行 1，列 1</span><span id="statistics"></span><span id="encoding"></span><button data-command="focus" title="专注模式" aria-label="专注模式">${icon('focus')}</button><button data-command="theme" title="切换主题" aria-label="切换主题">${icon('moon')}</button></footer>
-    </main>
-  </div>
-  <div id="notification" role="alert" hidden></div>
-  <div id="context-menu" class="context-menu" role="menu" hidden></div>
-  <dialog id="dialog" aria-labelledby="dialog-title"><div id="dialog-content"></div></dialog>
-  <article class="print-document prose write-surface" id="print-document"></article>
-`;
+$('#app').innerHTML = workspaceHTML(native);
+installGlassHighlights($('.topbar'));
+installSheetDrag($('#dialog'));
+const compactLayout = matchMedia('(max-width: 760px)');
+const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
+const systemDark = matchMedia('(prefers-color-scheme: dark)');
+let compactSidebarOpen = false;
+let lastToolbarScroll = 0;
+let navigationKey = '';
 
 function notify(message, error = false) {
   const node = $('#notification'); node.textContent = message; node.classList.toggle('error', error); node.hidden = false;
@@ -112,13 +67,19 @@ async function flush(doc = current()) {
 function updateChrome() {
   const doc = current(); if (!doc) return;
   document.title = `${doc.dirty ? '• ' : ''}${doc.name} — 墨页`;
-  // Typora shows just the filename in the title bar, with a bullet while dirty.
+  // The filename remains visible even when the tab strip is folded away.
   $('#location').textContent = `${doc.dirty ? '• ' : ''}${doc.name}`;
   $('#location').title = doc.path || doc.name;
   $('#save-status').textContent = doc.error ? doc.error : doc.dirty ? '有未保存的更改' : doc.path ? '已保存' : '未保存到文件';
   $('#save-status').classList.toggle('status-error', !!doc.error);
+  $('#save-status').dataset.state = doc.error ? 'error' : doc.dirty ? 'dirty' : doc.path ? 'saved' : 'draft';
+  // Typing changes the body far more often than it changes a tab. Keep the
+  // buttons (and keyboard focus on them) when only the manuscript changed.
+  const key = JSON.stringify([activeId, ...[...documents.values()].map(d => [d.id, d.name, d.path, d.dirty])]);
+  if (key === navigationKey) return;
+  navigationKey = key;
   drawOpenDocuments();
-  $('#document-tabs').innerHTML = [...documents.values()].map(d => `<div class="document-tab ${d.id === activeId ? 'active' : ''}"><button role="tab" aria-selected="${d.id === activeId}" data-document="${d.id}" title="${escapeHTML(d.path || d.name)}">${icon('file')}<span>${escapeHTML(d.name)}</span>${d.dirty ? '<span class="dirty-mark" aria-label="未保存">●</span>' : ''}</button><button class="close-tab" data-close="${d.id}" aria-label="关闭 ${escapeHTML(d.name)}">${icon('close')}</button></div>`).join('');
+  $('#document-tabs').innerHTML = [...documents.values()].map(d => `<div class="document-tab ${d.id === activeId ? 'active' : ''}"><button role="tab" tabindex="${d.id === activeId ? 0 : -1}" aria-selected="${d.id === activeId}" aria-controls="editor-host" data-document="${d.id}" title="${escapeHTML(d.path || d.name)}">${icon('file')}<span>${escapeHTML(d.name)}</span>${d.dirty ? '<span class="dirty-mark" aria-label="未保存">●</span>' : ''}</button><button class="close-tab" data-close="${d.id}" aria-label="关闭 ${escapeHTML(d.name)}">${icon('close')}</button></div>`).join('');
 }
 function updateStats() {
   const doc = current(); if (!doc) return;
@@ -144,19 +105,23 @@ function drawSidebar() {
   const container = $('#side-content');
   $('.filter-label').hidden = sideMode !== 'files' && sideMode !== 'articles';
   $('#side-title').textContent = sideMode === 'outline' ? '文档结构' : sideMode === 'articles' ? '全部文章' : (folder?.name || '文件工作空间');
-  for (const el of document.querySelectorAll('[data-side]')) el.setAttribute('aria-selected', String(el.dataset.side === sideMode));
+  container.setAttribute('aria-labelledby', `side-${sideMode}`);
+  for (const [index, tab] of [...document.querySelectorAll('[data-side]')].entries()) {
+    const selected = tab.dataset.side === sideMode;
+    tab.setAttribute('aria-selected', String(selected));
+    tab.tabIndex = selected ? 0 : -1;
+    if (selected) $('.sidebar-tabs').style.setProperty('--tab-index', index);
+  }
   if (sideMode === 'articles') {
     const query = $('#file-filter').value.toLowerCase();
     const articles = folder ? flattenFiles(folder.entries) : [];
     const opened = [...documents.values()].filter(d => !d.path).map(d => ({ name: d.name, path: '', recent: true }));
     const all = [...opened, ...articles.map(a => ({ ...a, recent: false }))];
     const matches = all.filter(a => !query || a.name.toLowerCase().includes(query));
-    container.setAttribute('aria-label', '文章列表');
     container.innerHTML = matches.length
       ? matches.map(a => `<button class="article-item ${a.recent ? 'unsaved' : ''} ${a.path && a.path === current()?.path ? 'current' : ''}" ${a.path ? `data-path="${escapeHTML(a.path)}"` : 'disabled'}><strong>${escapeHTML(a.name.replace(/\.(md|markdown|mdown|txt)$/i, ''))}</strong><span>${a.recent ? '未保存的文档' : escapeHTML(a.path.replace(/[\\/][^\\/]*$/, ''))}</span></button>`).join('')
       : '<div class="empty-state"><p>还没有文章</p><small>打开一个文件夹，即可在这里浏览全部 Markdown 文档。</small><button class="primary" data-command="folder">打开文件夹</button></div>';
   } else if (sideMode === 'search') {
-    container.setAttribute('aria-label', '文件夹搜索');
     // The panel is only built once, so typing in the search box is not
     // interrupted by the sidebar being redrawn after every result update.
     if (!container.querySelector('#folder-search-input')) {
@@ -170,15 +135,14 @@ function drawSidebar() {
       </div><div class="folder-search-results" id="folder-search-results" role="list"></div>`;
       container.querySelector('#folder-search-input').value = searchState.query;
       for (const box of container.querySelectorAll('[data-search-option]')) box.checked = !!searchState[box.dataset.searchOption];
-      container.querySelector('#folder-search-input').focus();
+      if (!$('#writing-sidebar').inert) container.querySelector('#folder-search-input').focus();
     }
     drawSearchResults();
   } else if (sideMode === 'outline') {
     const content = current()?.content || '';
     const outline = headings(content);
     const { owners } = parseSections(content);
-    container.setAttribute('aria-label', '文档大纲');
-    container.innerHTML = outline.length ? outline.map((h, index) => `<button class="outline-item level-${h.level}" data-line="${h.line}" data-section="${owners[index] ?? index}" draggable="true" title="拖动可重排整个章节" style="--indent:${Math.max(0, h.level - 1) * 12}px"><span>${escapeHTML(h.title)}</span></button>`).join('') : '<div class="empty-state"><p>还没有标题</p><small>输入 # 加空格，为文档建立结构。</small></div>';
+    container.innerHTML = outline.length ? outline.map((h, index) => `<button class="outline-item level-${h.level}" data-line="${h.line}" data-section="${owners[index] ?? index}" draggable="true" title="拖动可重排整个章节" style="--indent:${Math.max(0, h.level - 1) * 12}px"><small aria-hidden="true">H${h.level}</small><span>${escapeHTML(h.title)}</span></button>`).join('') : '<div class="empty-state"><p>还没有标题</p><small>输入 # 加空格，为文档建立结构。</small></div>';
   } else {
     const query = $('#file-filter').value.toLowerCase();
     const renderEntries = (entries, depth = 0) => entries.map(entry => {
@@ -189,7 +153,6 @@ function drawSidebar() {
       if (query && !entry.name.toLowerCase().includes(query)) return '';
       return `<button class="file-item" style="padding-left:${12 + depth * 12}px" data-path="${escapeHTML(entry.path)}" data-tree-path="${escapeHTML(entry.path)}" data-tree-kind="file">${icon('file')}<span>${escapeHTML(entry.name)}</span></button>`;
     }).join('');
-    container.setAttribute('aria-label', '文件列表');
     // The tree owns the create / rename / trash actions: a small toolbar for the
     // common ones, and a native context menu on every entry.
     const toolbar = folder ? `<div class="file-tree-toolbar">
@@ -199,6 +162,7 @@ function drawSidebar() {
     </div>` : '';
     container.innerHTML = toolbar + (folder ? renderEntries(folder.entries) || '<div class="empty-state">没有匹配的 Markdown 文件</div>' : '<div class="empty-state"><p>让文件留在自己的位置</p><small>打开一个文件夹，浏览其中的 Markdown 文档。</small><button class="primary" data-command="folder">打开文件夹</button></div>');
   }
+  updateCurrentSection();
 }
 // ── Folder-wide search ─────────────────────────────────────────────────────
 // The main process walks the folder and returns grouped matches; the renderer
@@ -482,14 +446,27 @@ function saveSession(force = false) {
 // headings() keeps the outline of the parse that rendered the current version,
 // so the breadcrumb, the sidebar and [TOC] never run markdown-it a second time.
 const outlineFor = content => headings(content);
+function updateCurrentSection(lineNumber) {
+  const doc = current();
+  if (!doc?.editor) return;
+  const state = doc.editor.view.state;
+  const line = lineNumber ?? state.doc.lineAt(state.selection.main.head).number;
+  const section = outlineFor(doc.content).findLast(item => item.line <= line);
+  $('#breadcrumb').textContent = section?.title || '';
+  const active = $('#side-content .outline-item[aria-current]');
+  const target = section && $(`#side-content .outline-item[data-line="${section.line}"]`);
+  if (active !== target) {
+    active?.removeAttribute('aria-current');
+    target?.setAttribute('aria-current', 'location');
+  }
+}
 function selectionChanged(update) {
   if (update.view !== current()?.editor.view) return;
   const state = update.state, range = state.selection.main;
   const pos = range.head, line = state.doc.lineAt(pos);
   $('#position').textContent = `行 ${line.number}，列 ${pos - line.from + 1}`;
   $('#selection-status').textContent = range.empty ? '' : `已选 ${[...state.sliceDoc(range.from, range.to)].length} 字`;
-  const section = outlineFor(current()?.content || '').reduce((found, item) => item.line <= line.number ? item.title : found, '');
-  $('#breadcrumb').textContent = section ? `§ ${section}` : '';
+  updateCurrentSection(line.number);
   // Only a naked caret should recentre the viewport. Recentring on a growing
   // selection makes drag-select fight the scrolling underneath the pointer.
   if (prefs?.typewriter && update.selectionSet && update.state.selection.main.empty) queueMicrotask(() => { if (update.view.dom.isConnected) update.view.dispatch({ effects: EditorView.scrollIntoView(pos, { y: 'center' }) }); });
@@ -497,8 +474,8 @@ function selectionChanged(update) {
 // Imported here to keep the editor implementation's public API small.
 import { EditorView } from '@codemirror/view';
 
-async function addDocument(record) {
-  if (documents.has(record.id)) { activate(record.id); return; }
+async function addDocument(record, focusEditor) {
+  if (documents.has(record.id)) { activate(record.id, focusEditor); return; }
   const doc = { ...record, savedContent: record.dirty ? '' : record.content };
   documents.set(doc.id, doc);
   const mount = document.createElement('div'); mount.className = 'editor-mount';
@@ -517,7 +494,23 @@ async function addDocument(record) {
     clearTimeout(doc.statsTimer); doc.statsTimer = setTimeout(() => { if (doc.id === activeId) { updateStats(); drawSidebar(); } }, 180);
   }, selectionChanged, command => runCommand(command), file => insertImage(file, doc), href => navigateLink(href));
   doc.editor.setSpellcheck(prefs.spellcheck);
-  activate(doc.id);
+  doc.editor.view.scrollDOM.addEventListener('scroll', () => {
+    if (doc.id === activeId) updateScrollEdge(doc);
+  }, { passive: true });
+  activate(doc.id, focusEditor);
+}
+function updateScrollEdge(doc, reset = false) {
+  const top = doc.editor.view.scrollDOM.scrollTop;
+  $('#editor-host').classList.toggle('has-scroll', top > 4);
+  if (reset || !compactLayout.matches || top < 12) {
+    $('.main-pane').classList.remove('tools-folded');
+  } else {
+    if (Math.abs(top - lastToolbarScroll) < 16) return;
+    if (!$('.reading-controls').contains(document.activeElement)) {
+      $('.main-pane').classList.toggle('tools-folded', top > 80 && top > lastToolbarScroll);
+    }
+  }
+  lastToolbarScroll = top;
 }
 /**
  * Open documents requested from the menu, the palette, the sidebar, a dropped
@@ -554,16 +547,19 @@ async function adoptFolderFromMain() {
   drawSidebar();
   saveSession();
 }
-function activate(id) {
+function activate(id, focusEditor = current()?.mount?.contains(document.activeElement)) {
   // An in-cell draft belongs to the outgoing document. Commit it before its
   // mount is detached; the background flush / autosave path never does this.
   if (activeId && activeId !== id) documents.get(activeId)?.editor?.commitActiveCell();
   activeId = id;
   const doc = current();
-  $('#editor-host').replaceChildren(doc.mount);
+  const host = $('#editor-host');
+  if (doc.mount.parentNode !== host) host.replaceChildren(doc.mount);
   doc.editor.setSource(sourceMode);
+  updateScrollEdge(doc, true);
   doc.editor.view.requestMeasure();
   updateChrome(); updateStats(); drawSidebar(); saveSession();
+  if (focusEditor && !$('.main-pane').inert && !$('#dialog').open) doc.editor.view.focus();
 }
 /**
  * Mirror asset-reference rewrites made by the main process (a Save As into a
@@ -661,11 +657,16 @@ async function closeDocumentNow(doc, createReplacement, includePath) {
   await flush(doc);
   const closed = await api('closeDocument', id, includePath);
   if (!closed) return false;
+  const wasActive = activeId === id;
+  const wasEditing = doc.mount.contains(document.activeElement);
   clearTimeout(doc.timer); clearTimeout(doc.statsTimer); doc.editor.destroy(); documents.delete(id);
-  if (documents.size) activate([...documents.keys()].at(-1));
-  else {
+  if (!wasActive) {
+    updateChrome(); drawSidebar(); saveSession();
+  } else if (documents.size) {
+    activate([...documents.keys()].at(-1), wasEditing);
+  } else {
     activeId = undefined;
-    if (createReplacement) await addDocument(await api('newDocument', ''));
+    if (createReplacement) await addDocument(await api('newDocument', ''), wasEditing);
     else saveSession();
   }
   return closed;
@@ -779,18 +780,21 @@ async function applyCustomTheme(value) {
 }
 function applyPreferences() {
   const custom = String(prefs.theme).startsWith('custom:');
-  document.documentElement.dataset.theme = custom ? 'light' : prefs.theme;
+  const theme = prefs.theme === 'system' ? (systemDark.matches ? 'dark' : 'light') : custom ? 'light' : prefs.theme;
+  document.documentElement.dataset.theme = theme;
   document.documentElement.style.setProperty('--editor-size', `${prefs.fontSize}px`);
   document.documentElement.style.setProperty('--editor-width', `${prefs.lineWidth}px`);
   document.documentElement.style.setProperty('--sidebar-width', `${Number(prefs.sidebarWidth) || 240}px`);
-  // Two visual shells: the default is Typora's chrome-free writing surface;
-  // the workbench keeps every tab / toolbar / status readout available.
+  $('#sidebar-resizer').setAttribute('aria-valuenow', Number(prefs.sidebarWidth) || 240);
+  // Retain the stored layout IDs for existing installations and custom themes.
   const ui = prefs.uiMode === 'workbench' ? 'workbench' : 'typora';
   document.documentElement.dataset.ui = ui;
-  if (ui !== lastUiMode) {
-    document.body.classList.toggle('sidebar-hidden', ui === 'typora' && prefs.sidebarVisible === false);
-    lastUiMode = ui;
-  }
+  syncSidebar();
+  $('[data-command="focus"]').setAttribute('aria-pressed', String(!!prefs.focus));
+  const themeButton = $('.status-actions [data-command="theme"]');
+  themeButton.innerHTML = icon(theme === 'dark' ? 'moon' : theme === 'sepia' ? 'sun' : 'theme');
+  themeButton.title = `切换主题（当前${{ dark: '深色', sepia: '纸张', light: '浅色' }[theme]}）`;
+  $('.topbar [data-command="source"]').setAttribute('aria-pressed', String(sourceMode));
   document.body.classList.toggle('focus-mode', prefs.focus);
   document.body.classList.toggle('typewriter-mode', prefs.typewriter);
   document.body.classList.toggle('math-numbering', !!prefs.mathNumbering);
@@ -808,20 +812,68 @@ function applyPreferences() {
   document.body.classList.toggle('heading-numbering', !!prefs.headingNumbering);
   document.body.classList.toggle('hide-formatbar', prefs.showFormatbar === false);
   applyCustomTheme(prefs.theme).catch(error => notify(error.message, true));
-  const themeKey = custom ? prefs.theme : String(prefs.theme);
+  const themeKey = custom ? prefs.theme : theme;
   if (lastThemeKey !== null && lastThemeKey !== themeKey) refreshDiagrams(document).catch(() => {});
   lastThemeKey = themeKey;
   for (const doc of documents.values()) doc.editor.setSpellcheck(prefs.spellcheck);
 }
 async function setPreferences(patch) { prefs = { ...prefs, ...patch }; applyPreferences(); await api('settings', patch); }
-function setSidebarVisible(visible) {
+const sidebarPreference = () => prefs?.uiMode === 'workbench' ? 'workbenchSidebarVisible' : 'sidebarVisible';
+function syncSidebar() {
+  const drawer = compactLayout.matches && compactSidebarOpen;
+  const visible = compactLayout.matches ? drawer : !!prefs?.[sidebarPreference()];
+  const sidebar = $('#writing-sidebar');
+  const toggle = $('.topbar [data-command="sidebar"]');
+  toggle.setAttribute('aria-controls', sidebar.id);
+  toggle.setAttribute('aria-expanded', String(visible));
   document.body.classList.toggle('sidebar-hidden', !visible);
-  setPreferences({ sidebarVisible: visible }).catch(error => notify(error.message, true));
+  sidebar.inert = !visible;
+  if (drawer) {
+    sidebar.setAttribute('role', 'dialog');
+    sidebar.setAttribute('aria-modal', 'true');
+  } else {
+    sidebar.removeAttribute('role');
+    sidebar.removeAttribute('aria-modal');
+  }
+  $('.topbar').inert = drawer;
+  $('.main-pane').inert = drawer;
 }
+function setSidebarVisible(visible) {
+  if (compactLayout.matches) {
+    document.body.classList.add('drawer-animated');
+    compactSidebarOpen = visible;
+    syncSidebar();
+    $(visible ? '.sidebar-tabs [aria-selected="true"]' : '.topbar [data-command="sidebar"]').focus();
+    return;
+  }
+  const pane = $('.main-pane');
+  const previousX = pane.getBoundingClientRect().left;
+  // Applying the preference lays out the new width before the write to disk.
+  setPreferences({ [sidebarPreference()]: visible }).catch(error => notify(error.message, true));
+  const delta = previousX - pane.getBoundingClientRect().left;
+  if (delta && !reduceMotion.matches) {
+    pane.animate([{ transform: `translateX(${delta}px)` }, { transform: 'none' }], {
+      duration: 240, easing: 'cubic-bezier(.18,.75,.24,1)'
+    });
+  }
+}
+function dismissCompactSidebar() {
+  if (compactLayout.matches && compactSidebarOpen) setSidebarVisible(false);
+}
+compactLayout.addEventListener('change', () => {
+  const inside = $('#writing-sidebar').contains(document.activeElement);
+  document.body.classList.remove('drawer-animated');
+  compactSidebarOpen = false;
+  syncSidebar();
+  if (current()) updateScrollEdge(current(), true);
+  if (inside && $('#writing-sidebar').inert) $('.topbar [data-command="sidebar"]').focus();
+});
+systemDark.addEventListener('change', () => { if (prefs?.theme === 'system') applyPreferences(); });
 function dialogContent(title, body) {
   // Any dialog that is not an external-change prompt takes over the screen.
   dialogPurpose = 'other';
-  $('#dialog-content').innerHTML = `<div class="dialog-heading"><h2 id="dialog-title">${title}</h2><button class="icon-button" data-dismiss aria-label="关闭对话框">${icon('close')}</button></div>${body}`;
+  $('#dialog').style.removeProperty('--sheet-drag');
+  $('#dialog-content').innerHTML = `<div class="sheet-grabber" aria-hidden="true"></div><div class="dialog-heading"><h2 id="dialog-title">${title}</h2><button class="icon-button" data-dismiss aria-label="关闭对话框">${icon('close')}</button></div>${body}`;
 }
 function showDialog(title, body, purpose = 'other') {
   if (purpose !== 'external') deferExternalPrompt();
@@ -872,7 +924,7 @@ const paletteCommands = () => [
   ['设置文档图片根目录…', 'image-root', '段落', ''],
   ['源码模式', 'source', '视图', `${modKey}/`],
   ['切换侧边栏', 'sidebar', '视图', `${modKey}⇧L`],
-  ['切换界面外观（Typora / 工作台）', 'toggle-ui', '视图', ''],
+  ['切换布局（简洁写作 / 完整工作台）', 'toggle-ui', '视图', ''],
   ['大纲面板', 'panel-outline', '视图', ''],
   ['文件树面板', 'panel-files', '视图', ''],
   ['文章列表面板', 'panel-articles', '视图', ''],
@@ -907,8 +959,9 @@ function quickOpenResults(query = '') {
   highlightQuick();
 }
 async function runQuickItem(element) {
+  dismissCompactSidebar();
   try {
-    if (element.dataset.quickDocument) activate(element.dataset.quickDocument);
+    if (element.dataset.quickDocument) activate(element.dataset.quickDocument, true);
     else if (element.dataset.quickPath) await openDocuments(await api('openPath', element.dataset.quickPath));
     else if (element.dataset.quickCommand) await runCommand(element.dataset.quickCommand);
   } catch (error) { notify(error.message, true); }
@@ -1188,7 +1241,7 @@ async function runCommand(command, detail) {
     switch (command) {
       case 'undo': editor?.undo(); break;
       case 'redo': editor?.redo(); break;
-      case 'new': await addDocument(await api('newDocument', '')); break;
+      case 'new': await addDocument(await api('newDocument', ''), true); break;
       case 'new-window': await api('newWindow'); break;
       case 'open': await openDocuments(await api('openDocument')); break;
       case 'folder': { const selected = await api('openFolder'); if (selected) { folder = selected; sideMode = 'files'; setSidebarVisible(true); drawSidebar(); } saveSession(); break; }
@@ -1223,7 +1276,17 @@ async function runCommand(command, detail) {
       case 'save-as': await save(current(), true, { commitCell: true }); break;
       case 'close': await closeDocument(activeId); break;
       case 'find': editor?.find(); break;
-      case 'source': sourceMode = !sourceMode; editor?.setSource(sourceMode); editor?.view.focus(); $('#mode-label').textContent = sourceMode ? 'Markdown 源码' : '即时渲染'; $('[data-command="source"]').setAttribute('aria-pressed', String(sourceMode)); break;
+      case 'source':
+        sourceMode = !sourceMode;
+        editor?.setSource(sourceMode); editor?.view.focus();
+        $('#mode-label').textContent = sourceMode ? 'Markdown 源码' : '即时渲染';
+        $('[data-command="source"]').setAttribute('aria-pressed', String(sourceMode));
+        break;
+      case 'toolbar-menu': showDialog('更多操作', toolbarMenuHTML(sourceMode)); break;
+      case 'expand-tools':
+        $('.main-pane').classList.remove('tools-folded');
+        $('.status-actions [data-command="focus"]').focus({ preventScroll: true });
+        break;
       case 'sidebar': setSidebarVisible(document.body.classList.contains('sidebar-hidden')); break;
       case 'focus': await setPreferences({ focus: !prefs.focus }); break;
       case 'typewriter': await setPreferences({ typewriter: !prefs.typewriter }); break;
@@ -1280,8 +1343,8 @@ async function runCommand(command, detail) {
       }
       case 'settings': {
         customThemes = await api('listThemes');
-        const options = [['light', '浅色'], ['dark', '深色'], ['sepia', '纸张'], ...customThemes.map(name => [`custom:${name}`, `自定义 · ${name.replace(/\.css$/i, '')}`])];
-        showDialog('偏好设置', `<form id="preferences"><label>主题<select name="theme">${options.map(([value, label]) => `<option value="${escapeHTML(value)}" ${prefs.theme === value ? 'selected' : ''}>${escapeHTML(label)}</option>`).join('')}</select></label><label>界面外观<select name="uiMode"><option value="typora" ${prefs.uiMode !== 'workbench' ? 'selected' : ''}>Typora 极简（默认）</option><option value="workbench" ${prefs.uiMode === 'workbench' ? 'selected' : ''}>工作台（标签 / 工具栏 / 状态栏）</option></select></label><label>正文字号<input name="fontSize" type="number" min="12" max="30" value="${prefs.fontSize}"></label><label>正文宽度<input name="lineWidth" type="number" min="560" max="1100" step="20" value="${prefs.lineWidth}"></label><label>图片根目录（默认值）<input name="imageRoot" type="text" value="${escapeHTML(prefs.imageRoot || '')}" placeholder="留空时使用文档中的 typora-root-url"><button type="button" data-pick-image-root>选择文件夹…</button></label>${[['autoSave', '自动保存已命名的文件'], ['restoreSession', '启动时恢复上次的文件夹与已打开文档'], ['spellcheck', '拼写检查'], ['focus', '专注模式'], ['typewriter', '打字机模式'], ['mathNumbering', '公式自动编号'], ['headingNumbering', '标题自动编号'], ['showFormatbar', '显示排版工具栏']].map(([key, label]) => `<label class="checkbox-label"><span>${label}</span><input type="checkbox" name="${key}" ${prefs[key] ? 'checked' : ''}></label>`).join('')}<div class="dialog-actions"><button type="button" data-menu-command="themes-folder">打开主题文件夹</button><button class="primary" type="submit">保存设置</button></div></form>`);
+        const options = [['system', '跟随系统'], ['light', '浅色'], ['dark', '深色'], ['sepia', '纸张'], ...customThemes.map(name => [`custom:${name}`, `自定义 · ${name.replace(/\.css$/i, '')}`])];
+        showDialog('偏好设置', preferencesHTML(prefs, options));
         break;
       }
       case 'document-menu': showDialog('文档操作', `<div class="menu-list">${[['save-as', '另存为…'], ['rename', '重命名 / 移动…'], ['image-root', '设置图片根目录…'], ['reveal', '在文件夹中显示'], ['history', '查看保存历史…'], ['toc', '插入文内目录'], ['task', '插入任务项'], ['quote', '插入引用'], ['trash', `移到${trashName()}`]].map(([key, label]) => `<button data-menu-command="${key}">${label}</button>`).join('')}</div>`); break;
@@ -1461,6 +1524,7 @@ document.addEventListener('click', async event => {
     else if (event.metaKey || event.ctrlKey) await navigateLink(href);
     return;
   }
+  if (target.closest('[data-sidebar-dismiss]')) { dismissCompactSidebar(); return; }
   const command = target?.closest?.('[data-command]'); if (command) { await runCommand(command.dataset.command); return; }
   const tableOp = target?.closest?.('[data-table-op]');
   if (tableOp) { tableOperation(tableOp.dataset.tableOp, Number(tableOp.dataset.index)); return; }
@@ -1536,13 +1600,31 @@ document.addEventListener('click', async event => {
     try { await exportDocument(exported.dataset.export); $('#dialog').close(); } catch (error) { notify(error.message, true); } finally { busy = false; exported.disabled = false; exported.removeAttribute('aria-busy'); } return;
   }
   const side = target?.closest?.('[data-side]'); if (side) { sideMode = side.dataset.side; drawSidebar(); return; }
-  const close = target?.closest?.('[data-close]'); if (close) { try { await closeDocument(close.dataset.close); } catch (error) { notify(error.message, true); } return; }
-  const tab = target?.closest?.('[data-document]'); if (tab) { activate(tab.dataset.document); return; }
-  const searchHit = target?.closest?.('[data-search-hit]'); if (searchHit) { await openSearchHit(searchHit); return; }
+  const close = target?.closest?.('[data-close]');
+  if (close) {
+    const list = close.closest('#open-documents, #document-tabs');
+    try {
+      const closed = await closeDocument(close.dataset.close);
+      if (closed && document.activeElement === document.body) {
+        if (event.detail === 0 || $('.main-pane').inert) list?.querySelector('[aria-selected="true"], [aria-current="true"]')?.focus();
+        else current()?.editor.view.focus();
+      }
+    } catch (error) { notify(error.message, true); }
+    return;
+  }
+  const tab = target?.closest?.('[data-document]');
+  if (tab) {
+    const stayInTablist = event.detail === 0 && tab.getAttribute('role') === 'tab';
+    dismissCompactSidebar();
+    activate(tab.dataset.document, !stayInTablist);
+    if (stayInTablist) $('#document-tabs [aria-selected="true"]').focus();
+    return;
+  }
+  const searchHit = target?.closest?.('[data-search-hit]'); if (searchHit) { dismissCompactSidebar(); await openSearchHit(searchHit); return; }
   const fileOp = target?.closest?.('[data-file-op]');
   if (fileOp) { await runFileOperation(fileOp.dataset.fileOp, null, true); return; }
-  const file = target?.closest?.('[data-path]'); if (file) { try { await openDocuments(await api('openDocument', file.dataset.path)); } catch (error) { notify(error.message, true); } return; }
-  const line = target?.closest?.('[data-line]'); if (line) { event.preventDefault(); current()?.editor.jump(Number(line.dataset.line)); return; }
+  const file = target?.closest?.('[data-path]'); if (file) { try { await openDocuments(await api('openDocument', file.dataset.path)); dismissCompactSidebar(); } catch (error) { notify(error.message, true); } return; }
+  const line = target?.closest?.('[data-line]'); if (line) { event.preventDefault(); dismissCompactSidebar(); current()?.editor.jump(Number(line.dataset.line)); return; }
 });
 document.addEventListener('submit', async event => {
   // Document content cannot forge the preferences form and change app settings.
@@ -1647,7 +1729,39 @@ document.addEventListener('keydown', event => {
     if (chosen) { $('#dialog').close(); runQuickItem(chosen); }
   }
 });
-// A draggable divider, like Typora's resizable sidebar.
+function moveTabFocus(event) {
+  const list = event.currentTarget;
+  const tabs = [...list.querySelectorAll('[role="tab"]')];
+  const index = tabs.indexOf(event.target);
+  const next = { ArrowRight: (index + 1) % tabs.length, ArrowLeft: (index + tabs.length - 1) % tabs.length, Home: 0, End: tabs.length - 1 }[event.key];
+  if (index < 0 || next === undefined) return;
+  event.preventDefault();
+  if (tabs[next].dataset.side) {
+    sideMode = tabs[next].dataset.side;
+    drawSidebar();
+  } else activate(tabs[next].dataset.document);
+  list.querySelector('[aria-selected="true"]').focus();
+}
+$('.sidebar-tabs').addEventListener('keydown', moveTabFocus);
+$('#document-tabs').addEventListener('keydown', moveTabFocus);
+$('#writing-sidebar').addEventListener('keydown', event => {
+  if (!compactSidebarOpen || $('#dialog').open || event.isComposing) return;
+  if (event.key === 'Escape') { event.preventDefault(); dismissCompactSidebar(); return; }
+  if (event.key !== 'Tab') return;
+  const controls = [...event.currentTarget.querySelectorAll('button, input, summary, [tabindex]')]
+    .filter(node => node.tabIndex >= 0 && !node.disabled && node.checkVisibility());
+  const boundary = event.shiftKey ? controls[0] : controls.at(-1);
+  if (document.activeElement === boundary) {
+    event.preventDefault();
+    (event.shiftKey ? controls.at(-1) : controls[0])?.focus();
+  }
+});
+$('#sidebar-resizer').addEventListener('keydown', event => {
+  const delta = { ArrowLeft: -16, ArrowRight: 16 }[event.key];
+  if (!delta || !prefs) return;
+  event.preventDefault();
+  setPreferences({ sidebarWidth: Math.max(180, Math.min(480, prefs.sidebarWidth + delta)) }).catch(error => notify(error.message, true));
+});
 $('#sidebar-resizer').addEventListener('mousedown', event => {
   if (!prefs) return;
   event.preventDefault();
@@ -1664,7 +1778,11 @@ $('#sidebar-resizer').addEventListener('mousedown', event => {
   document.addEventListener('mousemove', onMove);
   document.addEventListener('mouseup', onUp, { once: true });
 });
-$('#dialog').addEventListener('click', event => { if (event.target === $('#dialog')) $('#dialog').close(); });
+$('#dialog').addEventListener('click', event => {
+  if (event.target !== event.currentTarget) return;
+  const rect = event.currentTarget.getBoundingClientRect();
+  if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) event.currentTarget.close();
+});
 // Any dialog closing is the moment a queued external-change prompt may appear.
 $('#dialog').addEventListener('close', () => {
   const purpose = dialogPurpose;

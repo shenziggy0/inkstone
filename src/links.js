@@ -64,7 +64,9 @@ export function linkAt(line, offset) {
 export function headingForAnchor(headings, anchor) {
   const wanted = safeDecode(String(anchor ?? '')).replace(/^#/, '');
   if (!wanted) return null;
+  const decoded = safeDecode(wanted);
   return (headings || []).find(heading => heading.id === wanted)
-    || (headings || []).find(heading => heading.id === safeDecode(wanted))
+    || (headings || []).find(heading => heading.id === decoded)
+    || (headings || []).find(heading => heading.legacyId === wanted || heading.legacyId === decoded)
     || null;
 }

@@ -257,23 +257,50 @@ parser.renderer.rules.blockquote_open = (tokens, index, options, env, self) => {
 };
 
 const slugify = title => title.toLowerCase().replace(/[^\p{L}\p{N}\s_-]/gu, '').replace(/\s+/g, '-');
-// Assign anchors after parsing the full document, including footnote headings.
-// Cached blocks can then skip rendering without changing the IDs of other blocks.
-parser.core.ruler.push('inkstone_heading_ids', ({ tokens }) => {
+function headingIds(firstRepeat) {
   const nextSuffix = new Map();
   const used = new Set();
+  function allocate(slug) {
+    let id = slug;
+    if (used.has(id)) {
+      let suffix = nextSuffix.get(slug) ?? firstRepeat;
+      do { id = `${slug}-${suffix++}`; } while (used.has(id));
+      nextSuffix.set(slug, suffix);
+    }
+    used.add(id);
+    return id;
+  }
+  return { used, allocate };
+}
+
+// A later literal heading can own an old fragment. Resolve every canonical
+// ID before assigning aliases, including headings nested inside containers.
+parser.core.ruler.push('inkstone_heading_ids', ({ tokens }) => {
+  const canonical = headingIds(2);
+  const legacy = headingIds(1);
+  const aliases = [];
   for (let index = 0; index < tokens.length; index++) {
     const token = tokens[index];
     if (token.type !== 'heading_open') continue;
     const slug = slugify(tokens[index + 1]?.content || '') || 'heading';
-    let suffix = nextSuffix.get(slug) ?? 0;
-    let id = suffix ? `${slug}-${suffix}` : slug;
-    while (used.has(id)) id = `${slug}-${++suffix}`;
-    nextSuffix.set(slug, suffix + 1);
-    used.add(id);
+    const id = canonical.allocate(slug);
+    const oldId = legacy.allocate(slug);
     token.attrSet('id', id);
+    if (oldId !== id) aliases.push([token, oldId]);
+  }
+  for (const [token, oldId] of aliases) {
+    if (!canonical.used.has(oldId)) {
+      token.meta ??= {};
+      token.meta.legacyId = oldId;
+    }
   }
 });
+
+parser.renderer.rules.heading_close = (tokens, index, options, env, self) => {
+  const alias = tokens[index - 2]?.meta?.legacyId;
+  const close = self.renderToken(tokens, index, options);
+  return alias ? `<a name="${escapeHTML(alias)}"></a>${close}` : close;
+};
 
 /**
  * Outline entries share the IDs assigned to the rendered heading tokens.
@@ -284,7 +311,9 @@ export function headingsFromTokens(tokens) {
     const token = tokens[i];
     if (token.type !== 'heading_open' || !token.map) continue;
     const title = tokens[i + 1]?.content || '';
-    result.push({ title, level: Number(tokens[i].tag.slice(1)), line: tokens[i].map[0] + 1, id: tokens[i].attrGet('id') });
+    const item = { title, level: Number(token.tag.slice(1)), line: token.map[0] + 1, id: token.attrGet('id') };
+    if (token.meta?.legacyId) item.legacyId = token.meta.legacyId;
+    result.push(item);
   }
   return result;
 }
@@ -634,7 +663,10 @@ export function prepareDocument(source, documentId, options = {}) {
     );
     const anchors = [];
     for (const token of group.tokens) {
-      if (token.type === 'heading_open') anchors.push(token.attrGet('id'));
+      if (token.type === 'heading_open') {
+        const id = token.attrGet('id');
+        anchors.push(token.meta?.legacyId ? `${id}\u0002${token.meta.legacyId}` : id);
+      }
     }
     group.context = anchors.length ? `a\u0000${anchors.join('\u0001')}` : '';
     if (/\[toc\]/i.test(group.source)) {

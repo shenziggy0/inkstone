@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, dialog, ipcMain, shell, protocol, net, session, clipboard, ClipboardItem, nativeImage, screen } = require('electron');
+const { app, BrowserWindow, Menu, dialog, ipcMain, shell, protocol, net, session, clipboard, ClipboardItem, nativeImage, nativeTheme, screen } = require('electron');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { pathToFileURL, fileURLToPath } = require('node:url');
@@ -19,7 +19,7 @@ const digest = data => crypto.createHash('sha256').update(data).digest('hex');
 if (process.env.INKSTONE_TEST_USER_DATA) app.setPath('userData', process.env.INKSTONE_TEST_USER_DATA);
 protocol.registerSchemesAsPrivileged([{ scheme: 'inkstone-asset', privileges: { standard: true, secure: true, supportFetchAPI: true } }]);
 
-let preferences = { theme: 'light', fontSize: 16, lineWidth: 860, autoSave: false, focus: false, typewriter: false, spellcheck: true, mathNumbering: false, headingNumbering: false, sidebarWidth: 240, zoomLevel: 0, windowBounds: null, windowMaximized: false, showFormatbar: true, uiMode: 'typora', sidebarVisible: false, restoreSession: true, uiDefaultsMigrated: false, imageRoot: '', pdfExport: { ...DEFAULT_PDF_EXPORT }, pdfPresets: [] };
+let preferences = { theme: 'light', fontSize: 16, lineWidth: 860, autoSave: false, focus: false, typewriter: false, spellcheck: true, mathNumbering: false, headingNumbering: false, sidebarWidth: 240, zoomLevel: 0, windowBounds: null, windowMaximized: false, showFormatbar: true, uiMode: 'typora', sidebarVisible: false, workbenchSidebarVisible: true, restoreSession: true, uiDefaultsMigrated: false, imageRoot: '', pdfExport: { ...DEFAULT_PDF_EXPORT }, pdfPresets: [] };
 // Recent documents / folders and the session restored at startup.
 const workspace = new WorkspaceState(app.getPath('userData'));
 const pendingFiles = [];
@@ -32,14 +32,16 @@ const filters = [{ name: 'Markdown', extensions: ['md', 'markdown', 'mdown', 'tx
 // window buttons, so the application's own topbar is the only title bar.
 // macOS keeps `hiddenInset` with the traffic lights inside that topbar.
 const MAC = process.platform === 'darwin';
-const TITLE_BAR_HEIGHT = 38;
+const TITLE_BAR_HEIGHT = 64;
 // One platform-dependent name for the deleted-files location, used by menus,
 // the command palette, the confirmation dialog and the notifications.
 const TRASH_NAME = MAC ? '废纸篓' : '回收站';
-/** Overlay colours follow the paper colour of the current theme. */
+/** Match the renderer's chrome while the native window controls are visible. */
+const chromeTheme = () => preferences.theme === 'system' ? (nativeTheme.shouldUseDarkColors ? 'dark' : 'light') : preferences.theme;
+const chromeColor = () => ({ dark: '#191b26', sepia: '#eee7db' })[chromeTheme()] || '#eef0f7';
 const titleBarOverlay = () => ({
-  color: preferences.theme === 'dark' ? '#282c34' : preferences.theme === 'sepia' ? '#fbf7ef' : '#ffffff',
-  symbolColor: preferences.theme === 'dark' ? '#d7dae0' : '#3b3f46',
+  color: chromeColor(),
+  symbolColor: chromeTheme() === 'dark' ? '#e6e7f0' : '#333333',
   height: TITLE_BAR_HEIGHT
 });
 // Reserved width of the native window buttons (minimise / maximise / close) so
@@ -56,6 +58,15 @@ pendingFiles.push(...parseDocumentPaths(process.argv, process.cwd()));
 // handlers automatically operate on the window that called them.
 const contextStorage = new AsyncLocalStorage();
 const contexts = new Map();
+function updateWindowMaterials() {
+  const overlay = titleBarOverlay();
+  for (const { win } of contexts.values()) {
+    if (!win || win.isDestroyed()) continue;
+    win.setBackgroundColor(overlay.color);
+    if (!MAC) win.setTitleBarOverlay(overlay);
+  }
+}
+nativeTheme.on('updated', () => { if (preferences.theme === 'system') updateWindowMaterials(); });
 let primary = null, windowCounter = 0;
 const active = () => contextStorage.getStore() || primary || { win: null, store: null, root: null };
 Object.defineProperty(globalThis, 'win', { configurable: true, get: () => active().win });
@@ -82,6 +93,14 @@ const command = (name, payload) => {
   target?.win.webContents.send('inkstone:command', name, payload);
 };
 const settingsPath = () => path.join(app.getPath('userData'), 'settings.json');
+let settingsWrite = Promise.resolve();
+function persistSettings() {
+  // Atomic replacement protects each write. Ordering also prevents an older
+  // snapshot from replacing a newer choice when two windows write together.
+  const snapshot = JSON.stringify(preferences, null, 2);
+  settingsWrite = settingsWrite.catch(() => {}).then(() => atomicWrite(settingsPath(), snapshot));
+  return settingsWrite;
+}
 const themesDirectory = () => path.join(app.getPath('userData'), 'themes');
 // Shared by every window: `<userData>/history/<path hash>/`.
 const historyDirectory = () => path.join(app.getPath('userData'), 'history');
@@ -401,6 +420,7 @@ async function quitAllWindows() {
       }
       // The renderers are gone, so their last session snapshot has arrived.
       await workspace.flush().catch(() => {});
+      await settingsWrite.catch(() => {});
       app.quit();
       return true;
     } finally { quitSequence = null; }
@@ -437,9 +457,9 @@ function createWindow() {
   const restored = visibleBounds(preferences.windowBounds) || {};
   const window = new BrowserWindow({
     width: 1240, height: 840, ...restored, minWidth: 720, minHeight: 480, title: 'Inkstone',
-    backgroundColor: preferences.theme === 'dark' ? '#282c34' : preferences.theme === 'sepia' ? '#fbf7ef' : '#ffffff',
+    backgroundColor: chromeColor(),
     ...(frameless
-      ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 18, y: preferences.uiMode === 'workbench' ? 22 : 12 } }
+      ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 18, y: 25 } }
       : { titleBarStyle: 'hidden', titleBarOverlay: titleBarOverlay(), autoHideMenuBar: true }),
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, spellcheck: true }
   });
@@ -458,7 +478,7 @@ function createWindow() {
         const { x, y, width, height } = window.getBounds();
         preferences.windowBounds = { x, y, width, height };
       }
-      await atomicWrite(settingsPath(), JSON.stringify(preferences, null, 2)).catch(() => {});
+      await persistSettings().catch(() => {});
     }, 450);
   };
   for (const event of ['resize', 'move', 'maximize', 'unmaximize', 'restore']) window.on(event, persistWindowState);
@@ -601,7 +621,7 @@ function menuTemplate() {
       item('大纲面板', macKey('Cmd+Ctrl+1', 'CmdOrCtrl+Shift+1'), 'panel-outline'),
       item('文件树面板', macKey('Cmd+Ctrl+2', 'CmdOrCtrl+Shift+2'), 'panel-files'),
       item('文章列表面板', null, 'panel-articles'),
-      item('切换界面外观（Typora / 工作台）', null, 'toggle-ui'),
+      item('切换布局（简洁写作 / 完整工作台）', null, 'toggle-ui'),
       item('专注模式', 'F8', 'focus'), item('打字机模式', 'F9', 'typewriter'), item('切换主题', null, 'theme'),
       { type: 'separator' },
       item('实际大小', 'CmdOrCtrl+Shift+0', 'zoom-reset'),
@@ -1335,7 +1355,7 @@ function registerHandlers() {
     if (!patch) return preferences;
     for (const [key, value] of Object.entries(patch)) {
       if (!(key in preferences) || typeof value !== typeof preferences[key]) continue;
-      if (key === 'theme' && !['light', 'dark', 'sepia'].includes(value) && !(typeof value === 'string' && value.startsWith('custom:') && safeName(value.slice(7)) && value.endsWith('.css'))) continue;
+      if (key === 'theme' && !['system', 'light', 'dark', 'sepia'].includes(value) && !(typeof value === 'string' && value.startsWith('custom:') && safeName(value.slice(7)) && value.endsWith('.css'))) continue;
       if (key === 'uiMode' && !['typora', 'workbench'].includes(value)) continue;
       if (key === 'fontSize' && (!Number.isFinite(value) || value < 12 || value > 30)) continue;
       if (key === 'lineWidth' && (!Number.isFinite(value) || value < 560 || value > 1100)) continue;
@@ -1373,22 +1393,8 @@ function registerHandlers() {
       }
       preferences[key] = value;
     }
-    // The macOS traffic lights follow the height of the active title bar.
-    if (patch.uiMode && process.platform === 'darwin') {
-      const position = { x: 18, y: preferences.uiMode === 'workbench' ? 22 : 12 };
-      for (const { win } of contexts.values()) if (win && !win.isDestroyed() && typeof win.setTrafficLightPosition === 'function') win.setTrafficLightPosition(position);
-    }
-    // Windows / Linux: the native window-button overlay follows the paper colour
-    // of the selected theme, including custom CSS themes (treated as light).
-    if (patch.theme && !MAC) {
-      const overlay = titleBarOverlay();
-      for (const { win } of contexts.values()) {
-        if (!win || win.isDestroyed() || typeof win.setTitleBarOverlay !== 'function') continue;
-        win.setTitleBarOverlay(overlay);
-        win.setBackgroundColor(overlay.color);
-      }
-    }
-    await atomicWrite(settingsPath(), JSON.stringify(preferences, null, 2));
+    if (patch.theme) updateWindowMaterials();
+    await persistSettings();
     return preferences;
   });
   // The explicit local entry for an image root. Without an id it only picks a
@@ -1499,7 +1505,7 @@ function registerHandlers() {
     const level = Math.max(-3, Math.min(3, step === 0 ? 0 : win.webContents.getZoomLevel() + Math.sign(step)));
     win.webContents.setZoomLevel(level);
     preferences.zoomLevel = level;
-    await atomicWrite(settingsPath(), JSON.stringify(preferences, null, 2));
+    await persistSettings();
   });
   handle('fullscreen', () => { win.setFullScreen(!win.isFullScreen()); });
   handle('reopenClosed', async () => {
@@ -1757,6 +1763,11 @@ else {
       preferences = {
         ...preferences,
         ...stored,
+        // Older versions saved one sidebar switch. Honour it for a workspace
+        // last used in workbench mode; a first visit to that layout opens it.
+        workbenchSidebarVisible: typeof stored.workbenchSidebarVisible === 'boolean'
+          ? stored.workbenchSidebarVisible
+          : stored.uiMode !== 'workbench' || stored.sidebarVisible !== false,
         // Older files have no export keys; tolerate partial or invalid values
         // without discarding the rest of the settings.
         pdfExport: normalizePdfExport(stored.pdfExport),
@@ -1771,7 +1782,7 @@ else {
     // One-time migration: the old 17px / 760px defaults predate Typora parity.
     if (!preferences.uiDefaultsMigrated && preferences.fontSize === 17 && preferences.lineWidth === 760) {
       preferences = { ...preferences, fontSize: 16, lineWidth: 860, uiDefaultsMigrated: true };
-      await atomicWrite(settingsPath(), JSON.stringify(preferences, null, 2)).catch(() => {});
+      await persistSettings().catch(() => {});
     }
     protocol.handle('inkstone-asset', async request => {
       try {
@@ -1823,7 +1834,10 @@ else {
     createWindow();
   });
 }
-app.on('window-all-closed', () => app.quit());
+app.on('window-all-closed', async () => {
+  await settingsWrite.catch(() => {});
+  app.quit();
+});
 app.on('before-quit', event => {
   // Route every quit (dock, menu, Alt+F4) through the per-window loop so all
   // save prompts are asked; a cancel aborts the whole quit.

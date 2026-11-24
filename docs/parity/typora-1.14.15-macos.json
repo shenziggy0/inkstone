@@ -1,0 +1,812 @@
+{
+  "reference": "Typora 1.14.15 / macOS",
+  "scope": "可见静态菜单路径与七页偏好分组、可读控件。过滤系统 Apple 菜单、个人最近文件及设备名。checked 为 null 表示没有读取到布尔值。",
+  "menus": {
+    "Typora": [
+      "About Typora",
+      "My License…",
+      "Settings…",
+      "Check for Updates",
+      "Services",
+      "Services › No Services Apply",
+      "Services › Services Settings…",
+      "Hide Typora",
+      "Hide Others",
+      "Show All",
+      "Quit Typora",
+      "Quit and Keep Windows"
+    ],
+    "File": [
+      "New",
+      "New Tab",
+      "New Window",
+      "Open…",
+      "Open Recent",
+      "Open Recent › Reopen Closed File",
+      "Open Recent › Clear Items",
+      "Open Quickly…",
+      "Get Info…",
+      "Reveal in Library",
+      "Reveal in File Tree",
+      "Open File Location",
+      "Delete…",
+      "Close",
+      "Close All",
+      "Save",
+      "Save As…",
+      "Duplicate",
+      "Rename…",
+      "Move To…",
+      "Revert To",
+      "Revert To › Browse All Versions…",
+      "Reload from Disk",
+      "Save All…",
+      "Share",
+      "Share › AirDrop",
+      "Share › Mail",
+      "Share › Messages",
+      "Share › Notes",
+      "Share › Freeform",
+      "Share › Journal",
+      "Share › Reminders",
+      "Share › Shortcuts",
+      "Share › More…",
+      "Import…",
+      "Export",
+      "Export › PDF",
+      "Export › HTML",
+      "Export › HTML (without styles)",
+      "Export › Image",
+      "Export › Word (.docx)",
+      "Export › OpenOffice",
+      "Export › RTF",
+      "Export › Epub",
+      "Export › LaTeX",
+      "Export › Media Wiki",
+      "Export › reStructuredText",
+      "Export › Textile",
+      "Export › OPML",
+      "Export › Export with Previous",
+      "Export › Export and Overwrite with Previous",
+      "Export › Export Setting…",
+      "Page Setup…",
+      "Print…"
+    ],
+    "Edit": [
+      "Undo",
+      "Redo",
+      "Cut",
+      "Copy",
+      "Copy Image Content",
+      "Paste",
+      "Copy as Plain Text",
+      "Copy as Markdown",
+      "Copy as HTML Code",
+      "Copy without Theme Styling",
+      "Paste as Plain Text",
+      "Paste and Match Style",
+      "Selection",
+      "Selection › Select All",
+      "Selection › Select Paragraph / Block",
+      "Selection › Select Line / Sentence",
+      "Selection › Select Styled Scope",
+      "Selection › Select Word",
+      "Selection › Jump to Top",
+      "Selection › Jump to Selection",
+      "Selection › Jump to Bottom",
+      "Selection › Jump to Line Start",
+      "Selection › Jump to Line End",
+      "Move Row Up",
+      "Move Row Down",
+      "Delete",
+      "Delete Range",
+      "Delete Range › Delete Paragraph / Block",
+      "Delete Range › Delete Line / Sentence",
+      "Delete Range › Delete Styled Scope",
+      "Delete Range › Delete Word",
+      "Math Tools",
+      "Math Tools › Refresh All Math Expressions",
+      "Line Endings",
+      "Line Endings › Windows Line Endings (CRLF)",
+      "Line Endings › Unix Line Endings (LF)",
+      "Line Endings › Insert Final New Line On Save",
+      "Whitespace and Line Breaks",
+      "Whitespace and Line Breaks › Indent first line of paragraphs",
+      "Whitespace and Line Breaks › Visible <br/>",
+      "Whitespace and Line Breaks › Preserve single line break",
+      "Whitespace and Line Breaks › Learn More…",
+      "Substitutions",
+      "Substitutions › Convert on Input",
+      "Substitutions › Convert on Rendering",
+      "Substitutions › Smart Quotes",
+      "Substitutions › Smart Dashes",
+      "Substitutions › Text Replacement",
+      "Substitutions › Remap Unicode Punctuation on Parse",
+      "Substitutions › More Options…",
+      "Spelling and Grammar",
+      "Spelling and Grammar › Show Spelling and Grammar",
+      "Spelling and Grammar › Check Document Now",
+      "Spelling and Grammar › Check Spelling While Typing",
+      "Spelling and Grammar › Check Grammar With Spelling",
+      "Spelling and Grammar › Correct Spelling Automatically",
+      "Find",
+      "Find › Find…",
+      "Find › Find Next",
+      "Find › Find Previous",
+      "Find › Find and Replace…",
+      "Find › Replace Next",
+      "Find › Jump to Selection",
+      "Speech",
+      "Speech › Start Speaking",
+      "Speech › Stop Speaking",
+      "AutoFill",
+      "AutoFill › Contact…",
+      "AutoFill › Passwords…",
+      "AutoFill › Credit Card…",
+      "Start Dictation…",
+      "Emoji & Symbols"
+    ],
+    "Paragraph": [
+      "Heading 1",
+      "Heading 2",
+      "Heading 3",
+      "Heading 4",
+      "Heading 5",
+      "Heading 6",
+      "Paragraph",
+      "Increase Heading Level",
+      "Decrease Heading Level",
+      "Table",
+      "Table › Insert Table",
+      "Table › Add Row Above",
+      "Table › Add Row Below",
+      "Table › Add Column Before",
+      "Table › Add Column After",
+      "Table › Move Table Row Up",
+      "Table › Move Row Table Down",
+      "Table › Move Table Column Left",
+      "Table › Move Table Column Right",
+      "Table › Delete Row",
+      "Table › Delete Column",
+      "Table › Copy Table",
+      "Table › Prettify Source Code",
+      "Table › Delete Table",
+      "Math Block",
+      "Code Fences",
+      "Code Tools",
+      "Code Tools › Copy Code Content",
+      "Code Tools › Auto Indent Selected Code",
+      "Code Tools › Auto Indent Whole Code",
+      "Alert",
+      "Alert › Note Block",
+      "Alert › Tip Block",
+      "Alert › Important Block",
+      "Alert › Warning Block",
+      "Alert › Caution Block",
+      "Quote",
+      "Ordered List",
+      "Unordered List",
+      "Task List",
+      "Task Status",
+      "Task Status › Toggle Task Status",
+      "Task Status › Mark as Complete",
+      "Task Status › Mark as Incomplete",
+      "List Indentation",
+      "List Indentation › Indent",
+      "List Indentation › Outdent",
+      "Insert Paragraph Before",
+      "Insert Paragraph After",
+      "Link Reference",
+      "Footnotes",
+      "Horizontal Line",
+      "Table of Contents",
+      "YAML Front Matter"
+    ],
+    "Format": [
+      "Strong",
+      "Emphasis",
+      "Underline",
+      "Code",
+      "Strike",
+      "Comment",
+      "Hyperlink",
+      "Hyperlink Actions",
+      "Hyperlink Actions › Open Link",
+      "Hyperlink Actions › Copy Link Address",
+      "Image",
+      "Image › Insert Image",
+      "Image › Insert Local Images…",
+      "Image › Open Image Location…",
+      "Image › Zoom Image",
+      "Image › Switch Image Syntax",
+      "Image › Delete Image File",
+      "Image › Copy Image to…",
+      "Image › Rename or Move Image to…",
+      "Image › Upload Image",
+      "Image › Copy All Images to…",
+      "Image › Move All Images to…",
+      "Image › Upload All Local Images",
+      "Image › Reload All Images",
+      "Image › When Insert Local Image",
+      "Image › Use Image Root Path",
+      "Image › Global Image Settings…",
+      "Clear Format"
+    ],
+    "View": [
+      "Show Tab Bar",
+      "Show All Tabs",
+      "Source Code Mode",
+      "Readonly Mode",
+      "Focus Mode",
+      "Typewriter Mode",
+      "Toolbar",
+      "Toggle Sidebar",
+      "Outline",
+      "Articles",
+      "File Tree",
+      "Search",
+      "Toggle Word Count Popover",
+      "Toggle Outline Popover",
+      "Allow Magnification",
+      "Actual Size",
+      "Zoom In",
+      "Zoom Out",
+      "Always on Top",
+      "Full Screen"
+    ],
+    "Themes": [
+      "Github",
+      "Gothic",
+      "Newsprint",
+      "Night",
+      "Pixyll",
+      "Whitey"
+    ],
+    "Window": [
+      "Minimize",
+      "Minimize All",
+      "Zoom",
+      "Zoom All",
+      "Fill",
+      "Center",
+      "Move & Resize",
+      "Move & Resize › Halves",
+      "Move & Resize › Left",
+      "Move & Resize › Right",
+      "Move & Resize › Top",
+      "Move & Resize › Bottom",
+      "Move & Resize › Quarters",
+      "Move & Resize › Top Left",
+      "Move & Resize › Top Right",
+      "Move & Resize › Bottom Left",
+      "Move & Resize › Bottom Right",
+      "Move & Resize › Arrange",
+      "Move & Resize › Left & Right",
+      "Move & Resize › Left & Quarters",
+      "Move & Resize › Right & Left",
+      "Move & Resize › Right & Quarters",
+      "Move & Resize › Top & Bottom",
+      "Move & Resize › Top & Quarters",
+      "Move & Resize › Bottom & Top",
+      "Move & Resize › Bottom & Quarters",
+      "Move & Resize › Quarters",
+      "Move & Resize › Return to Previous Size",
+      "Full Screen Tile",
+      "Full Screen Tile › Left of Screen",
+      "Full Screen Tile › Right of Screen",
+      "Remove Window from Set",
+      "Show Previous Tab",
+      "Show Next Tab",
+      "Move Tab to New Window",
+      "Merge All Windows",
+      "Bring All to Front"
+    ],
+    "Help": [
+      "What's New…",
+      "Quick Start",
+      "Markdown Reference",
+      "Install and Use Pandoc",
+      "Custom Themes",
+      "Use Images in Typora",
+      "More Topics...",
+      "Credits",
+      "Change Log",
+      "Privacy Policy",
+      "Website",
+      "Feedback"
+    ]
+  },
+  "preferences": {
+    "Files": {
+      "On Launch": [
+        {
+          "control": "AXPopUpButton",
+          "text": "Open new file"
+        }
+      ],
+      "Outline": [
+        {
+          "control": "AXCheckBox",
+          "label": "Collapsible Outline on Left Panel",
+          "checked": null
+        }
+      ],
+      "Default File Type / Extension": [
+        {
+          "control": "AXPopUpButton",
+          "text": "Markdown (.md)"
+        }
+      ],
+      "Save & Recover": [
+        {
+          "control": "AXCheckBox",
+          "label": "Save without asking when switch files on side panel",
+          "checked": null
+        }
+      ],
+      "Recent Locations": [
+        {
+          "control": "AXCheckBox",
+          "label": "Record recent files and folders",
+          "checked": null
+        },
+        {
+          "control": "AXButton",
+          "text": "Clear Recent Folders and Files"
+        }
+      ],
+      "When drop file / folder into Typora": [
+        {
+          "control": "AXPopUpButton",
+          "text": "Open in Typora"
+        },
+        {
+          "control": "AXPopUpButton",
+          "text": "Import File"
+        }
+      ],
+      "File Tree / Library": [
+        {
+          "control": "AXCheckBox",
+          "label": "Show hidden folders / files",
+          "checked": null
+        },
+        {
+          "control": "AXPopUpButton",
+          "text": "Supported Files (Markdown & Plain Text)"
+        }
+      ]
+    },
+    "Editor": {
+      "Indent Size on Save": [
+        {
+          "control": "AXPopUpButton",
+          "text": "2"
+        },
+        {
+          "control": "AXCheckBox",
+          "label": "Pretty indentation",
+          "checked": false
+        }
+      ],
+      "Auto Pair": [
+        {
+          "control": "AXCheckBox",
+          "label": "Auto pair brackets and quotes",
+          "checked": true
+        },
+        {
+          "control": "AXCheckBox",
+          "label": "Auto pair common Markdown syntax",
+          "checked": false
+        }
+      ],
+      "Auto Complete": [
+        {
+          "control": "AXCheckBox",
+          "label": "Enable autocomplete for Emojis",
+          "checked": true
+        }
+      ],
+      "Live Rendering": [
+        {
+          "control": "AXCheckBox",
+          "label": "Display source for simple blocks (including headings, etc.) on focus",
+          "checked": false
+        }
+      ],
+      "Default Copy Behavior( ⌘C )": [
+        {
+          "control": "AXCheckBox",
+          "label": "Copy Markdown source as plain text",
+          "checked": true
+        },
+        {
+          "control": "AXCheckBox",
+          "label": "Copy or cut the whole lines that have cursors on them, if there is no selection when doing copy / cut.",
+          "checked": false
+        }
+      ],
+      "Typewriter Mode": [
+        {
+          "control": "AXCheckBox",
+          "label": "Always keep caret in middle of screen when typewriter mode is enabled",
+          "checked": true
+        },
+        {
+          "control": "AXButton",
+          "text": "Turn off Typewriter / Focus Mode"
+        }
+      ]
+    },
+    "Image": {
+      "When Insert…": [
+        {
+          "control": "AXPopUpButton",
+          "text": "No special action"
+        },
+        {
+          "control": "AXCheckBox",
+          "label": "Apply above rules to local images",
+          "checked": null
+        },
+        {
+          "control": "AXCheckBox",
+          "label": "Apply above rules to online images",
+          "checked": null
+        },
+        {
+          "control": "AXCheckBox",
+          "label": "Allow upload images automatically based on YAML settings",
+          "checked": null
+        }
+      ],
+      "Preferred Image Syntax": [
+        {
+          "control": "AXCheckBox",
+          "label": "Use relative path if possible",
+          "checked": null
+        },
+        {
+          "control": "AXCheckBox",
+          "label": "Add ./ for relative path",
+          "checked": null
+        },
+        {
+          "control": "AXCheckBox",
+          "label": "Auto escape image URL when insert",
+          "checked": null
+        }
+      ],
+      "Image Upload Setting": [
+        {
+          "control": "AXPopUpButton",
+          "text": "None"
+        }
+      ]
+    },
+    "Markdown": {
+      "Syntax Preference": [
+        {
+          "control": "AXCheckBox",
+          "label": "Strict Mode",
+          "checked": true
+        },
+        {
+          "control": "AXPopUpButton",
+          "text": "atx (#)"
+        },
+        {
+          "control": "AXPopUpButton",
+          "text": "-"
+        },
+        {
+          "control": "AXPopUpButton",
+          "text": "1. ⋯ 2. ⋯ 3. ⋯"
+        }
+      ],
+      "Syntax Support": [
+        {
+          "control": "AXCheckBox",
+          "label": "Auto Links (e.g: https://typora.io)",
+          "checked": true
+        },
+        {
+          "control": "AXCheckBox",
+          "label": "Inline Math (e.g: $\\LaTeX$)",
+          "checked": false
+        },
+        {
+          "control": "AXCheckBox",
+          "label": "Subscript (e.g: H~2~O)",
+          "checked": false
+        },
+        {
+          "control": "AXCheckBox",
+          "label": "Superscript (e.g: X^2^)",
+          "checked": false
+        },
+        {
+          "control": "AXCheckBox",
+          "label": "Highlight (e.g: ==key==)",
+          "checked": false
+        },
+        {
+          "control": "AXCheckBox",
+          "label": "Github Style Alert",
+          "checked": true
+        },
+        {
+          "control": "AXCheckBox",
+          "label": "Diagrams",
+          "checked": true
+        },
+        {
+          "control": "AXButton",
+          "text": "Diagram Options"
+        }
+      ],
+      "Smart Punctuation": [
+        {
+          "control": "AXPopUpButton",
+          "text": "Convert on Input"
+        },
+        {
+          "control": "AXCheckBox",
+          "label": "Smart Quotes",
+          "checked": false
+        },
+        {
+          "control": "AXCheckBox",
+          "label": "Smart Dashes",
+          "checked": false
+        },
+        {
+          "control": "AXCheckBox",
+          "label": "Remap Unicode Punctuation on Parse",
+          "checked": false
+        }
+      ],
+      "Code Fences": [
+        {
+          "control": "AXCheckBox",
+          "label": "Display line numbers for code fences",
+          "checked": false
+        },
+        {
+          "control": "AXCheckBox",
+          "label": "Auto wrap long lines",
+          "checked": true
+        },
+        {
+          "control": "AXCheckBox",
+          "label": "Use Shift+Tab to auto indent selected code",
+          "checked": false
+        },
+        {
+          "control": "AXPopUpButton",
+          "text": "2"
+        },
+        {
+          "control": "AXPopUpButton",
+          "text": "When add code fences via Markdown"
+        }
+      ],
+      "Math": [
+        {
+          "control": "AXCheckBox",
+          "label": "Inline Math (e.g: $\\LaTeX$)",
+          "checked": false
+        },
+        {
+          "control": "AXCheckBox",
+          "label": "LaTeX Math Delimiter \\( \\) \\[ \\]",
+          "checked": true
+        },
+        {
+          "control": "AXCheckBox",
+          "label": "Code Block Math (```math code block)",
+          "checked": true
+        },
+        {
+          "control": "AXCheckBox",
+          "label": "Enable physics package",
+          "checked": false
+        },
+        {
+          "control": "AXCheckBox",
+          "label": "Use legacy inline math parsing (compatible mode)",
+          "checked": false
+        },
+        {
+          "control": "AXPopUpButton",
+          "text": "No Automatic Equation Numbering"
+        },
+        {
+          "control": "AXPopUpButton",
+          "text": "Use Rendered SVG"
+        },
+        {
+          "control": "AXButton",
+          "text": "Enable inline math or code block math"
+        }
+      ],
+      "Whitespace / Line Break": [
+        {
+          "control": "AXCheckBox",
+          "label": "Indent first line of paragraphs",
+          "checked": false
+        },
+        {
+          "control": "AXCheckBox",
+          "label": "Visible <br/>",
+          "checked": true
+        },
+        {
+          "control": "AXPopUpButton",
+          "text": "Preserve whitespace and single line break"
+        }
+      ]
+    },
+    "Export": {
+      "Default Folder for Exported File": [
+        {
+          "control": "AXPopUpButton",
+          "text": "Auto"
+        }
+      ],
+      "Pandoc Path": [
+        {
+          "control": "AXButton",
+          "text": "Select"
+        }
+      ],
+      "After Export": [
+        {
+          "control": "AXCheckBox",
+          "label": "Open exported file location",
+          "checked": false
+        }
+      ]
+    },
+    "Appearance": {
+      "Font Size": [
+        {
+          "control": "AXRadioButton",
+          "text": "Auto ( Recommended ) 1"
+        },
+        {
+          "control": "AXRadioButton",
+          "text": "Customized 0"
+        }
+      ],
+      "Zoom": [
+        {
+          "control": "AXPopUpButton",
+          "text": "100%"
+        },
+        {
+          "control": "AXButton",
+          "text": "Reset to Default"
+        },
+        {
+          "control": "AXCheckBox",
+          "label": "Zoom when using mouse wheel and holding Command key",
+          "checked": false
+        }
+      ],
+      "Word Count": [
+        {
+          "control": "AXCheckBox",
+          "label": "Always Show Word Count",
+          "checked": false
+        },
+        {
+          "control": "AXButton",
+          "text": "Reset to Default"
+        }
+      ],
+      "Toolbar": [
+        {
+          "control": "AXCheckBox",
+          "label": "Show editor toolbar",
+          "checked": false
+        }
+      ],
+      "Themes": [
+        {
+          "control": "AXPopUpButton",
+          "text": "Github"
+        },
+        {
+          "control": "AXPopUpButton",
+          "text": "Night"
+        },
+        {
+          "control": "AXCheckBox",
+          "label": "Use separate theme in dark mode",
+          "checked": true
+        },
+        {
+          "control": "AXButton",
+          "text": "Open Theme Folder"
+        },
+        {
+          "control": "AXButton",
+          "text": "Get Themes"
+        }
+      ]
+    },
+    "General": {
+      "Quit": [
+        {
+          "control": "AXCheckBox",
+          "label": "Quit Typora when last window is closed",
+          "checked": null
+        }
+      ],
+      "Language(applied after restart)": [
+        {
+          "control": "AXPopUpButton",
+          "text": "System Language"
+        }
+      ],
+      "Update": [
+        {
+          "control": "AXButton",
+          "text": "Check Updates"
+        },
+        {
+          "control": "AXCheckBox",
+          "label": "Check updates automatically",
+          "checked": null
+        },
+        {
+          "control": "AXCheckBox",
+          "label": "Update to dev version",
+          "checked": null
+        }
+      ],
+      "Registration / Activation": [
+        {
+          "control": "AXButton",
+          "text": "Buy License"
+        },
+        {
+          "control": "AXButton",
+          "text": "Enter License"
+        }
+      ],
+      "Shortcut Keys": [
+        {
+          "control": "AXButton",
+          "text": "Custom Shortcut Keys"
+        }
+      ],
+      "Dialogs": [
+        {
+          "control": "AXButton",
+          "text": "Reset All Dialog Warnings"
+        }
+      ],
+      "Advanced Settings": [
+        {
+          "control": "AXButton",
+          "text": "Enable Debug"
+        },
+        {
+          "control": "AXCheckBox",
+          "label": "Send Anonymous Usage Info",
+          "checked": null
+        }
+      ],
+      "Typora Server": [
+        {
+          "control": "AXCheckBox",
+          "label": "Use Typora Server in China",
+          "checked": null
+        }
+      ]
+    }
+  }
+}

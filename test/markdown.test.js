@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { headingForAnchor } from '../src/links.js';
 import { parser, headings, statistics } from '../src/markdown.js';
 
 // Mirror renderBlocks(): parse the whole document once, then render against
@@ -41,9 +42,25 @@ test('one parse env resolves reference links and footnotes across blocks', () =>
 test('duplicate headings receive numbered ids from a shared slug counter', () => {
   const { html } = render('# 标题\n\n# 标题\n\n# 标题\n');
   assert.match(html, /id="标题"/);
-  assert.match(html, /id="标题-1"/);
   assert.match(html, /id="标题-2"/);
-  assert.deepEqual(headings('# 标题\n\n# 标题').map(item => item.id), ['标题', '标题-1']);
+  assert.match(html, /id="标题-3"/);
+  assert.deepEqual(headings('# 标题\n\n# 标题').map(item => item.id), ['标题', '标题-2']);
+});
+
+test('Typora heading fragments take priority over historical suffixes', () => {
+  const source = '# 章节\n\n# 章节\n\n# 章节';
+  const outline = headings(source);
+  for (const [fragment, line] of [['章节-1', 3], ['章节-2', 3], ['章节-3', 5]]) {
+    assert.equal(headingForAnchor(outline, encodeURIComponent(fragment))?.line, line);
+  }
+  assert.match(render(source).html, /name="章节-1"/);
+  const collision = source + '\n\n# 章节-1\n\n# 章节-2';
+  const ids = headings(collision).map(h => h.id);
+  assert.equal(new Set(ids).size, 5);
+  assert.equal(headingForAnchor(headings(collision), '章节-1').line, 7);
+  assert.doesNotMatch(render(collision).html, /name="章节-1"/);
+  assert.deepEqual(headings('# 固定-2\n\n# 固定\n\n# 固定').map(h => h.id), ['固定-2', '固定', '固定-3']);
+  assert.deepEqual(headings('# 固定\n\n# 固定\n\n# 固定-2').map(h => h.id), ['固定', '固定-2', '固定-2-2']);
 });
 
 test('both dollar and LaTeX bracket delimiters render KaTeX', () => {

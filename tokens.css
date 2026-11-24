@@ -1,56 +1,69 @@
-/* Hallmark · macrostructure: Workbench · tone: technical · theme: Quiet · anchor hue: neutral
- * Audience: programmers · Use: local Markdown writing · P4 H4 E3 S4 R5 V3 (pre-runtime assessment)
- * Native desktop workbench: application sidebar and status bar replace marketing navigation/footer.
- *
- * The light palette mirrors Typora's default theme: pure white paper, #fafafa
- * side bar, #333 body text, #4183C4 links and #f6f8fa code surfaces.
- */
+/* The paper belongs to the document. The window, navigation, and controls
+   have separate materials so a change of appearance keeps each layer legible. */
 :root {
-  --color-paper: #ffffff;
-  --color-sidebar: #fafafa;
-  --color-surface: #ffffff;
-  --color-hover: #f2f2f2;
-  --color-selected: #ebebeb;
-  --color-ink: #333333;
-  --color-muted: #777777;
-  --color-rule: #e7e7e7;
-  --color-accent: #3f3f3f;
-  --color-on-accent: #ffffff;
-  --color-focus: #4183c4;
-  --color-error: #c0392b;
-  --color-code: #f6f8fa;
-  --color-highlight: #fff2a8;
-  --color-backdrop: rgba(0, 0, 0, .28);
-  --color-shadow: rgba(0, 0, 0, .12);
-  --color-syntax-keyword: #d73a49;
-  --color-syntax-string: #032f62;
-  --color-syntax-number: #005cc5;
-  --color-syntax-function: #6f42c1;
+  color-scheme: light;
+  --color-paper: #fff;
+  --color-surface: #fff;
+  --color-sidebar: #f1f2fa;
+  --color-ink: #333;
+  --color-title: #212535;
+  --color-muted: #565f73;
+  --color-rule: #dce0eb;
+  --color-accent: #414db5;
+  --color-on-accent: #fff;
+  --color-focus: #3c55bb;
+  --color-hover: #eaedf7;
+  --color-selected: #e0e5fb;
+  --color-error: #ab2e3c;
+  --color-success: #266d53;
+  --color-code: #f3f4f9;
+  --color-highlight: #fff0ad;
+  --color-syntax-keyword: #994296;
+  --color-syntax-string: #1d6656;
+  --color-syntax-number: #98500f;
+  --color-syntax-function: #424eb0;
+  --window-edge: #eef0f7;
+  --window-glow: #dce1f7;
+  --window-warm: #f2eaf4;
+  --glass-fill: rgb(255 255 255 / .66);
+  --glass-panel: rgb(247 248 253 / .87);
+  --glass-line: rgb(64 73 113 / .15);
+  --glass-rim: rgb(255 255 255 / .96);
+  --color-shadow: rgb(28 37 69 / .13);
+  --color-backdrop: rgb(27 32 54 / .28);
   --font-body: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
   --font-display: var(--font-body);
-  --font-code: 'SFMono-Regular', 'Cascadia Code', 'Menlo', 'Consolas', monospace;
+  --font-code: 'SFMono-Regular', 'Cascadia Code', Menlo, Consolas, monospace;
   --space-xs: 4px; --space-sm: 8px; --space-md: 12px; --space-lg: 16px; --space-xl: 24px; --space-2xl: 32px; --space-3xl: 48px;
   --text-xs: 12px; --text-sm: 13px; --text-base: 14px; --text-md: 16px; --text-lg: 20px; --text-xl: 24px;
-  --radius-sm: 3px; --radius-md: 6px; --radius-lg: 10px;
-  --ease-out: cubic-bezier(0.16,1,0.3,1); --ease-in: cubic-bezier(0.7,0,0.84,0); --ease-in-out: cubic-bezier(0.65,0,0.35,1);
-  --dur-micro: 120ms; --dur-short: 220ms;
-  /* Typora's default #write is 16px / 1.6 inside an 860px column. */
+  --radius-sm: 7px; --radius-md: 12px; --radius-lg: 22px;
+  --ease-out: cubic-bezier(.2,.75,.22,1);
+  --ease-in: cubic-bezier(.4,0,.85,.4);
+  --ease-in-out: cubic-bezier(.45,0,.22,1);
+  --ease-spring: cubic-bezier(.2,.92,.26,1.1);
+  --dur-micro: 140ms; --dur-short: 220ms; --dur-spring: 340ms;
   --editor-size: 16px; --editor-width: 860px; --editor-leading: 1.6;
+  --sidebar-width: 240px; --titlebar-height: 64px;
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --color-paper: #282c34; --color-sidebar: #21252b; --color-surface: #2c313a;
-  --color-hover: #343a45; --color-selected: #3e4451; --color-ink: #abb2bf;
-  --color-muted: #7f848e; --color-rule: #3b4048; --color-accent: #c8ccd4;
-  --color-on-accent: #282c34; --color-focus: #61afef; --color-error: #e06c75;
-  --color-code: #21252b; --color-highlight: #4b4428;
-  --color-backdrop: rgba(0, 0, 0, .48); --color-shadow: rgba(0, 0, 0, .38);
-  --color-syntax-keyword: #c678dd; --color-syntax-string: #98c379;
-  --color-syntax-number: #d19a66; --color-syntax-function: #61afef;
+  --color-paper: #21232c; --color-surface: #2d303b; --color-sidebar: #252834;
+  --color-ink: #e6e7f0; --color-title: #f6f7ff; --color-muted: #afb5c9;
+  --color-rule: #3c4151; --color-accent: #b0bbff; --color-on-accent: #1e2549;
+  --color-focus: #aebaff; --color-hover: #353a4a; --color-selected: #39425f;
+  --color-error: #ff9ca6; --color-success: #7dd7ae; --color-code: #2a2d39;
+  --color-highlight: #5d5028; --window-edge: #191b26; --window-glow: #30334d; --window-warm: #332b3e;
+  --glass-fill: rgb(53 57 74 / .76); --glass-panel: rgb(41 44 58 / .90);
+  --glass-line: rgb(169 179 218 / .19); --glass-rim: rgb(222 229 255 / .15);
+  --color-shadow: rgb(0 0 0 / .32); --color-backdrop: rgb(5 8 17 / .52);
+  --color-syntax-keyword: #e6a6df; --color-syntax-string: #98d7c3; --color-syntax-number: #efbd83; --color-syntax-function: #b0bdff;
 }
 :root[data-theme="sepia"] {
-  --color-paper: #fbf7ef; --color-sidebar: #f5f0e6; --color-surface: #fffdf8;
-  --color-hover: #f0e9db; --color-selected: #e9dfcc; --color-rule: #e6ddcc;
-  --color-code: #f2ece0; --color-ink: #3b3327; --color-muted: #7a6f60;
-  --color-focus: #8a6d3b;
+  --color-paper: #fbf6eb; --color-surface: #fffaf0; --color-sidebar: #f0e8d9;
+  --color-ink: #40372e; --color-title: #392d21; --color-muted: #675844;
+  --color-rule: #ddd2bf; --color-accent: #80542f; --color-focus: #80542f;
+  --color-hover: #eee4d1; --color-selected: #e8dac1; --color-code: #f0e8d8;
+  --window-edge: #eee7db; --window-glow: #e2d8c1; --window-warm: #f2dfcf;
+  --glass-fill: rgb(255 250 238 / .73); --glass-panel: rgb(250 244 231 / .90);
+  --glass-line: rgb(108 80 44 / .18); --glass-rim: rgb(255 253 241 / .94);
 }

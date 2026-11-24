@@ -76,15 +76,15 @@ test('block context keeps duplicate heading anchors and the table of contents ex
   resetRenderCache();
   const { plan, stats, html } = renderPlan(source);
   const headingGroups = plan.groups.filter(group => group.tokens[0].type === 'heading_open');
-  assert.deepEqual(headingGroups.map(group => group.context), ['a\u0000标题', 'a\u0000标题-1'], '标题块上下文应包含分配后的锚点');
+  assert.deepEqual(headingGroups.map(group => group.context), ['a\u0000标题', 'a\u0000标题-2\u0002标题-1'], '标题块上下文应包含分配后的锚点');
   assert.equal(new Set(headingGroups.map(group => group.source)).size, 1, '两个标题源码完全相同');
   assert.equal(stats.rendered, plan.groups.length, '相同源码但不同锚点的块不能共用缓存');
   assert.match(html, /<h1 id="标题">/, '第一个标题使用裸锚点');
-  assert.match(html, /<h1 id="标题-1">/, '第二个标题使用编号锚点');
+  assert.match(html, /<h1 id="标题-2">/, '第二个标题使用编号锚点');
   const tocGroup = plan.groups.find(group => /\[toc\]/i.test(group.source));
   assert.match(tocGroup.context, /^toc\u0000/, '[TOC] 块上下文应带上全部标题');
   assert.match(tocGroup.context, /标题\u0002标题\u00023/, '[TOC] 上下文应包含标题与行号');
-  assert.match(tocGroup.context, /标题-1\u0002标题\u00027/, '[TOC] 上下文应包含编号锚点');
+  assert.match(tocGroup.context, /标题-2\u0002标题\u00027/, '[TOC] 上下文应包含编号锚点');
   // Same input renders the same anchors again, from the cache this time.
   const again = renderPlan(source);
   assert.equal(again.stats.rendered, 0);
@@ -114,10 +114,10 @@ test('editing duplicate headings keeps cached anchors consistent with the whole 
   renderPlan(source);
   const edited = source.replace('# Other', '# Same');
   const firstEdit = renderPlan(edited);
-  assert.match(firstEdit.html, /<h1 id="same-1">/);
+  assert.match(firstEdit.html, /<h1 id="same-2">/);
   assert.equal(firstEdit.html, renderWhole(edited).html);
   assert.equal(firstEdit.stats.reused, 2, '首个标题和未改段落应复用');
-  assert.deepEqual(firstEdit.plan.items.map(item => item.id), ['same', 'same-1']);
+  assert.deepEqual(firstEdit.plan.items.map(item => item.id), ['same', 'same-2']);
 
   const withCollision = `${edited}\n# Same-1\n\n# Constructor\n`;
   const collisionEdit = renderPlan(withCollision);
@@ -132,7 +132,7 @@ test('the outline and [TOC] are derived from the render parse', () => {
   const source = '# 标题\n\n## 子标题\n\n# 标题\n';
   const parsed = headingsFromTokens(parser.parse(source, {}));
   assert.deepEqual(parsed, headings(source), 'headings() 与 token 推导结果一致');
-  assert.deepEqual(parsed.map(item => item.id), ['标题', '子标题', '标题-1']);
+  assert.deepEqual(parsed.map(item => item.id), ['标题', '子标题', '标题-2']);
   assert.equal(
     tocItemsFromHeadings([{ title: '一', level: 2, line: 3, id: '一' }]),
     '<li style="margin-left:12px"><a href="#一" data-line="3">一</a></li>',
