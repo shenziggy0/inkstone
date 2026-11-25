@@ -21,8 +21,7 @@ button[aria-pressed="true"], .topbar button[aria-expanded="true"] { color: var(-
 .topbar { display: flex; align-items: center; gap: 12px; flex: 0 0 auto; height: calc(var(--titlebar-height) + env(safe-area-inset-top)); padding: env(safe-area-inset-top) max(18px, env(safe-area-inset-right)) 0 max(18px, env(safe-area-inset-left)); user-select: none; }
 .brand, .top-actions, .glass-group, .document-location, .export-button { display: flex; align-items: center; }
 .brand { flex: 0 0 auto; gap: 9px; margin-right: 5px; color: var(--color-title); }
-.brand-mark { display: grid; place-items: center; width: 33px; height: 33px; border-radius: 10px; color: var(--color-on-accent); background: linear-gradient(145deg, color-mix(in srgb, var(--color-accent), white 19%), var(--color-accent) 72%); box-shadow: inset 0 1px 1px var(--glass-rim), 0 2px 4px var(--color-shadow); }
-.brand-mark svg { width: 21px; height: 21px; stroke-width: 1.8; }
+.brand-mark { display: block; }
 .brand-name { font-size: 21px; font-weight: 690; letter-spacing: -.055em; }
 .glass-group { position: relative; flex: 0 0 auto; border-radius: 100px; padding: 2px; }
 @media (hover: hover) and (pointer: fine) and (prefers-reduced-motion: no-preference) and (prefers-contrast: no-preference) {
@@ -261,8 +260,7 @@ input[role="switch"]:checked::before { transform: translateX(16px); background: 
 @media (max-width: 540px) {
   .document-location svg, .export-button span, .statusbar:has(#selection-status:not(:empty)) #statistics { display: none; }
   .export-button { padding: 0; border-radius: 50%; }
-  .brand-mark { width: 28px; height: 28px; border-radius: 9px; }
-  .brand-mark svg { width: 18px; }
+  .brand-mark { width: 28px; height: 28px; }
   .topbar { gap: 5px; }
   .document-location { font-size: 13px; }
   .document-status { padding-inline: 8px; }
@@ -302,3 +300,56 @@ input[role="switch"]:checked::before { transform: translateX(16px); background: 
   dialog[open] { transform: none; }
 }
 @media print { #app { background: var(--color-paper); } }
+
+.welcome-actions {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 18px 16px 0;
+}
+.welcome-actions button, .export-result-actions button {
+  padding: 7px 14px;
+  border-radius: 999px;
+}
+.welcome-actions button:not(.primary), .export-result-actions button {
+  background: var(--color-selected);
+  color: var(--color-title);
+}
+.export-details { margin-top: 12px; }
+.export-details summary { cursor: pointer; padding: 7px 0; color: var(--color-title); }
+.export-result-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.folder-search-options { flex-wrap: wrap; }
+.selection-tools {
+  position: fixed;
+  z-index: 8;
+  display: flex;
+  flex-wrap: wrap;
+  max-width: calc(100vw - 20px);
+  gap: 3px;
+  padding: 5px;
+  border: 1px solid var(--glass-line);
+  border-radius: 12px;
+  background: var(--color-paper);
+  box-shadow: 0 6px 20px -10px var(--color-shadow);
+}
+.selection-tools button { padding: 6px 9px; border-radius: 7px; font-size: 12px; }
+.selection-tools button:is(:hover, :focus-visible) { background: var(--color-selected); color: var(--color-accent); }
+#writing-notes:empty { display: none; }
+#writing-notes { margin-top: 14px; padding: 9px 2px 0; border-top: 1px solid var(--glass-line); }
+#writing-notes h3 { margin: 0 0 6px; font-size: 12px; color: var(--color-muted); }
+.writing-note { display: grid; margin-bottom: 6px; padding: 7px; border-radius: 9px; }
+.writing-note:hover { background: var(--color-selected); }
+.writing-note-jump { text-align: left; overflow-wrap: anywhere; font-weight: 600; }
+.writing-note small { color: var(--color-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.writing-note-actions { display: flex; flex-wrap: wrap; gap: 4px 8px; margin-top: 4px; }
+.writing-note-actions button { color: var(--color-accent); font-size: 11px; }
+#notification.has-export-actions {
+  position: static;
+  translate: none;
+  flex: 0 0 auto;
+  width: auto;
+  max-width: none;
+  margin: 0 12px 6px;
+  overflow-wrap: anywhere;
+}

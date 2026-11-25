@@ -703,8 +703,21 @@ function handle(name, action) {
   });
 }
 
+function suggestedSaveName(value) {
+  if (typeof value !== 'string') return null;
+  const base = value.replace(/\.md$/i, '').replace(/[<>:"/\\|?*\u0000-\u001f]/g, '-').trim().replace(/[. ]+$/, '');
+  // Cap by UTF-8 bytes as well as characters for Unix filename limits.
+  let name = '';
+  for (const character of base) {
+    if (Buffer.byteLength(name + character) > 200) break;
+    name += character;
+  }
+  const fullName = name && (name + '.md');
+  return fullName && validateEntryName(fullName).ok ? fullName : null;
+}
+
 async function selectSave(doc) {
-  const { canceled, filePath } = await dialog.showSaveDialog(win, { defaultPath: doc.path || doc.name, filters });
+  const { canceled, filePath } = await dialog.showSaveDialog(win, { defaultPath: doc.path || doc.suggestedName || doc.name, filters });
   return canceled ? null : filePath;
 }
 async function chooseOpen(candidate) {
@@ -817,16 +830,31 @@ async function saveDocumentFile(doc, target, moveSource) {
   }
 }
 
-/** Collect real files before a folder move so closed documents retain history. */
-async function historyPaths(source, target, directory, historyKeys) {
+async function updateWritingNote(id, change) {
+  const context = contextStorage.getStore();
+  const note = await store.updateWritingNote(id, change);
+  const current = store.documents.get(id);
+  if (!current?.path) return note;
+  const key = store.historyKey(current);
+  for (const peer of liveContexts()) {
+    if (peer === context || peer.win.webContents.isDestroyed()) continue;
+    for (const doc of peer.store.documents.values()) {
+      if (doc.path && peer.store.historyKey(doc) === key) peer.win.webContents.send('inkstone:writing-notes-changed', doc.id);
+    }
+  }
+  return note;
+}
+
+/** Locate the sidecars of closed documents before their paths change. */
+async function sidecarPaths(source, target, directory, keys) {
   if (!directory) {
     const from = store.historyKey({ path: source });
-    return historyKeys.has(from) ? [{ from, source, target }] : [];
+    return keys.has(from) ? [{ from, source, target }] : [];
   }
   const records = [];
   for (const entry of await fs.readdir(source, { withFileTypes: true })) {
     if (!entry.isFile() && !entry.isDirectory()) continue;
-    records.push(...await historyPaths(path.join(source, entry.name), path.join(target, entry.name), entry.isDirectory(), historyKeys));
+    records.push(...await sidecarPaths(path.join(source, entry.name), path.join(target, entry.name), entry.isDirectory(), keys));
   }
   return records;
 }
@@ -846,9 +874,7 @@ async function trashDocumentFor(doc) {
   if (response !== 1) return false;
   await shell.trashItem(doc.path);
   // Keep unsaved text as a new document, and never remove its recovery copy.
-  Object.assign(doc, { path: null, version: null, savedContent: '', dirty: !!doc.content });
-  await store.recover(doc);
-  return store.public(doc);
+  return store.detach(doc.id);
 }
 // ── Export helpers ─────────────────────────────────────────────────────────
 // Format names are the renderer's contract; `html-unstyled` shares `.html` but
@@ -858,6 +884,7 @@ const EXPORT_FORMATS = Object.freeze({
   'html-unstyled': { extension: 'html', label: 'HTML（无样式）' },
   png: { extension: 'png', label: 'PNG' },
   pdf: { extension: 'pdf', label: 'PDF' },
+  zip: { extension: 'zip', label: 'Markdown 原稿与图片' },
   docx: { extension: 'docx', label: 'DOCX' },
   odt: { extension: 'odt', label: 'ODT' },
   epub: { extension: 'epub', label: 'EPUB' },
@@ -1016,7 +1043,7 @@ async function withExportWindow(html, width, task) {
  * checked against the final pixel dimensions before any screenshot is
  * requested, so callers can never save a truncated image.
  */
-async function capturePng(html, width) {
+async function capturePng(html, width, { fitArticle = false } = {}) {
   return withExportWindow(html, width, async hidden => {
     let attached = false;
     try {
@@ -1026,7 +1053,10 @@ async function capturePng(html, width) {
       await hidden.webContents.debugger.sendCommand('Page.enable');
       const metrics = await hidden.webContents.debugger.sendCommand('Page.getLayoutMetrics');
       const cssWidth = Math.ceil(Number(metrics.cssContentSize?.width) || width);
-      const cssHeight = Math.ceil(Number(metrics.cssContentSize?.height) || 0);
+      const height = fitArticle
+        ? await hidden.webContents.executeJavaScript('document.body.getBoundingClientRect().height')
+        : metrics.cssContentSize?.height;
+      const cssHeight = Math.ceil(Number(height) || 0);
       const check = checkPngSize(cssWidth, cssHeight, pixelRatio);
       if (!check.ok) throw new Error(pngLimitError(check));
       // Chromium applies the display scale factor itself. Do not pass clip.scale
@@ -1047,6 +1077,19 @@ async function capturePng(html, width) {
       if (attached) { try { hidden.webContents.debugger.detach(); } catch { /* already gone */ } }
     }
   });
+}
+
+function writePngClipboard(buffer) {
+  return clipboard.write([new ClipboardItem({ 'image/png': new Blob([buffer], { type: 'image/png' }) })]);
+}
+
+async function captureExportPng(doc, html, rawWidth, options) {
+  if (typeof html !== 'string' || !html || html.length > 50 * 1024 * 1024) throw new Error('导出内容无效或超过 50 MB。');
+  const width = Number(rawWidth);
+  if (!Number.isFinite(width) || width < 320 || width > 4096) throw new Error('PNG 导出宽度无效。');
+  const resolved = await inlineExportAssets(html, doc.id, doc);
+  if (resolved.length > 200 * 1024 * 1024) throw new Error('PNG 导出内容超过 200 MB。请减少嵌入图片的尺寸。');
+  return (await capturePng(resolved, width, options)).buffer;
 }
 
 /** Print a self-contained article in an isolated window, so a modal export dialog cannot suppress the outline. */
@@ -1153,7 +1196,6 @@ function registerHandlers() {
   handle('refreshFolder', () => currentFolderInfo());
   // ── Folder-wide search ──
   handle('searchFolder', async (query, options = {}) => {
-    if (!root) throw new Error('请先打开文件夹。');
     const context = contextStorage.getStore() || primary;
     // A new query interrupts the previous one instead of queueing behind it.
     if (context.searchToken) context.searchToken.cancelled = true;
@@ -1164,8 +1206,17 @@ function registerHandlers() {
     if (options.overrides && typeof options.overrides === 'object') {
       for (const [file, content] of Object.entries(options.overrides)) if (typeof content === 'string' && typeof file === 'string') overrides.set(file, content);
     }
+    const drafts = [];
+    const seen = new Set();
+    for (const draft of Array.isArray(options.drafts) ? options.drafts : []) {
+      const doc = store.documents.get(draft?.documentId);
+      if (!doc || doc.path || seen.has(doc.id) || typeof draft.content !== 'string'
+        || Buffer.byteLength(draft.content) > 20 * 1024 * 1024) continue;
+      seen.add(doc.id);
+      drafts.push({ documentId: doc.id, name: typeof draft.name === 'string' ? draft.name.slice(0, 180) : doc.name, content: draft.content });
+    }
     return searchFolder(root, query, {
-      caseSensitive: !!options.caseSensitive, regex: !!options.regex,
+      drafts, caseSensitive: !!options.caseSensitive, regex: !!options.regex,
       token, overrides, maxPerFile: options.maxPerFile, maxResults: options.maxResults
     });
   });
@@ -1217,13 +1268,18 @@ function registerHandlers() {
       if (error.code === 'ENOENT') return [];
       throw error;
     }));
-    const history = historyKeys.size ? await historyPaths(resolved, next, stat.isDirectory(), historyKeys) : [];
+    const warnings = [];
+    const noteKeys = await store.listWritingNoteKeys().catch(error => {
+      warnings.push(`无法检查待迁移的留言：${error.message}`);
+      return new Set();
+    });
+    const sidecarKeys = new Set([...historyKeys, ...noteKeys]);
+    const sidecars = sidecarKeys.size ? await sidecarPaths(resolved, next, stat.isDirectory(), sidecarKeys) : [];
     await fs.rename(resolved, next);
     // Every document opened from inside a renamed folder keeps pointing at its
     // file: the bytes did not move relative to each other, so the text, the
     // dirty state and the disk version stay valid — only the path changes.
     const documents = [];
-    const warnings = [];
     const handled = new Set();
     if (stat.isDirectory()) {
       const affected = [...store.documents.values()].filter(doc => doc.path && inside(resolved, doc.path));
@@ -1236,12 +1292,18 @@ function registerHandlers() {
         documents.push(moved);
       }
     }
-    for (const entry of history) {
+    for (const entry of sidecars) {
       if (handled.has(entry.from)) continue;
+      const to = store.historyKey({ path: await fs.realpath(entry.target).catch(() => entry.target) });
       try {
-        await store.moveHistory(entry.from, store.historyKey({ path: await fs.realpath(entry.target) }));
+        if (historyKeys.has(entry.from)) await store.moveHistory(entry.from, to);
       } catch (error) {
         warnings.push(`“${path.basename(entry.source)}”的保存历史未迁移：${error.message}`);
+      }
+      try {
+        if (noteKeys.has(entry.from)) await store.moveWritingNotes(entry.from, to);
+      } catch (error) {
+        warnings.push(`“${path.basename(entry.source)}”的留言仍保留在原路径的记录中：${error.message}`);
       }
     }
     return { kind: stat.isDirectory() ? 'folder' : 'file', from: resolved, to: next, documents, warnings, entries: await currentFolderEntries() };
@@ -1269,9 +1331,7 @@ function registerHandlers() {
     if (stat.isDirectory()) {
       for (const open of [...store.documents.values()]) {
         if (!open.path || !inside(resolved, open.path)) continue;
-        Object.assign(open, { path: null, version: null, savedContent: '', dirty: !!open.content });
-        await store.recover(open);
-        documents.push(store.public(open));
+        documents.push(await store.detach(open.id));
       }
     }
     return { kind: stat.isDirectory() ? 'folder' : 'file', path: resolved, documents, entries: await currentFolderEntries() };
@@ -1323,22 +1383,41 @@ function registerHandlers() {
     if (error) throw new Error(error);
     return true;
   });
-  handle('updateDocument', (id, content) => store.update(id, content));
+  handle('updateDocument', async (id, content, proposedName, anchorUpdates) => {
+    const record = await store.update(id, content, anchorUpdates);
+    if (!record.path) store.get(id).suggestedName = suggestedSaveName(proposedName);
+    return record;
+  });
   handle('saveDocument', async (id, saveAs = false) => {
     const doc = store.get(id);
     const file = saveAs || !doc.path ? await selectSave(doc) : doc.path;
-    return file ? saveDocumentFile(doc, file) : null;
+    if (!file) return null;
+    const saved = await saveDocumentFile(doc, file);
+    await adoptParentFolder(saved);
+    return saved;
   });
-  handle('closeDocument', async (id, includePath = false) => {
+  handle('closeDocument', async (id, includePath = false, noteAnchors = []) => {
     const context = contextStorage.getStore() || primary;
     const doc = store.get(id);
+    const warnings = [];
+    let persistAnchors = !doc.dirty;
     if (doc.dirty) {
-      const result = await dialog.showMessageBox(win, { type: 'question', message: `保存“${doc.name}”的更改？`, buttons: ['保存', '取消', '不保存'], defaultId: 0, cancelId: 1 });
+      const result = await dialog.showMessageBox(win, { type: 'question', message: `保存“${doc.path ? doc.name : doc.suggestedName || doc.name}”的更改？`, buttons: ['保存', '取消', '不保存'], defaultId: 0, cancelId: 1 });
       if (result.response === 1) return false;
       if (result.response === 0) {
         const file = doc.path || await selectSave(doc);
         if (!file) return false;
-        await saveDocumentFile(doc, file);
+        const result = await saveDocumentFile(doc, file);
+        warnings.push(...(result.warnings || []));
+        persistAnchors = true;
+      }
+    }
+    // A declined save leaves the disk text and its persisted anchors paired.
+    if (persistAnchors && doc.path && Array.isArray(noteAnchors)) {
+      for (const change of noteAnchors) {
+        if (change?.type !== 'relocate' || !change.previousAnchor) continue;
+        try { await updateWritingNote(id, change); }
+        catch (error) { warnings.push(`一条留言的位置未能更新：${error.message}`); }
       }
     }
     await store.close(id);
@@ -1349,7 +1428,7 @@ function registerHandlers() {
     context?.misses.delete(id);
     // Quitting closes documents too, but those must not fill reopen history.
     if (doc.path && context && !context.quitting) context.recentlyClosed.push(doc.path);
-    return includePath ? { path: doc.path } : true;
+    return includePath ? { path: doc.path, ...(warnings.length ? { warnings } : {}) } : true;
   });
   handle('settings', async patch => {
     if (!patch) return preferences;
@@ -1451,6 +1530,8 @@ function registerHandlers() {
   });
   handle('listHistory', id => store.listHistory(id));
   handle('readHistory', async (dir, name) => store.readHistory(dir, name));
+  handle('listWritingNotes', id => store.listWritingNotes(id));
+  handle('updateWritingNote', updateWritingNote);
   handle('reloadDocument', async id => {
     const result = await store.reload(id);
     notified.delete(id);
@@ -1491,7 +1572,7 @@ function registerHandlers() {
     // front matter is honoured before the 500 ms document flush.
     const image = nativeImage.createFromBuffer(await fs.readFile(await resolveAsset(doc, src, imageRoot)));
     if (image.isEmpty()) throw new Error('无法读取该图片。');
-    clipboard.writeImage(image);
+    await writePngClipboard(image.toPNG());
     return true;
   });
   handle('copyImagePath', async (id, src, imageRoot) => {
@@ -1620,8 +1701,43 @@ function registerHandlers() {
       throw error;
     }
   });
+  handle('copySelectionImage', async (id, request) => {
+    const doc = { ...store.get(id) };
+    const buffer = await captureExportPng(doc, request?.html, request?.width, { fitArticle: true });
+    const image = nativeImage.createFromBuffer(buffer);
+    if (image.isEmpty()) throw new Error('选区图片为空。');
+    await writePngClipboard(buffer);
+    return true;
+  });
+  handle('exportResultAction', async (file, action) => {
+    const context = contextStorage.getStore() || primary;
+    const latest = context.lastExport;
+    if (action === 'dismiss') {
+      if (latest?.file === file) context.lastExport = null;
+      return true;
+    }
+    if (typeof file !== 'string' || latest?.file !== file || !['open', 'reveal'].includes(action)) {
+      throw new Error('此导出结果已失效。');
+    }
+    const resolved = await resolveLocalTarget(file, '无法打开网络位置的文件。');
+    const stat = resolved === latest.resolved ? await fs.stat(resolved, { bigint: true }).catch(() => null) : null;
+    if (!stat?.isFile() || stat.ino !== latest.stat.ino || stat.dev !== latest.stat.dev
+      || stat.mtimeNs !== latest.stat.mtimeNs || stat.size !== latest.stat.size) {
+      throw new Error('导出的文件已移动、删除或发生变化。');
+    }
+    if (action === 'reveal') shell.showItemInFolder(resolved);
+    else {
+      if (isExecutableExtension(resolved) || path.extname(resolved).toLowerCase() !== `.${latest.extension}`) {
+        throw new Error('文件扩展名与导出格式不一致，请在文件夹中查看。');
+      }
+      const error = await shell.openPath(resolved);
+      if (error) throw new Error(error);
+    }
+    return true;
+  });
   handle('exportDocument', async (id, format, payload) => {
-    const doc = store.get(id);
+    const doc = { ...store.get(id) };
+    const context = contextStorage.getStore() || primary;
     const spec = Object.prototype.hasOwnProperty.call(EXPORT_FORMATS, format) ? EXPORT_FORMATS[format] : null;
     if (!spec) throw new Error('不支持的导出格式。');
 
@@ -1631,24 +1747,35 @@ function registerHandlers() {
     let html = typeof request.html === 'string' ? request.html : null;
     if ((format === 'html' || format === 'html-unstyled' || format === 'png' || format === 'pdf') && (!html || html.length > 50 * 1024 * 1024)) throw new Error('导出内容无效或超过 50 MB。');
 
+    let prepared;
+    if (format === 'zip') {
+      const { prepareDocumentZip } = require('./document-zip.cjs');
+      prepared = await prepareDocumentZip({ ...doc, name: doc.path ? doc.name : doc.suggestedName || doc.name }, assetOptions(doc));
+      if (prepared.missing.length) {
+        const { response } = await dialog.showMessageBox(win, {
+          type: 'warning', message: '有些本地图片无法打包',
+          detail: prepared.missing.join('\n'), buttons: ['取消', '继续打包'], defaultId: 0, cancelId: 0
+        });
+        if (response !== 1) return null;
+      }
+    }
+
     const result = await dialog.showSaveDialog(win, {
-      defaultPath: exportFileName(doc.name, spec.extension),
+      defaultPath: exportFileName(doc.path ? doc.name : doc.suggestedName || doc.name, spec.extension),
       filters: [{ name: spec.label, extensions: [spec.extension] }]
     });
     if (result.canceled || !result.filePath) return null;
 
-    if (format === 'html' || format === 'html-unstyled') {
+    if (format === 'zip') {
+      const { writeDocumentZip } = require('./document-zip.cjs');
+      await writeDocumentZip(prepared, result.filePath);
+    } else if (format === 'html' || format === 'html-unstyled') {
       // The styled variant keeps its embedded fonts; the no-style variant has
       // no CSS at all, but still inlines every local image the document shows.
       html = await inlineExportAssets(html, id, doc, { fonts: format === 'html' });
       await atomicWrite(result.filePath, html);
     } else if (format === 'png') {
-      const width = Number(request.width);
-      if (!Number.isFinite(width) || width < 320 || width > 4096) throw new Error('PNG 导出宽度无效。');
-      const resolved = await inlineExportAssets(html, id, doc);
-      if (resolved.length > 200 * 1024 * 1024) throw new Error('PNG 导出内容超过 200 MB。请减少嵌入图片的尺寸。');
-      const shot = await capturePng(resolved, width);
-      await atomicWrite(result.filePath, shot.buffer);
+      await atomicWrite(result.filePath, await captureExportPng(doc, html, request.width));
     } else if (format === 'pdf') {
       // Printing happens in an isolated window: the modal export dialog in the
       // editor window suppresses Chromium's document outline/tagging. Defaults
@@ -1726,6 +1853,9 @@ function registerHandlers() {
         await atomicWrite(result.filePath, await fs.readFile(output));
       } finally { await fs.rm(temporary, { recursive: true, force: true }); }
     }
+    const resolved = await fs.realpath(result.filePath).catch(() => null);
+    const stat = resolved ? await fs.stat(resolved, { bigint: true }).catch(() => null) : null;
+    context.lastExport = stat?.isFile() ? { file: result.filePath, resolved, stat, extension: spec.extension } : null;
     return result.filePath;
   });
 }
@@ -1745,6 +1875,7 @@ else {
     if (first) { first.win.show(); first.win.focus(); command('system-open'); }
   });
   app.whenReady().then(async () => {
+    if (MAC && !app.isPackaged) app.dock.setIcon(path.join(__dirname, '../build/icon.png'));
     if (MAC && app.isPackaged && !process.env.INKSTONE_TEST_USER_DATA) {
       try {
         // Clear stale grants before loading recents or restoring protected files.

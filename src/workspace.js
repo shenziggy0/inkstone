@@ -1,5 +1,6 @@
 import { icon } from './icons.js';
 import { escapeHTML } from './markdown.js';
+import brandLogo from '../docs/assets/logo-256.png';
 
 const button = (command, label, glyph) => `<button type="button" class="icon-button" data-command="${command}" aria-label="${label}" title="${label}">${icon(glyph)}</button>`;
 const sideTabs = [['outline', '大纲', 'outline'], ['files', '文件', 'folder'], ['articles', '文章', 'articles'], ['search', '搜索', 'search']];
@@ -12,7 +13,7 @@ const formatGroups = [
 export function workspaceHTML(native) {
   return `<header class="topbar">
     <button class="app-menu-button" data-command="app-menu" aria-label="菜单" title="菜单">菜单</button>
-    <div class="brand"><span class="brand-mark" aria-hidden="true">${icon('pen')}</span><span class="brand-name">Inkstone</span></div>
+    <div class="brand"><img class="brand-mark" src="${brandLogo}" width="33" height="33" alt="" draggable="false"><span class="brand-name">Inkstone</span></div>
     <div class="glass-group library-actions">${button('sidebar', '切换侧边栏', 'panel')}${button('open', '打开文档', 'open')}${button('new', '新建文档', 'compose')}</div>
     <div class="document-location">${icon('file')}<span id="location">未命名.md</span></div>
     <div class="top-actions">
@@ -37,11 +38,21 @@ export function workspaceHTML(native) {
     <main class="main-pane" aria-label="写作区">
       <div class="tabbar"><div id="document-tabs" role="tablist" aria-label="打开的文档"></div>${button('new', '新建文档', 'plus')}${button('document-menu', '文档操作', 'more')}</div>
       <div class="formatbar" role="toolbar" aria-label="排版工具"><div class="format-tools">${formatGroups.map(group => group.map(args => button(...args)).join('')).join('<span class="divider" aria-hidden="true"></span>')}</div><span id="mode-label">即时渲染</span></div>
+      <div class="welcome-actions" id="welcome-actions" hidden>
+        <button class="primary" data-command="welcome-new">写第一篇</button>
+        <button data-command="welcome-open">打开已有文档</button>
+      </div>
       <div id="editor-host"></div>
+      <div id="notification" role="alert" hidden></div>
       <footer class="statusbar"><div class="document-status"><span id="save-status" role="status">就绪</span><span id="breadcrumb" class="status-breadcrumb"></span></div><div class="reading-controls"><span id="selection-status"></span><span id="position">行 1，列 1</span><span id="statistics"></span><span id="encoding"></span><div class="status-actions">${button('focus', '专注模式', 'focus')}${button('theme', '切换主题', 'theme')}</div><button class="restore-tools icon-button" data-command="expand-tools" aria-label="展开写作工具" title="展开写作工具">${icon('more')}</button></div></footer>
+      <div id="selection-tools" class="selection-tools" role="toolbar" aria-label="选区操作" hidden>
+        <button type="button" data-command="bold" data-selection-format>粗体</button>
+        <button type="button" data-command="selection-link" data-selection-format>链接</button>
+        <button type="button" data-command="heading-1" data-selection-format>标题</button>
+        ${native ? '<button type="button" data-command="writing-note-add">留个续写提示</button><button type="button" data-command="copy-selection-image">复制为图片</button>' : ''}
+      </div>
     </main>
   </div>
-  <div id="notification" role="alert" hidden></div>
   <div id="context-menu" class="context-menu" role="menu" hidden></div>
   <dialog id="dialog" aria-labelledby="dialog-title"><div id="dialog-content"></div></dialog>
   <article class="print-document prose write-surface" id="print-document"></article>`;

@@ -792,6 +792,9 @@ class RenderedInline extends WidgetType {
   ignoreEvent() { return true; }
 }
 
+// One- and two-digit markers keep the reading view's original gutter.
+const orderedMarkerWidthClass = label => label.length > 3 ? ' cm-ordered-long' : '';
+
 /** Bullets, task boxes, quotes and rules replace their source prefix in the layout. */
 class PrefixWidget extends WidgetType {
   constructor(kind, docFrom, checked, label) { super(); Object.assign(this, { kind, docFrom, checked, label }); }
@@ -800,7 +803,10 @@ class PrefixWidget extends WidgetType {
     const span = document.createElement('span');
     span.className = `cm-prefix cm-prefix-${this.kind}`;
     if (this.kind === 'bullet') span.textContent = '•';
-    if (this.kind === 'ordered') span.textContent = this.label;
+    if (this.kind === 'ordered') {
+      span.textContent = this.label;
+      span.className += orderedMarkerWidthClass(this.label);
+    }
     if (this.kind === 'quote') {
       span.setAttribute('aria-label', '引用');
       span.setAttribute('aria-hidden', 'true');
@@ -1173,7 +1179,7 @@ function liveDecorations(state, id) {
       for (const prefix of info.prefixes) {
         const prefixFrom = line.from + prefix.from, prefixTo = line.from + prefix.to;
         if (reveal.prefixes.has(prefix)) {
-          const markerClass = prefix.kind === 'ordered' ? 'cm-md-mark cm-ordered-source' : 'cm-md-mark';
+          const markerClass = prefix.kind === 'ordered' ? `cm-md-mark cm-ordered-source${orderedMarkerWidthClass(prefix.label)}` : 'cm-md-mark';
           ranges.push(Decoration.mark({ class: markerClass }).range(prefixFrom, prefixTo));
         } else if (prefix.kind === 'heading') {
           ranges.push(Decoration.replace({ widget: hiddenMark }).range(prefixFrom, prefixTo));

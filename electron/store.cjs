@@ -2,6 +2,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { constants } = require('node:fs');
+const { pathKey: writingNotesKey, storedNotes, storedTransfers, storedAnchorUpdates, mergeNotes, applyNoteChange } = require('./writing-notes.cjs');
 // Pure shared parser; also imported by the renderer (src/markdown.js).
 const frontMatter = require('./front-matter.mjs');
 
@@ -64,7 +65,7 @@ async function atomicWrite(file, content) {
 class DocumentStore {
   /**
    * @param {string} recoveryDirectory per-window recovery folder
-   * @param {{historyDirectory?: string, legacyHistoryRoot?: string, unsavedAssetsDirectory?: string}} [options]
+   * @param {{historyDirectory?: string, legacyHistoryRoot?: string, unsavedAssetsDirectory?: string, writingNotesDirectory?: string}} [options]
    *   `historyDirectory` is shared by every window; `legacyHistoryRoot` still
    *   hosts the old per-window `history/` folders that must stay readable;
    *   `unsavedAssetsDirectory` is the shared root of the per-document image
@@ -76,6 +77,7 @@ class DocumentStore {
     this.historyDirectory = options.historyDirectory || path.join(path.dirname(recoveryDirectory), 'history');
     this.legacyHistoryRoot = options.legacyHistoryRoot || recoveryDirectory;
     this.unsavedAssetsDirectory = options.unsavedAssetsDirectory || null;
+    this.writingNotesDirectory = options.writingNotesDirectory || path.join(path.dirname(this.historyDirectory), 'writing-notes');
     this.locks = new Map();
   }
   async serial(id, action) {
@@ -122,12 +124,13 @@ class DocumentStore {
     Object.assign(doc, { savedContent: content, version: digest(bytes), dirty: false });
     return this.public(doc);
   }
-  async update(id, content) {
+  async update(id, content, anchorUpdates) {
     if (typeof content !== 'string' || Buffer.byteLength(content) > 20 * 1024 * 1024) throw new Error('文档内容无效或超过 20 MB。');
     return this.serial(id, async () => {
       const doc = this.get(id);
       doc.content = content;
       doc.dirty = doc.recovered || content !== doc.savedContent;
+      if (doc.path && anchorUpdates !== undefined) doc.recoveryNoteAnchors = doc.dirty ? storedAnchorUpdates(anchorUpdates) : [];
       await this.recover(doc);
       return this.public(doc);
     });
@@ -136,11 +139,113 @@ class DocumentStore {
     if (!this.recoveryDirectory) return;
     await fs.mkdir(this.recoveryDirectory, { recursive: true });
     const file = path.join(this.recoveryDirectory, `${doc.id}.json`);
-    if (!doc.dirty) { await missingAsNull(fs.unlink(file)); return; }
+    if (!doc.dirty && !doc.writingNotes?.length && !doc.writingNoteTransfers?.length && !doc.recoveryNoteAnchors?.length) {
+      await missingAsNull(fs.unlink(file));
+      return;
+    }
     await atomicWrite(file, JSON.stringify({
       ...this.public(doc), schemaVersion: 2, sourcePath: doc.sourcePath,
+      writingNotes: doc.writingNotes?.length ? doc.writingNotes : undefined,
+      writingNoteTransfers: doc.writingNoteTransfers?.length ? doc.writingNoteTransfers : undefined,
+      recoveryNoteAnchors: doc.recoveryNoteAnchors?.length ? doc.recoveryNoteAnchors : undefined,
       recovered: doc.recovered, updatedAt: new Date().toISOString()
     }));
+  }
+  writingNotesFile(key) {
+    if (typeof key !== 'string' || !writingNotesKey.test(key)) throw new Error('留言文件编号无效。');
+    return path.join(this.writingNotesDirectory, `${key}.json`);
+  }
+  async listWritingNoteKeys() {
+    const entries = await missingAsNull(fs.readdir(this.writingNotesDirectory, { withFileTypes: true }));
+    return new Set((entries || []).filter(entry => entry.isFile() && entry.name.endsWith('.json'))
+      .map(entry => entry.name.slice(0, -5)).filter(key => writingNotesKey.test(key)));
+  }
+  async readWritingNotes(key) {
+    const raw = await missingAsNull(fs.readFile(this.writingNotesFile(key), 'utf8'));
+    if (raw === null) return [];
+    try {
+      const record = JSON.parse(raw);
+      if (record?.version !== 1) throw new Error('不支持的留言版本。');
+      return storedNotes(record.notes);
+    } catch (error) {
+      throw new Error(`留言文件无法读取：${error.message}`);
+    }
+  }
+  async writeWritingNotes(key, notes) {
+    const file = this.writingNotesFile(key);
+    await fs.mkdir(this.writingNotesDirectory, { recursive: true });
+    await atomicWrite(file, JSON.stringify({ version: 1, notes }));
+  }
+  async readCarriedNotes(doc) {
+    const inherited = await Promise.all((doc.writingNoteTransfers || []).map(({ key }) => this.readWritingNotes(key)));
+    return mergeNotes(doc.writingNotes || [], ...inherited);
+  }
+  async listWritingNotes(id) {
+    return this.serial(id, async () => {
+      const doc = this.get(id);
+      const current = doc.path ? await this.readWritingNotes(this.historyKey(doc)) : [];
+      return mergeNotes(current, await this.readCarriedNotes(doc));
+    });
+  }
+  async updateWritingNote(id, change) {
+    return this.serial(id, async () => {
+      const doc = this.get(id);
+      if (doc.path) {
+        return withFileLocks([doc.path], async () => {
+          const key = this.historyKey(doc);
+          if (doc.writingNotes?.length || doc.writingNoteTransfers?.length) {
+            await this.finishWritingNoteTransfers(doc);
+            await this.recover(doc);
+          }
+          return withFileLocks([this.writingNotesFile(key)], async () => {
+            if (!await missingAsNull(fs.stat(doc.path))) throw new Error('文稿路径已变化，请重新打开后修改留言。');
+            const current = await this.readWritingNotes(key);
+            const { note, notes } = applyNoteChange(current, change);
+            if (notes !== current) await this.writeWritingNotes(key, notes);
+            return note;
+          });
+        });
+      }
+      const current = await this.readCarriedNotes(doc);
+      const { note, notes } = applyNoteChange(current, change);
+      if (notes === current) return note;
+      const previous = doc.writingNotes;
+      doc.writingNotes = mergeNotes([note], previous || []);
+      try { await this.recover(doc); }
+      catch (error) { doc.writingNotes = previous; throw error; }
+      return note;
+    });
+  }
+  async transferWritingNotes(target, transferred, local = [], anchors = []) {
+    const sources = transferred.filter(({ key }) => key !== target);
+    if (!sources.length && !local.length && !anchors.length) return;
+    return withFileLocks([target, ...sources.map(({ key }) => key)].map(key => this.writingNotesFile(key)), async () => {
+      const current = await this.readWritingNotes(target);
+      const inherited = await Promise.all(sources.map(({ key }) => this.readWritingNotes(key)));
+      let notes = mergeNotes(local, current, ...inherited);
+      for (const change of anchors) {
+        if (notes.some(note => note.id === change.id)) notes = applyNoteChange(notes, change).notes;
+      }
+      if (JSON.stringify(notes) !== JSON.stringify(current)) await this.writeWritingNotes(target, notes);
+      for (const { key, move } of sources) {
+        if (move) await missingAsNull(fs.unlink(this.writingNotesFile(key)));
+      }
+    });
+  }
+  async moveWritingNotes(from, to) {
+    return this.transferWritingNotes(to, [{ key: from, move: true }]);
+  }
+  addWritingNoteTransfer(doc, key, move) {
+    const transfers = doc.writingNoteTransfers || [];
+    const previous = transfers.find(entry => entry.key === key);
+    doc.writingNoteTransfers = [...transfers.filter(entry => entry.key !== key), { key, move: Boolean(move || previous?.move) }];
+  }
+  async finishWritingNoteTransfers(doc) {
+    await this.transferWritingNotes(this.historyKey(doc), doc.writingNoteTransfers || [], doc.writingNotes,
+      doc.dirty ? [] : doc.recoveryNoteAnchors);
+    delete doc.writingNoteTransfers;
+    delete doc.writingNotes;
+    if (!doc.dirty) delete doc.recoveryNoteAnchors;
   }
   /**
    * Keep the current in-memory text as a copy nobody prunes, so reloading the
@@ -211,21 +316,28 @@ class DocumentStore {
           }
         }
         await atomicWrite(file, relocation.content);
-        const previousKey = moving ? this.historyKey(doc) : null;
+        const previousKey = previous && !sameFile ? this.historyKey(doc) : null;
         Object.assign(doc, {
           path: file, name: path.basename(file), content: relocation.content,
           savedContent: relocation.content, version: digest(Buffer.from(relocation.content)),
           dirty: false, recovered: false, sourcePath: null
         });
         const warnings = [];
+        if (previousKey) this.addWritingNoteTransfer(doc, previousKey, false);
         if (moving) {
           try {
+            // Journal the source key before removal so an interrupted move
+            // can still retrieve the notes at their original key.
+            if (await missingAsNull(fs.stat(this.writingNotesFile(previousKey)))) await this.recover(doc);
             await this.moveHistory(previousKey, this.historyKey(doc));
             await moveSource(previous);
+            this.addWritingNoteTransfer(doc, previousKey, true);
           } catch (error) {
             warnings.push(`已保存到新位置，但移动未完成：${error.message}`);
           }
         }
+        try { await this.finishWritingNoteTransfers(doc); }
+        catch (error) { warnings.push(`已保存文档，留言迁移待重试：${error.message}`); }
         try {
           await this.recover(doc);
           if (privateAssets) await fs.rm(privateAssets, { recursive: true, force: true });
@@ -259,6 +371,9 @@ class DocumentStore {
       doc.name = path.basename(resolved);
       const nextKey = this.historyKey(doc);
       const warnings = [];
+      if (previousKey !== nextKey) this.addWritingNoteTransfer(doc, previousKey, true);
+      try { await this.finishWritingNoteTransfers(doc); }
+      catch (error) { warnings.push(`已更新路径，留言迁移待重试：${error.message}`); }
       try {
         if (previousKey !== nextKey) await this.moveHistory(previousKey, nextKey);
       } catch (error) {
@@ -333,6 +448,15 @@ class DocumentStore {
   async detach(id) {
     return this.serial(id, async () => {
       const doc = this.get(id);
+      if (doc.path) {
+        const key = this.historyKey(doc);
+        try {
+          const notes = await this.readWritingNotes(key);
+          if (notes.length) doc.writingNotes = mergeNotes(doc.writingNotes || [], notes);
+        } catch {
+          this.addWritingNoteTransfer(doc, key, false);
+        }
+      }
       Object.assign(doc, { path: null, version: null, savedContent: '', dirty: !!doc.content });
       await this.recover(doc);
       return this.public(doc);
@@ -415,7 +539,9 @@ class DocumentStore {
   }
   async close(id) {
     return this.serial(id, async () => {
+      const doc = this.documents.get(id);
       this.documents.delete(id);
+      if (doc?.path && (doc.writingNotes?.length || doc.writingNoteTransfers?.length)) return;
       if (this.recoveryDirectory) await fs.unlink(path.join(this.recoveryDirectory, `${id}.json`)).catch(() => {});
     });
   }
@@ -463,8 +589,23 @@ class DocumentStore {
         doc = this.create(record.content, null, {
           name: record.recovered ? name : `恢复-${name}`, recovered: true, sourcePath
         });
+        const internal = this.get(doc.id);
+        if (record.writingNotes !== undefined) internal.writingNotes = storedNotes(record.writingNotes);
+        if (record.writingNoteTransfers !== undefined) internal.writingNoteTransfers = storedTransfers(record.writingNoteTransfers);
+        if (record.path && sourcePath) this.addWritingNoteTransfer(internal, this.historyKey({ path: sourcePath }), false);
+        const updates = storedAnchorUpdates(record.recoveryNoteAnchors);
+        if (updates.length) {
+          let notes = await this.readCarriedNotes(internal);
+          for (const change of updates) {
+            if (!notes.some(note => note.id === change.id)) continue;
+            const updated = applyNoteChange(notes, change);
+            if (updated.notes === notes) continue;
+            notes = updated.notes;
+            internal.writingNotes = mergeNotes([updated.note], internal.writingNotes || []);
+          }
+        }
         const copied = await this.carryUnsavedAssets(record.id, doc.id);
-        await this.recover(this.get(doc.id));
+        await this.recover(internal);
         // If retirement fails, keep only the original recovery entry.
         await fs.unlink(file);
         if (sourcePath) this.recoveredPaths.add(sourcePath);

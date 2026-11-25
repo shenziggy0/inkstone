@@ -5,6 +5,7 @@ import DOMPurify from 'dompurify';
 import { readColumnWidths, injectColumnWidths } from './table.js';
 import { prepareMath, prepareStandaloneMath } from './math-labels.js';
 import { NATIVE_DIAGRAM_KINDS, renderNativeDiagram } from './diagrams.js';
+import { installSelectionPositions, selectMarkdownTokens } from './selection-image.js';
 import {
   imageRootKey,
   frontMatterImageRoot,
@@ -155,6 +156,8 @@ export const parser = createMarkdownParser({
     return `<pre class="code-block"><span class="code-language">${escapeHTML(language || 'text')}</span><code class="hljs">${content}</code></pre>`;
   }
 });
+
+installSelectionPositions(parser);
 
 
 // The app-wide "公式自动编号" preference. Pure helpers accept an explicit
@@ -328,6 +331,26 @@ function normalized(source) {
 // the callers that ask for it right afterwards (sidebar, breadcrumb, [TOC]).
 let outlineCache = { key: null, items: [] };
 
+export function draftTitleFromSource(source) {
+  const tokens = parser.parse(normalized(source), {});
+  const heading = tokens.findIndex(token => token.type === 'heading_open' && token.tag === 'h1');
+  const candidates = heading === -1 ? tokens : [tokens[heading + 1], ...tokens];
+  for (const token of candidates) {
+    if (token?.type !== 'inline') continue;
+    let line = '';
+    for (const child of token.children || []) {
+      if (['softbreak', 'hardbreak'].includes(child.type)) {
+        if (line.trim()) return line.trim();
+        line = '';
+      } else if (['text', 'text_special', 'code_inline', 'emoji'].includes(child.type)) {
+        line += child.content;
+      }
+    }
+    if (line.trim()) return line.trim();
+  }
+  return '';
+}
+
 export function headings(source) {
   const key = normalized(source);
   if (outlineCache.key !== key) outlineCache = { key, items: headingsFromTokens(parser.parse(key, {})) };
@@ -431,6 +454,45 @@ export function renderMarkdown(source, documentId, options = {}) {
   const html = parser.renderer.render(tokens, parser.options, env);
   const imageRoot = options.imageRoot !== undefined ? options.imageRoot : effectiveImageRoot(text);
   return injectColumnWidths(finalizeHTML(html, documentId, tocItemsFromHeadings(items), footnoteTitles(text, env), { ...options, imageRoot }), readColumnWidths(text));
+}
+
+/** Resolve an editor selection in LF UTF-16 coordinates, including a BOM if present. */
+export function prepareSelectedMarkdown(source, { from, to } = {}, options = {}) {
+  const raw = String(source ?? '');
+  const bom = raw.startsWith('\uFEFF') ? 1 : 0;
+  const text = normalized(raw);
+  if (!Number.isInteger(from) || !Number.isInteger(to) || from < 0 || to > text.length + bom || from >= to || to <= bom) return null;
+  const env = {
+    chrome: false,
+    mathNumbering: numberingFor(options),
+    selectionSpans: new WeakMap(),
+    selectionSources: new WeakMap()
+  };
+  const full = parser.parse(text, env);
+  const tokens = selectMarkdownTokens(parser, full, env, text, Math.max(0, from - bom), to - bom, info => {
+    const language = info.trim().split(/\s+/, 1)[0];
+    return language === 'mermaid' || NATIVE_DIAGRAM_KINDS.has(language.toLowerCase());
+  });
+  const selected = new Set(tokens);
+  const widths = readColumnWidths(text);
+  return {
+    tokens,
+    env,
+    toc: tocItemsFromHeadings(headingsFromTokens(tokens)),
+    footnotes: footnoteTitles(text, env),
+    imageRoot: options.imageRoot !== undefined ? options.imageRoot : effectiveImageRoot(text),
+    widths: full.filter(token => token.type === 'table_open').flatMap((token, index) => selected.has(token) ? [widths[index] || []] : [])
+  };
+}
+
+/** Selected document content for PNG capture, using the document's export styling. */
+export function renderSelectedMarkdown(source, documentId, range, options = {}) {
+  const plan = prepareSelectedMarkdown(source, range, options);
+  if (!plan?.tokens.length) return '';
+  const html = parser.renderer.render(plan.tokens, parser.options, plan.env);
+  return injectColumnWidths(finalizeHTML(html, documentId, plan.toc, plan.footnotes, {
+    chrome: false, imageRoot: plan.imageRoot
+  }), plan.widths);
 }
 
 /**
@@ -730,13 +792,11 @@ export function diagramKindFor(element) {
   return null;
 }
 
-const nativeDiagramSelector = suffix => [...NATIVE_DIAGRAM_KINDS]
-  .map(kind => `pre.diagram[data-diagram="${kind}"]${suffix}`)
-  .join(', ');
 // Only the existing Mermaid entry and the two native kinds are selected. A
 // document-authored pre.diagram cannot opt itself into either renderer.
-const pendingDiagramSelector = `pre.mermaid:not([data-processed]), ${nativeDiagramSelector(':not([data-processed])')}`;
-const processedDiagramSelector = `pre.mermaid[data-processed], ${nativeDiagramSelector('[data-processed]')}`;
+const diagramSelector = ['pre.mermaid', ...[...NATIVE_DIAGRAM_KINDS].map(kind => `pre.diagram[data-diagram="${kind}"]`)].join(', ');
+const diagramThemes = new WeakMap();
+let diagramTheme;
 
 /** Paint colours the diagrams inherit from the active theme. */
 function diagramPalette() {
@@ -776,59 +836,67 @@ function failDiagram(node, message) {
 }
 
 /**
- * Render every unprocessed diagram in `container`: Mermaid fences through the
+ * Render pending and out-of-date diagrams in `container`: Mermaid fences through the
  * shared Mermaid queue, and Typora's `sequence` / `flow` fences through the
  * local diagrams.js renderer. The editor widgets, the live preview under the
  * active fence and the HTML/PDF export all call this one function, so all
  * three views carry identical SVG.
  */
 export function renderDiagrams(container) {
-  const jobs = [...container.querySelectorAll(pendingDiagramSelector)];
-  if (!jobs.length) return Promise.resolve();
+  const nodes = [...container.querySelectorAll(diagramSelector)];
+  const needsRender = node => !node.dataset.processed || diagramThemes.get(node) !== diagramTheme;
+  if (!nodes.some(needsRender)) return Promise.resolve();
+  const mounted = node => node.isConnected && container.contains(node);
   renderQueue = renderQueue.catch(() => {}).then(async () => {
-    const mermaidJobs = jobs.filter(node => diagramKindFor(node) === 'mermaid');
-    if (mermaidJobs.length) {
-      mermaidModule ||= (await import('mermaid')).default;
-      mermaidModule.initialize({ startOnLoad: false, securityLevel: 'strict', htmlLabels: false, flowchart: { htmlLabels: false }, theme: document.documentElement.dataset.theme === 'dark' ? 'dark' : 'neutral', suppressErrorRendering: true });
-    }
-    const palette = diagramPalette();
-    for (const node of jobs) {
-      if (!node.isConnected) continue;
-      const kind = diagramKindFor(node);
-      if (!kind) continue;
-      node.dataset.source ||= node.textContent;
-      if (kind !== 'mermaid') {
-        const { svg, error } = renderNativeDiagram(kind, node.dataset.source, { palette, idPrefix: crypto.randomUUID() });
-        if (error) {
-          failDiagram(node, `图表渲染失败：${error}`);
+    let theme;
+    do {
+      theme = diagramTheme;
+      const jobs = nodes.filter(node => mounted(node) && needsRender(node));
+      if (!jobs.length) return;
+      if (jobs.some(node => diagramKindFor(node) === 'mermaid')) {
+        mermaidModule ||= (await import('mermaid')).default;
+        if (theme !== diagramTheme) continue;
+        mermaidModule.initialize({ startOnLoad: false, securityLevel: 'strict', htmlLabels: false, flowchart: { htmlLabels: false }, theme: document.documentElement.dataset.theme === 'dark' ? 'dark' : 'neutral', suppressErrorRendering: true });
+      }
+      const palette = diagramPalette();
+      for (const node of jobs) {
+        if (!mounted(node)) continue;
+        const kind = diagramKindFor(node);
+        if (!kind) continue;
+        node.dataset.source ||= node.textContent;
+        let svg, message;
+        if (kind === 'mermaid') {
+          try {
+            const rendered = await mermaidModule.render(`diagram-${crypto.randomUUID()}`, node.dataset.source);
+            if (theme === diagramTheme && mounted(node)) {
+              svg = DOMPurify.sanitize(rendered.svg, { USE_PROFILES: { html: true, svg: true, svgFilters: true }, ADD_TAGS: ['foreignObject'], ADD_ATTR: ['dominant-baseline'] });
+            }
+          } catch (error) { message = String(error.message || error); }
         } else {
+          const rendered = renderNativeDiagram(kind, node.dataset.source, { palette, idPrefix: crypto.randomUUID() });
+          ({ svg, error: message } = rendered);
+        }
+        if (theme !== diagramTheme) break;
+        if (!mounted(node)) continue;
+        if (message) failDiagram(node, `图表渲染失败：${message}`);
+        else {
           node.innerHTML = svg;
           node.dataset.processed = 'true';
           node.classList.remove('diagram-error');
           node.removeAttribute('title');
         }
-        continue;
+        diagramThemes.set(node, theme);
       }
-      try {
-        const { svg } = await mermaidModule.render(`diagram-${crypto.randomUUID()}`, node.dataset.source);
-        node.innerHTML = DOMPurify.sanitize(svg, { USE_PROFILES: { html: true, svg: true, svgFilters: true }, ADD_TAGS: ['foreignObject'], ADD_ATTR: ['dominant-baseline'] });
-        node.dataset.processed = 'true';
-        node.classList.remove('diagram-error');
-        node.removeAttribute('title');
-      } catch (error) {
-        failDiagram(node, `图表渲染失败：${String(error.message || error)}`);
-      }
-    }
+      // Callers (including export) keep waiting when the theme changes mid-render.
+    } while (theme !== diagramTheme);
   });
   return renderQueue;
 }
 
 /** Re-render existing diagrams after a theme change so colours follow. */
-export function refreshDiagrams(root = document) {
-  for (const node of root.querySelectorAll(processedDiagramSelector)) {
-    if (node.dataset.source) node.textContent = node.dataset.source;
-    node.removeAttribute('data-processed');
-  }
+export function refreshDiagrams(root, themeKey) {
+  if (diagramTheme === themeKey) return Promise.resolve();
+  diagramTheme = themeKey;
   return renderDiagrams(root);
 }
 

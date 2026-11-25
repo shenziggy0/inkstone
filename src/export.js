@@ -26,10 +26,18 @@ export function printHTML(title, body, css, { theme = 'light', ui = 'typora', he
   const safeTheme = ['light', 'dark', 'sepia'].includes(theme) ? theme : 'light';
   const safeUI = ui === 'workbench' ? 'workbench' : 'typora';
   const bodyClass = headingNumbering ? ' class="heading-numbering"' : '';
-  // A custom Typora theme paints its paper on #write/body. The loader scopes
-  // those rules to .prose so the app chrome stays untouched; these variables
-  // carry the same paper/ink into the standalone export document.
-  const page = 'html,body{background:var(--inkstone-theme-paper,#fff);color:var(--inkstone-theme-ink,#333)}';
+  // Use one paper/ink pair for the printable page and its article. Built-in
+  // themes supply the defaults, and custom themes can override each colour.
+  const page = `@media print{
+    :root[data-theme]{
+      --inkstone-print-paper:var(--inkstone-theme-paper,var(--color-paper,#fff));
+      --inkstone-print-ink:var(--inkstone-theme-ink,var(--color-ink,#333));
+      /* Keep Chromium's page margins light for its separate header and footer. */
+      color-scheme:light;
+      print-color-adjust:exact;
+    }
+    html,body,.print-document{background:var(--inkstone-print-paper);color:var(--inkstone-print-ink)}
+  }`;
   return `<!doctype html><html lang="zh-CN" data-theme="${safeTheme}" data-ui="${safeUI}"><meta charset="utf-8"><title>${escapeText(title)}</title><style>${inlineCSS(css)}\n${page}</style><body${bodyClass}><article class="print-document prose write-surface" id="print-document">${body}</article></body></html>`;
 }
 

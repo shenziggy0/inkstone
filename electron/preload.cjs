@@ -1,5 +1,6 @@
 const { contextBridge, ipcRenderer } = require('electron');
-const methods = ['bootstrap', 'newDocument', 'openDocument', 'openPath', 'openFolder', 'openFolderPath', 'refreshFolder', 'activeFolder', 'updateDocument', 'saveDocument', 'closeDocument', 'importDocument', 'exportDocument', 'insertImage', 'settings', 'openExternal', 'revealDocument', 'renameDocument', 'trashDocument', 'history', 'drainPending', 'finishQuit', 'cancelQuit', 'quitAck', 'listThemes', 'readTheme', 'openThemesFolder', 'listHistory', 'readHistory', 'reloadDocument', 'acceptExternalChange', 'detachDocument', 'zoom', 'fullscreen', 'reopenClosed', 'writeClipboard', 'readClipboardText', 'capabilities', 'copyImage', 'copyImagePath', 'chooseImageRoot', 'newWindow', 'appMenu', 'searchFolder', 'cancelSearch', 'recentFiles', 'clearRecent', 'saveSession', 'createEntry', 'renameEntry', 'trashEntry', 'revealPath', 'fileMenu', 'resolveLink', 'openLocalFile'];
+const methods = ['bootstrap', 'newDocument', 'openDocument', 'openPath', 'openFolder', 'openFolderPath', 'refreshFolder', 'activeFolder', 'updateDocument', 'saveDocument', 'closeDocument', 'importDocument', 'exportDocument', 'exportResultAction', 'copySelectionImage', 'insertImage', 'settings', 'openExternal', 'revealDocument', 'renameDocument', 'trashDocument', 'history', 'drainPending', 'finishQuit', 'cancelQuit', 'quitAck', 'listThemes', 'readTheme', 'openThemesFolder', 'listHistory', 'readHistory', 'reloadDocument', 'acceptExternalChange', 'detachDocument', 'zoom', 'fullscreen', 'reopenClosed', 'writeClipboard', 'readClipboardText', 'capabilities', 'copyImage', 'copyImagePath', 'chooseImageRoot', 'newWindow', 'appMenu', 'searchFolder', 'cancelSearch', 'recentFiles', 'clearRecent', 'saveSession', 'createEntry', 'renameEntry', 'trashEntry', 'revealPath', 'fileMenu', 'resolveLink', 'openLocalFile'];
+methods.push('listWritingNotes', 'updateWritingNote');
 const api = Object.fromEntries(methods.map(name => [name, (...args) => ipcRenderer.invoke(`inkstone:${name}`, ...args)]));
 api.onCommand = callback => {
   const listener = (_event, command, payload) => callback(command, payload);
@@ -24,5 +25,10 @@ api.onFolderChanged = callback => {
   const listener = (_event, folder) => callback(folder);
   ipcRenderer.on('inkstone:folder-changed', listener);
   return () => ipcRenderer.removeListener('inkstone:folder-changed', listener);
+};
+api.onWritingNotesChanged = callback => {
+  const listener = (_event, id) => callback(id);
+  ipcRenderer.on('inkstone:writing-notes-changed', listener);
+  return () => ipcRenderer.removeListener('inkstone:writing-notes-changed', listener);
 };
 contextBridge.exposeInMainWorld('desktop', api);

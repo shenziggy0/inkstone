@@ -128,3 +128,13 @@ test('the inside() boundary rejects paths outside the opened folder', () => {
   assert.equal(inside(root, path.resolve('/workspace')), false);
   assert.equal(inside(root, path.resolve('/etc/passwd')), false);
 });
+
+test('folder search can find a pathless draft without an open folder', async () => {
+  const drafts = [{ documentId: 'draft-1', name: '行李清单', content: '# 行李清单\n\n带望远镜。' }];
+  const result = await searchFolder(null, '望远镜', { drafts });
+  assert.equal(result.total, 1);
+  assert.equal(result.files[0].documentId, 'draft-1');
+  assert.equal(result.files[0].matches[0].line, 3);
+  assert.equal(result.files[0].matches[0].column, 2);
+  assert.equal((await searchFolder(null, '望远镜')).total, 0);
+});

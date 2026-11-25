@@ -121,33 +121,40 @@ async function listSearchFiles(root, { depth = 0, budget = { count: 0 } } = {}) 
 async function searchFolder(root, query, options = {}) {
   const {
     caseSensitive = false, regex = false, overrides = new Map(), token = { cancelled: false },
-    maxPerFile = MAX_RESULTS_PER_FILE, maxResults = MAX_RESULTS, maxFileBytes = MAX_FILE_BYTES
+    maxPerFile = MAX_RESULTS_PER_FILE, maxResults = MAX_RESULTS, maxFileBytes = MAX_FILE_BYTES, drafts = []
   } = options;
   const matcher = buildMatcher(query, { caseSensitive, regex });
   const empty = { query: String(query ?? ''), files: [], total: 0, truncated: false, cancelled: false };
-  if (!matcher || !root) return empty;
+  if (!matcher) return empty;
   const files = [];
   let total = 0, truncated = false;
-  for (const file of await listSearchFiles(root)) {
+  const addMatches = (entry, source) => {
+    const matches = searchText(source, matcher, { maxPerFile: Math.min(maxPerFile, maxResults - total) });
+    if (!matches.length) return;
+    files.push({ ...entry, matches });
+    total += matches.length;
+    if (total >= maxResults) truncated = true;
+  };
+  for (const { documentId, name, content } of drafts) {
+    if (token.cancelled) return { ...empty, total, files, cancelled: true };
+    if (truncated) break;
+    addMatches({ documentId, name, relative: '草稿' }, content);
+  }
+  for (const file of root && !truncated ? await listSearchFiles(root) : []) {
     if (token.cancelled) return { ...empty, total, files, cancelled: true };
     let source = overrides instanceof Map ? overrides.get(file) : null;
     if (typeof source !== 'string') {
       const stat = await fs.stat(file).catch(() => null);
-      // A huge generated file would dominate one query; skipping it is faster
-      // than reading it, and the result reports nothing rather than lying.
+      // A huge generated file would dominate one query.
       if (!stat || !stat.isFile() || stat.size > maxFileBytes) continue;
       source = UTF8.decode(await fs.readFile(file).catch(() => Buffer.alloc(0)));
     }
-    const matches = searchText(source, matcher, { maxPerFile });
-    if (!matches.length) continue;
-    files.push({
+    addMatches({
       path: file,
       name: path.basename(file),
-      relative: path.relative(root, file).split(path.sep).join('/'),
-      matches
-    });
-    total += matches.length;
-    if (total >= maxResults) { truncated = true; break; }
+      relative: path.relative(root, file).split(path.sep).join('/')
+    }, source);
+    if (truncated) break;
   }
   return { query: String(query ?? ''), files, total, truncated, cancelled: false };
 }

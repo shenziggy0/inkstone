@@ -13,8 +13,11 @@ const contents = '# 山间手记\n\n![正文配图](figure.png)\n\n' + Array.fro
 await fs.writeFile(file, contents);
 const firstDraft = path.join(root, '甲稿.md');
 const secondDraft = path.join(root, '乙稿.md');
+const treeDrafts = ['文件树宽窗.md', '文件树窄窗.md'].map(name => path.join(root, name));
+const treeDraftSource = '# 文件树打开验收\n\n原有正文。';
 await fs.writeFile(firstDraft, '# 甲稿\n');
 await fs.writeFile(secondDraft, '# 乙稿\n');
+for (const draft of treeDrafts) await fs.writeFile(draft, treeDraftSource);
 const env = { ...process.env, INKSTONE_TEST_USER_DATA: path.join(root, 'profile') };
 const settingsFile = path.join(env.INKSTONE_TEST_USER_DATA, 'settings.json');
 delete env.ELECTRON_RUN_AS_NODE;
@@ -180,6 +183,31 @@ try {
   assert.deepEqual(errors, []);
   console.log('PASS 减少动态效果、降低透明度、无渲染错误');
 
+  await cdp.send('Emulation.clearDeviceMetricsOverride');
+  const fileTreeToggle = page.locator('.topbar [data-command="sidebar"]');
+  for (const [index, width] of [1050, 736].entries()) {
+    const draft = treeDrafts[index];
+    const name = path.basename(draft);
+    const marker = `直接输入${width}`;
+    await app.evaluate(({ BrowserWindow }, width) => BrowserWindow.getAllWindows()[0].setContentSize(width, 650), width);
+    await page.waitForFunction(width => Math.abs(innerWidth - width) <= 1, width);
+    await fileTreeToggle.click();
+    await page.locator('#side-files').click();
+    await page.locator('.file-item').filter({ hasText: name }).click();
+    await page.waitForFunction(name => document.querySelector('#location').textContent === name, name);
+    assert.equal(await page.locator('#editor-host .cm-content').evaluate(node => node.contains(document.activeElement)), true);
+    assert.equal(await page.locator('#writing-sidebar').getAttribute('inert'), width < 760 ? '' : null);
+    await page.keyboard.insertText(marker);
+    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.send('inkstone:command', 'save'));
+    await page.waitForFunction(() => document.querySelector('#save-status').dataset.state === 'saved');
+    const saved = await fs.readFile(draft, 'utf8');
+    assert.ok(saved.includes(marker));
+    assert.equal(saved.replace(marker, ''), treeDraftSource);
+    if (width > 760) await fileTreeToggle.click();
+  }
+  assert.equal(await fs.readFile(file, 'utf8'), contents + '\n\n落笔，收稿。');
+  console.log('PASS 文件树从宽窗和窄窗打开真实文稿后直接输入，新增文字仅写入该稿');
+
   await app.close();
   app = await electron.launch({ args: [project, file], env });
   const restored = await app.firstWindow();
@@ -203,6 +231,10 @@ try {
   assert.equal(await upgraded.locator('#writing-sidebar').isVisible(), false);
   console.log('PASS 旧版工作台沿用已保存的侧栏状态');
 } finally {
-  if (app) await app.close();
+  if (app) {
+    const closed = app.waitForEvent('close');
+    await app.evaluate(({ app }) => app.exit(0)).catch(() => {});
+    await closed;
+  }
   await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 120 });
 }

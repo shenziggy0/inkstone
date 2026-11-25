@@ -114,8 +114,8 @@ summary[data-tree-path] { user-select: none; }
 .cm-line.cm-lv-list { padding-left: .15em !important; }
 .cm-line.cm-lv-list:not(.cm-lv-quote):not(.cm-lv-hr):has(> .cm-prefix-bullet),
 .cm-line.cm-lv-list:not(.cm-lv-quote):not(.cm-lv-hr):has(> .cm-prefix-task) { padding-left: 1.75em !important; text-indent: -1.6em; }
-/* Match ol padding + li padding for both the first line and wrapped lines.
-   The number occupies that same gutter even when its Markdown is editable. */
+/* Keep ordinary markers in the same gutter as rendered lists. Long markers
+   can use more of the first line without overflowing into the left margin. */
 .cm-line.cm-lv-ordered:not(.cm-lv-quote, .cm-lv-hr):has(> :is(.cm-prefix-ordered, .cm-ordered-source)) {
   --ordered-gutter: calc(var(--list-indent) + var(--list-item-gap));
   padding-left: var(--ordered-gutter) !important;
@@ -134,6 +134,10 @@ summary[data-tree-path] { user-select: none; }
 }
 .cm-lv-ordered:not(.cm-lv-quote, .cm-lv-hr) > .cm-ordered-source {
   padding-right: var(--list-item-gap);
+}
+.cm-lv-ordered:not(.cm-lv-quote, .cm-lv-hr) > .cm-ordered-long {
+  width: max-content;
+  min-width: var(--ordered-gutter);
 }
 .cm-line.cm-lv-table, .cm-line.cm-lv-fence { font-family: var(--font-code); font-size: .9em; }
 .cm-editor .cm-lv-strong { font-weight: 700; }

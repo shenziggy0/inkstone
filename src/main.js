@@ -4,7 +4,7 @@ import { workspaceHTML, toolbarMenuHTML, preferencesHTML, installGlassHighlights
 import { icon } from './icons.js';
 import 'katex/dist/katex.min.css';
 import { createEditor } from './editor.js';
-import { escapeHTML, headings, statistics, renderMarkdown, renderDiagrams, refreshDiagrams, tableSourceRanges, setMathNumbering, setImageRootSetting, setFrontMatterImageRoot } from './markdown.js';
+import { escapeHTML, headings, statistics, draftTitleFromSource, renderMarkdown, renderSelectedMarkdown, renderDiagrams, refreshDiagrams, tableSourceRanges, setMathNumbering, setImageRootSetting, setFrontMatterImageRoot } from './markdown.js';
 import { replaceFrontMatterImageRoot } from '../electron/front-matter.mjs';
 import { parseTables, serializeTable, setCell, insertRow, removeRow, insertColumn, removeColumn, setAlignment, columnWidthEdit, tableMoveEdit } from './table.js';
 import { compareLines, renderDiffRows, POSITIONAL_DIFF_NOTE } from './diff.js';
@@ -21,12 +21,12 @@ const native = !!window.desktop;
 const bridge = window.desktop || browserBridge();
 const documents = new Map();
 let activeId, folder, prefs, sideMode = 'outline', sourceMode = false, busy = false;
-let customThemes = [], selectedHistory = null, lastThemeKey = null, customThemeSeq = 0;
+let customThemes = [], selectedHistory = null, customThemeSeq = 0;
 let capabilities = { installed: false, version: null, platform: '' }, imageContext = null;
 let pendingTable = null, quickFiles = [];
 // Folder-wide search state. The query survives a sidebar redraw so results can
 // be updated without the input losing focus mid-typing.
-let searchState = { query: '', caseSensitive: false, regex: false, results: null, busy: false, seq: 0, error: '' };
+let searchState = { query: '', caseSensitive: false, regex: false, includeDrafts: true, results: null, busy: false, seq: 0, error: '' };
 let searchTimer = 0;
 // Recent documents (menu + palette) and the debounced session snapshot.
 let recentFiles = [], lastSessionKey = '', quitting = false;
@@ -47,11 +47,41 @@ const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
 const systemDark = matchMedia('(prefers-color-scheme: dark)');
 let compactSidebarOpen = false;
 let lastToolbarScroll = 0;
-let navigationKey = '';
+let navigationKey = '', draftNumber = 0;
+let selectionTimer = 0, selectingWithPointer = false, selectionComposing = false;
+let dismissedSelection;
+const selectionTools = $('#selection-tools');
 
-function notify(message, error = false) {
-  const node = $('#notification'); node.textContent = message; node.classList.toggle('error', error); node.hidden = false;
-  clearTimeout(notify.timer); notify.timer = setTimeout(() => { node.hidden = true; }, error ? 10000 : 4500);
+function notify(message, error = false, exportPath) {
+  const node = $('#notification');
+  if (notify.exportPath && notify.exportPath !== exportPath) {
+    api('exportResultAction', notify.exportPath, 'dismiss').catch(() => {});
+  }
+  notify.exportPath = native ? exportPath : undefined;
+  node.classList.toggle('has-export-actions', !!notify.exportPath);
+  node.textContent = message; node.classList.toggle('error', error); node.hidden = false;
+  clearTimeout(notify.timer);
+  if (exportPath && native) {
+    const actions = document.createElement('div');
+    actions.className = 'export-result-actions';
+    for (const [action, label] of [['open', '打开文件'], ['reveal', '在文件夹中显示'], ['dismiss', '关闭']]) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = label;
+      button.addEventListener('click', async () => {
+        if (action === 'dismiss') {
+          node.hidden = true;
+          notify.exportPath = undefined;
+          await api('exportResultAction', exportPath, 'dismiss').catch(() => {});
+          return;
+        }
+        try { await api('exportResultAction', exportPath, action); }
+        catch (failure) { notify(failure.message, true); }
+      });
+      actions.append(button);
+    }
+    node.append(actions);
+  } else notify.timer = setTimeout(() => { node.hidden = true; }, error ? 10000 : 4500);
 }
 async function api(name, ...args) {
   const result = await bridge[name](...args);
@@ -59,27 +89,56 @@ async function api(name, ...args) {
   return result.value;
 }
 const current = () => documents.get(activeId);
+const cleanWelcome = doc => doc && doc.id === welcomeId && !doc.dirty && !doc.path;
+function draftTitle(doc) {
+  if (doc.path || doc.name !== '未命名.md') return doc.name;
+  if (doc.titleSource === doc.content) return doc.title;
+  const title = draftTitleFromSource(doc.content);
+  doc.titleSource = doc.content;
+  doc.title = title ? [...title].slice(0, 100).join('') : doc.name;
+  return doc.title;
+}
+function displayName(doc) {
+  const title = draftTitle(doc);
+  if (doc.path) return title;
+  const peers = [...documents.values()].filter(peer => !peer.path && draftTitle(peer) === title);
+  if (peers.length > 1) {
+    for (const peer of peers) peer.disambiguatedTitle = title;
+  }
+  return doc.disambiguatedTitle === title ? `${title}（${doc.draftNumber}）` : title;
+}
+function refreshSearch() {
+  if (!searchState.query.trim()) return;
+  scheduleSearch();
+}
+
 async function flush(doc = current()) {
   if (!doc) return;
   clearTimeout(doc.timer);
-  await api('updateDocument', doc.id, doc.content);
+  const proposedName = !doc.path && doc.name === '未命名.md' ? displayName(doc) : undefined;
+  const anchors = doc.path ? [...(doc.pendingNoteAnchors?.values() || [])] : undefined;
+  await api('updateDocument', doc.id, doc.content, proposedName, anchors);
+  if (!doc.path || !doc.dirty) await persistWritingAnchors(doc);
+
 }
 function updateChrome() {
   const doc = current(); if (!doc) return;
-  document.title = `${doc.dirty ? '• ' : ''}${doc.name} — 墨页`;
+  const title = displayName(doc);
+  $('#welcome-actions').hidden = !cleanWelcome(doc);
+  document.title = `${doc.dirty ? '• ' : ''}${title} — 墨页`;
   // The filename remains visible even when the tab strip is folded away.
-  $('#location').textContent = `${doc.dirty ? '• ' : ''}${doc.name}`;
-  $('#location').title = doc.path || doc.name;
+  $('#location').textContent = `${doc.dirty ? '• ' : ''}${title}`;
+  $('#location').title = doc.path || title;
   $('#save-status').textContent = doc.error ? doc.error : doc.dirty ? '有未保存的更改' : doc.path ? '已保存' : '未保存到文件';
   $('#save-status').classList.toggle('status-error', !!doc.error);
   $('#save-status').dataset.state = doc.error ? 'error' : doc.dirty ? 'dirty' : doc.path ? 'saved' : 'draft';
   // Typing changes the body far more often than it changes a tab. Keep the
   // buttons (and keyboard focus on them) when only the manuscript changed.
-  const key = JSON.stringify([activeId, ...[...documents.values()].map(d => [d.id, d.name, d.path, d.dirty])]);
+  const key = JSON.stringify([activeId, ...[...documents.values()].map(d => [d.id, displayName(d), d.path, d.dirty])]);
   if (key === navigationKey) return;
   navigationKey = key;
   drawOpenDocuments();
-  $('#document-tabs').innerHTML = [...documents.values()].map(d => `<div class="document-tab ${d.id === activeId ? 'active' : ''}"><button role="tab" tabindex="${d.id === activeId ? 0 : -1}" aria-selected="${d.id === activeId}" aria-controls="editor-host" data-document="${d.id}" title="${escapeHTML(d.path || d.name)}">${icon('file')}<span>${escapeHTML(d.name)}</span>${d.dirty ? '<span class="dirty-mark" aria-label="未保存">●</span>' : ''}</button><button class="close-tab" data-close="${d.id}" aria-label="关闭 ${escapeHTML(d.name)}">${icon('close')}</button></div>`).join('');
+  $('#document-tabs').innerHTML = [...documents.values()].map(d => `<div class="document-tab ${d.id === activeId ? 'active' : ''}"><button role="tab" tabindex="${d.id === activeId ? 0 : -1}" aria-selected="${d.id === activeId}" aria-controls="editor-host" data-document="${d.id}" title="${escapeHTML(d.path || displayName(d))}">${icon('file')}<span>${escapeHTML(displayName(d))}</span>${d.dirty ? '<span class="dirty-mark" aria-label="未保存">●</span>' : ''}</button><button class="close-tab" data-close="${d.id}" aria-label="关闭 ${escapeHTML(displayName(d))}">${icon('close')}</button></div>`).join('');
 }
 function updateStats() {
   const doc = current(); if (!doc) return;
@@ -97,8 +156,8 @@ function drawOpenDocuments() {
   const container = $('#open-documents');
   if (!container) return;
   container.innerHTML = [...documents.values()].map(d => `<div class="open-document" role="listitem">
-      <button class="open-document-name" data-document="${d.id}" aria-current="${d.id === activeId}" aria-label="切换到 ${escapeHTML(d.name)}" title="${escapeHTML(d.path || d.name)}">${icon('file')}<span>${escapeHTML(d.name)}</span>${d.dirty ? '<span class="dirty-mark" aria-label="未保存">●</span>' : ''}</button>
-      <button class="open-document-close" data-close="${d.id}" aria-label="关闭 ${escapeHTML(d.name)}">${icon('close')}</button>
+      <button class="open-document-name" data-document="${d.id}" aria-current="${d.id === activeId}" aria-label="切换到 ${escapeHTML(displayName(d))}" title="${escapeHTML(d.path || displayName(d))}">${icon('file')}<span>${escapeHTML(displayName(d))}</span>${d.dirty ? '<span class="dirty-mark" aria-label="未保存">●</span>' : ''}</button>
+      <button class="open-document-close" data-close="${d.id}" aria-label="关闭 ${escapeHTML(displayName(d))}">${icon('close')}</button>
     </div>`).join('');
 }
 function drawSidebar() {
@@ -115,21 +174,22 @@ function drawSidebar() {
   if (sideMode === 'articles') {
     const query = $('#file-filter').value.toLowerCase();
     const articles = folder ? flattenFiles(folder.entries) : [];
-    const opened = [...documents.values()].filter(d => !d.path).map(d => ({ name: d.name, path: '', recent: true }));
+    const opened = [...documents.values()].filter(d => !d.path && !cleanWelcome(d)).map(d => ({ name: displayName(d), id: d.id, recent: true }));
     const all = [...opened, ...articles.map(a => ({ ...a, recent: false }))];
     const matches = all.filter(a => !query || a.name.toLowerCase().includes(query));
     container.innerHTML = matches.length
-      ? matches.map(a => `<button class="article-item ${a.recent ? 'unsaved' : ''} ${a.path && a.path === current()?.path ? 'current' : ''}" ${a.path ? `data-path="${escapeHTML(a.path)}"` : 'disabled'}><strong>${escapeHTML(a.name.replace(/\.(md|markdown|mdown|txt)$/i, ''))}</strong><span>${a.recent ? '未保存的文档' : escapeHTML(a.path.replace(/[\\/][^\\/]*$/, ''))}</span></button>`).join('')
+      ? matches.map(a => `<button class="article-item ${a.recent ? 'unsaved' : ''} ${(a.id === activeId || (a.path && a.path === current()?.path)) ? 'current' : ''}" ${a.path ? `data-path="${escapeHTML(a.path)}"` : `data-document="${escapeHTML(a.id)}"`}><strong>${escapeHTML(a.name.replace(/\.(md|markdown|mdown|txt)$/i, ''))}</strong><span>${a.recent ? '未保存的文档' : escapeHTML(a.path.replace(/[\\/][^\\/]*$/, ''))}</span></button>`).join('')
       : '<div class="empty-state"><p>还没有文章</p><small>打开一个文件夹，即可在这里浏览全部 Markdown 文档。</small><button class="primary" data-command="folder">打开文件夹</button></div>';
   } else if (sideMode === 'search') {
     // The panel is only built once, so typing in the search box is not
     // interrupted by the sidebar being redrawn after every result update.
     if (!container.querySelector('#folder-search-input')) {
       container.innerHTML = `<div class="folder-search">
-        <label class="filter-label"><span class="sr-only">在文件夹中搜索</span><input id="folder-search-input" type="search" placeholder="在文件夹中搜索…" autocomplete="off"></label>
+        <label class="filter-label"><span class="sr-only">搜索文档</span><input id="folder-search-input" type="search" placeholder="搜索文档…" autocomplete="off"></label>
         <div class="folder-search-options">
           <label class="checkbox-label"><input type="checkbox" data-search-option="caseSensitive"><span>区分大小写</span></label>
           <label class="checkbox-label"><input type="checkbox" data-search-option="regex"><span>正则</span></label>
+          <label class="checkbox-label"><input type="checkbox" data-search-option="includeDrafts"><span>包含本窗口草稿</span></label>
         </div>
         <p class="folder-search-summary" id="folder-search-summary"></p>
       </div><div class="folder-search-results" id="folder-search-results" role="list"></div>`;
@@ -142,7 +202,7 @@ function drawSidebar() {
     const content = current()?.content || '';
     const outline = headings(content);
     const { owners } = parseSections(content);
-    container.innerHTML = outline.length ? outline.map((h, index) => `<button class="outline-item level-${h.level}" data-line="${h.line}" data-section="${owners[index] ?? index}" draggable="true" title="拖动可重排整个章节" style="--indent:${Math.max(0, h.level - 1) * 12}px"><small aria-hidden="true">H${h.level}</small><span>${escapeHTML(h.title)}</span></button>`).join('') : '<div class="empty-state"><p>还没有标题</p><small>输入 # 加空格，为文档建立结构。</small></div>';
+    container.innerHTML = (outline.length ? outline.map((h, index) => `<button class="outline-item level-${h.level}" data-line="${h.line}" data-section="${owners[index] ?? index}" draggable="true" title="拖动可重排整个章节" style="--indent:${Math.max(0, h.level - 1) * 12}px"><small aria-hidden="true">H${h.level}</small><span>${escapeHTML(h.title)}</span></button>`).join('') : '<div class="empty-state"><p>还没有标题</p><small>输入 # 加空格，为文档建立结构。</small></div>') + writingNotesHTML(current());
   } else {
     const query = $('#file-filter').value.toLowerCase();
     const renderEntries = (entries, depth = 0) => entries.map(entry => {
@@ -169,13 +229,14 @@ function drawSidebar() {
 // only draws them. Unsaved documents are searched as the editor shows them.
 function scheduleSearch(delay = 220) {
   clearTimeout(searchTimer);
+  searchState.seq++;
   searchTimer = setTimeout(() => { runFolderSearch().catch(error => notify(error.message, true)); }, delay);
 }
 
 async function runFolderSearch() {
   const query = searchState.query;
   const seq = ++searchState.seq;
-  if (!folder || !query.trim()) {
+  if ((!folder && !searchState.includeDrafts) || !query.trim()) {
     searchState.results = null; searchState.busy = false; searchState.error = '';
     drawSearchResults();
     return;
@@ -183,10 +244,16 @@ async function runFolderSearch() {
   searchState.busy = true;
   drawSearchResults();
   const overrides = {};
-  for (const doc of documents.values()) if (doc.path && doc.dirty) overrides[doc.path] = doc.editor.text();
+  const drafts = [];
+  for (const doc of documents.values()) {
+    if (doc.path && doc.dirty) overrides[doc.path] = doc.editor.text();
+    if (!doc.path && !cleanWelcome(doc) && searchState.includeDrafts) {
+      drafts.push({ documentId: doc.id, name: displayName(doc), content: doc.editor.text() });
+    }
+  }
   try {
     const results = await api('searchFolder', query, {
-      caseSensitive: searchState.caseSensitive, regex: searchState.regex, overrides
+      caseSensitive: searchState.caseSensitive, regex: searchState.regex, overrides, drafts
     });
     // A newer query owns the panel; a stale answer is dropped, never merged.
     if (seq !== searchState.seq) return;
@@ -214,7 +281,7 @@ function drawSearchResults() {
   const list = $('#folder-search-results');
   const summary = $('#folder-search-summary');
   if (!list || !summary) return;
-  if (!folder) {
+  if (!folder && !searchState.includeDrafts) {
     summary.textContent = '';
     list.innerHTML = '<div class="empty-state"><p>先打开一个文件夹</p><small>搜索会在当前文件夹的 Markdown 文档中进行。</small><button class="primary" data-command="folder">打开文件夹</button></div>';
     return;
@@ -224,12 +291,12 @@ function drawSearchResults() {
     : error ? error
     : !query.trim() ? '输入关键词开始搜索。'
     : !results ? ''
-    : results.total ? `在 ${results.files.length} 个文件中找到 ${results.total} 处${results.truncated ? '（结果已截断）' : ''}`
+    : results.total ? `在 ${results.files.length} ${results.files.some(file => file.documentId) ? '篇文稿' : '个文件'}中找到 ${results.total} 处${results.truncated ? '（结果已截断）' : ''}`
     : '没有找到匹配的内容。';
   if (!results || !results.files.length) { list.innerHTML = ''; return; }
   list.innerHTML = results.files.map(file => `<div class="search-file" role="listitem">
     <div class="search-file-heading"><strong>${escapeHTML(file.name)}</strong><span>${escapeHTML(file.relative)}</span></div>
-    ${file.matches.map(match => `<button class="search-hit" data-search-hit data-search-path="${escapeHTML(file.path)}" data-search-line="${match.line}" data-search-column="${match.column}" data-search-length="${(match.ranges[0]?.[1] ?? 1) - (match.ranges[0]?.[0] ?? 0)}">
+    ${file.matches.map(match => `<button class="search-hit" data-search-hit ${file.documentId ? `data-search-document="${escapeHTML(file.documentId)}"` : `data-search-path="${escapeHTML(file.path)}"`} data-search-line="${match.line}" data-search-column="${match.column}" data-search-length="${(match.ranges[0]?.[1] ?? 1) - (match.ranges[0]?.[0] ?? 0)}">
       <span class="search-line">${match.line}</span><span class="search-text">${snippetHTML(match)}</span>
     </button>`).join('')}
   </div>`).join('');
@@ -237,11 +304,12 @@ function drawSearchResults() {
 
 /** Open a search hit and put the caret on the match. */
 async function openSearchHit(element) {
-  const path = element.dataset.searchPath;
+  const { searchPath: path, searchDocument: id } = element.dataset;
   const line = Number(element.dataset.searchLine) || 1;
   const column = Number(element.dataset.searchColumn) || 1;
   const length = Number(element.dataset.searchLength) || 0;
-  let doc = [...documents.values()].find(candidate => candidate.path === path);
+  let doc = id ? documents.get(id) : [...documents.values()].find(candidate => candidate.path === path);
+  if (id && !doc) { refreshSearch(); return; }
   if (!doc) {
     try { await openDocuments(await api('openPath', path)); }
     catch (error) { notify(error.message, true); return; }
@@ -258,9 +326,9 @@ async function openSearchHit(element) {
 const parentFolderOf = file => String(file || '').replace(/[\\/][^\\/]*$/, '') || folder?.path || '';
 
 /** A small modal prompt for the file-tree create / rename actions. */
-function askEntryName(title, initial, hint) {
+function askEntryName(title, initial, hint, label = '名称') {
   return new Promise(resolve => {
-    showDialog(title, `<label class="quick-filter"><span class="sr-only">名称</span><input id="entry-name" type="text" value="${escapeHTML(initial || '')}" autocomplete="off"></label><p class="dialog-description">${escapeHTML(hint || '文件名会自动补上 .md 扩展名。')}</p><div class="dialog-actions"><button data-dismiss>取消</button><button class="primary" id="entry-name-confirm">确定</button></div>`);
+    showDialog(title, `<label class="quick-filter"><span class="sr-only">${escapeHTML(label)}</span><input id="entry-name" type="text" value="${escapeHTML(initial || '')}" autocomplete="off"></label><p class="dialog-description">${escapeHTML(hint || '文件名会自动补上 .md 扩展名。')}</p><div class="dialog-actions"><button data-dismiss>取消</button><button class="primary" id="entry-name-confirm">确定</button></div>`);
     const input = $('#entry-name');
     input.focus();
     input.select();
@@ -460,13 +528,285 @@ function updateCurrentSection(lineNumber) {
     target?.setAttribute('aria-current', 'location');
   }
 }
-function selectionChanged(update) {
-  if (update.view !== current()?.editor.view) return;
-  const state = update.state, range = state.selection.main;
+function captureSelection(doc = current()) {
+  if (!doc) return null;
+  const { from, to, empty } = doc.editor.view.state.selection.main;
+  if (empty) return null;
+  return { doc, from, to, source: doc.editor.text() };
+}
+
+function hideSelectionTools() {
+  clearTimeout(selectionTimer);
+  selectionTools.hidden = true;
+}
+function scheduleSelectionTools() {
+  clearTimeout(selectionTimer);
+  selectionTimer = setTimeout(() => {
+    const selection = captureSelection();
+    const focused = document.activeElement;
+    const view = selection?.doc.editor.view;
+    const main = $('.main-pane');
+    const showFormat = prefs?.uiMode !== 'workbench';
+    if (!selection || (!showFormat && !native) || selectionComposing || view.composing
+      || selectingWithPointer || main.inert || $('#dialog').open
+      || (focused !== view.contentDOM && !selectionTools.contains(focused))
+      || (dismissedSelection?.doc === selection.doc && dismissedSelection.source === selection.source
+          && dismissedSelection.from === selection.from && dismissedSelection.to === selection.to)) {
+      selectionTools.hidden = true;
+      return;
+    }
+    const edge = view.coordsAtPos(selection.to, -1);
+    const bounds = $('#editor-host').getBoundingClientRect();
+    if (!edge || edge.bottom < bounds.top || edge.top > bounds.bottom) {
+      selectionTools.hidden = true;
+      return;
+    }
+    for (const button of selectionTools.querySelectorAll('[data-selection-format]')) button.hidden = !showFormat;
+    selectionTools.hidden = false;
+    const { offsetWidth: width, offsetHeight: height } = selectionTools;
+    const left = Math.max(bounds.left + 4, Math.min(edge.left - width / 2, bounds.right - width - 4));
+    const top = edge.top - height - 6 >= bounds.top ? edge.top - height - 6 : Math.min(edge.bottom + 6, bounds.bottom - height - 4);
+    selectionTools.style.left = `${left}px`;
+    selectionTools.style.top = `${top}px`;
+  }, 120);
+}
+selectionTools.addEventListener('pointerdown', event => event.preventDefault());
+document.addEventListener('pointerdown', event => {
+  if (!selectionTools.contains(event.target)) hideSelectionTools();
+  selectingWithPointer = !!event.target.closest?.('#editor-host');
+  if (selectingWithPointer) dismissedSelection = null;
+}, true);
+for (const event of ['pointerup', 'pointercancel']) document.addEventListener(event, () => {
+  if (!selectingWithPointer) return;
+  selectingWithPointer = false;
+  scheduleSelectionTools();
+}, true);
+document.addEventListener('focusin', event => {
+  if (event.target === current()?.editor.view.contentDOM) scheduleSelectionTools();
+  else if (!selectionTools.contains(event.target)) hideSelectionTools();
+});
+document.addEventListener('compositionstart', event => {
+  if (!event.target.closest?.('#editor-host')) return;
+  selectionComposing = true;
+  hideSelectionTools();
+});
+document.addEventListener('compositionend', () => { selectionComposing = false; scheduleSelectionTools(); });
+document.addEventListener('keydown', event => {
+  if (event.key !== 'Escape' || selectionTools.hidden) return;
+  dismissedSelection = captureSelection();
+  const inTools = selectionTools.contains(document.activeElement);
+  hideSelectionTools();
+  if (inTools) current()?.editor.view.focus();
+}, true);
+window.addEventListener('resize', scheduleSelectionTools);
+
+async function linkSelection() {
+  const selection = captureSelection();
+  if (!selection) return;
+  const href = await askEntryName('插入链接', 'https://', '输入网址、文档相对路径或文内锚点。', '链接地址');
+  if (!href || selection.doc !== current() || selection.source !== selection.doc.editor.text()) return;
+  if (/[<>\r\n]/.test(href)) throw new Error('链接地址不能包含尖括号或换行。');
+  const view = selection.doc.editor.view;
+  view.dispatch({ selection: { anchor: selection.from, head: selection.to } });
+  selection.doc.editor.wrap('[', `](<${href.replaceAll(' ', '%20')}>)`);
+}
+
+async function copySelectionImage() {
+  const selection = captureSelection();
+  if (!native || !selection || busy) return;
+  const { doc, from, to, source } = selection;
+  const name = displayName(doc);
+  const mathNumbering = !!prefs.mathNumbering;
+  busy = true;
+  const target = document.createElement('article');
+  target.className = 'print-document prose write-surface';
+  try {
+    await flush(doc);
+    await ensureLanguages(source);
+    const html = renderSelectedMarkdown(source, doc.id, { from, to }, { chrome: false, mathNumbering });
+    if (!html.trim()) throw new Error('选区没有可显示的内容。');
+    target.innerHTML = html;
+    document.body.append(target);
+    await renderDiagrams(target);
+    await api('copySelectionImage', doc.id, pngRequest(name, target));
+    notify('选区已复制为图片');
+  } finally {
+    target.remove();
+    busy = false;
+  }
+}
+
+function writingAnchor(source, from, to) {
+  return { from, to, quote: source.slice(from, to), prefix: source.slice(Math.max(0, from - 48), from), suffix: source.slice(to, to + 48) };
+}
+
+function findWritingAnchor(source, anchor) {
+  if (anchor.orphaned) return null;
+  const matchesContext = (from, to) => from >= anchor.prefix.length
+    && source.startsWith(anchor.prefix, from - anchor.prefix.length) && source.startsWith(anchor.suffix, to);
+  const samePosition = source.slice(anchor.from, anchor.to) === anchor.quote;
+  if (samePosition && matchesContext(anchor.from, anchor.to)) return anchor;
+  let first = -1, contextMatch = -1, multiple = false;
+  for (let from = source.indexOf(anchor.quote); from >= 0; from = source.indexOf(anchor.quote, from + 1)) {
+    if (first === -1) first = from;
+    else multiple = true;
+    if (!matchesContext(from, from + anchor.quote.length)) continue;
+    if (contextMatch !== -1) return null;
+    contextMatch = from;
+  }
+  const from = contextMatch !== -1 ? contextMatch : multiple ? -1 : first;
+  return from === -1 ? null : writingAnchor(source, from, from + anchor.quote.length);
+}
+
+function writingNotesRows(doc) {
+  if (doc.notes === undefined) return '';
+  const source = doc.editor.text();
+  const rows = doc.notes.map(note => {
+    const found = findWritingAnchor(source, note.anchor);
+    return `<div class="writing-note" data-note-id="${escapeHTML(note.id)}">
+      <button type="button" class="writing-note-jump" data-writing-note-action="jump" ${found ? '' : 'disabled'}>${escapeHTML(note.text)}</button>
+      <small>${found ? (note.done ? '已完成' : escapeHTML([...note.anchor.quote].slice(0, 40).join(''))) : '需重新定位'}</small>
+      <div class="writing-note-actions">
+        <button type="button" data-writing-note-action="edit">编辑</button>
+        <button type="button" data-writing-note-action="relocate" title="选中新文字后重新定位">重新定位</button>
+        <button type="button" data-writing-note-action="toggle">${note.done ? '重新打开提示' : '完成'}</button>
+      </div></div>`;
+  }).join('');
+  return rows ? `<h3>续写提示</h3>${rows}` : '';
+}
+
+function writingNotesHTML(doc) {
+  return native && doc ? `<section id="writing-notes" aria-label="续写提示">${writingNotesRows(doc)}</section>` : '';
+}
+
+function drawWritingNotes(doc) {
+  const panel = $('#writing-notes');
+  if (current() === doc && panel) panel.innerHTML = writingNotesRows(doc);
+}
+async function loadWritingNotes(doc) {
+  const seq = doc.noteLoad = (doc.noteLoad || 0) + 1;
+  const notes = await api('listWritingNotes', doc.id);
+  if (!documents.has(doc.id) || seq !== doc.noteLoad) return;
+  doc.notes = notes.map(note => {
+    const pending = doc.pendingNoteAnchors?.get(note.id);
+    return pending ? { ...note, anchor: pending.anchor } : note;
+  });
+  drawWritingNotes(doc);
+}
+
+function mapWritingNotes(doc, update) {
+  if (!doc.notes?.length) return;
+  const previousText = update.startState.doc.toString(), source = update.state.doc.toString();
+  doc.pendingNoteAnchors ||= new Map();
+  doc.notes = doc.notes.map(note => {
+    if (note.anchor.orphaned) {
+      const { orphaned, ...original } = note.anchor;
+      const restored = findWritingAnchor(source, original);
+      if (!restored || !source.includes(original.prefix + original.quote + original.suffix)) return note;
+      const previousAnchor = doc.pendingNoteAnchors.get(note.id)?.previousAnchor || note.anchor;
+      doc.pendingNoteAnchors.set(note.id, { type: 'relocate', id: note.id, previousAnchor, anchor: restored });
+      return { ...note, anchor: restored };
+    }
+    const anchor = findWritingAnchor(previousText, note.anchor);
+    if (!anchor) return note;
+    const from = update.changes.mapPos(anchor.from, 1), to = update.changes.mapPos(anchor.to, -1);
+    const mapped = source.slice(from, to) === anchor.quote ? writingAnchor(source, from, to)
+      : from < to ? findWritingAnchor(source, anchor) : null;
+    const next = mapped || { ...anchor, orphaned: true };
+    if (JSON.stringify(next) === JSON.stringify(note.anchor)) return note;
+    const previousAnchor = doc.pendingNoteAnchors.get(note.id)?.previousAnchor || note.anchor;
+    doc.pendingNoteAnchors.set(note.id, { type: 'relocate', id: note.id, previousAnchor, anchor: next });
+    return { ...note, anchor: next };
+  });
+}
+
+function saveWritingAnchors(doc) {
+  if (!doc.pendingNoteAnchors?.size) return doc.noteWrite;
+  if (doc.noteWrite) return doc.noteWrite.then(() => saveWritingAnchors(doc));
+  doc.noteWrite = (async () => {
+    for (const [id, change] of [...doc.pendingNoteAnchors]) {
+      const saved = await api('updateWritingNote', doc.id, change);
+      const pending = doc.pendingNoteAnchors.get(id);
+      if (pending === change) {
+        doc.pendingNoteAnchors.delete(id);
+        doc.notes = doc.notes.map(note => note.id === id ? saved : note);
+      } else if (pending && JSON.stringify(saved.anchor) === JSON.stringify(change.anchor)) {
+        pending.previousAnchor = saved.anchor;
+      } else if (pending) {
+        doc.pendingNoteAnchors.delete(id);
+        doc.notes = doc.notes.map(note => note.id === id ? saved : note);
+      }
+    }
+  })().finally(() => { doc.noteWrite = null; });
+  return doc.noteWrite;
+}
+
+async function persistWritingAnchors(doc) {
+  try { await saveWritingAnchors(doc); }
+  catch (error) { notify(`续写提示的位置还未保存：${error.message}`, true); }
+}
+
+async function changeWritingNote(doc, change) {
+  if (!doc.path || !doc.dirty) await saveWritingAnchors(doc);
+  if (change.type === 'relocate') doc.pendingNoteAnchors?.delete(change.id);
+  await api('updateWritingNote', doc.id, change);
+  await loadWritingNotes(doc);
+}
+async function addWritingNote() {
+  const selection = captureSelection();
+  if (!native || !selection) return;
+  const { doc, source, from, to } = selection;
+  const text = await askEntryName('留个续写提示', '', '下次打开这篇文稿时，可以从大纲跳回这段文字。', '续写提示');
+  if (!text || current() !== doc || doc.editor.text() !== source) return;
+  await flush(doc);
+  await changeWritingNote(doc, { type: 'add', id: crypto.randomUUID(), text, anchor: writingAnchor(source, from, to) });
+  sideMode = 'outline';
+  if (!compactLayout.matches) setSidebarVisible(true);
+  drawSidebar();
+  notify('续写提示已保存');
+}
+
+async function writingNoteAction(button) {
+  const doc = current();
+  const note = doc?.notes?.find(record => record.id === button.closest('[data-note-id]').dataset.noteId);
+  if (!note) return;
+  const action = button.dataset.writingNoteAction;
+  if (action === 'jump') {
+    const anchor = findWritingAnchor(doc.editor.text(), note.anchor);
+    if (!anchor) { drawWritingNotes(doc); return; }
+    dismissCompactSidebar();
+    const view = doc.editor.view;
+    view.dispatch({ selection: { anchor: anchor.from, head: anchor.to }, scrollIntoView: true });
+    view.focus();
+  } else if (action === 'edit') {
+    const text = await askEntryName('编辑续写提示', note.text, '更新这段文字的续写提示。', '续写提示');
+    if (text && current() === doc) await changeWritingNote(doc, { type: 'edit', id: note.id, text });
+  } else if (action === 'toggle') {
+    await changeWritingNote(doc, { type: 'complete', id: note.id, done: !note.done });
+  } else if (action === 'relocate') {
+    const selection = captureSelection(doc);
+    if (!selection) { notify('先在稿件中选中新位置的文字。'); return; }
+    await changeWritingNote(doc, { type: 'relocate', id: note.id, anchor: writingAnchor(selection.source, selection.from, selection.to) });
+  }
+}
+bridge.onWritingNotesChanged?.(id => {
+  const doc = documents.get(id);
+  if (doc) loadWritingNotes(doc).catch(error => notify(error.message, true));
+});
+
+function updateSelectionStatus(state) {
+  const range = state.selection.main;
   const pos = range.head, line = state.doc.lineAt(pos);
   $('#position').textContent = `行 ${line.number}，列 ${pos - line.from + 1}`;
   $('#selection-status').textContent = range.empty ? '' : `已选 ${[...state.sliceDoc(range.from, range.to)].length} 字`;
   updateCurrentSection(line.number);
+}
+function selectionChanged(doc, update) {
+  if (update.docChanged) mapWritingNotes(doc, update);
+  if (doc !== current()) return;
+  updateSelectionStatus(update.state);
+  if (update.selectionSet || update.docChanged) scheduleSelectionTools();
+  const pos = update.state.selection.main.head;
   // Only a naked caret should recentre the viewport. Recentring on a growing
   // selection makes drag-select fight the scrolling underneath the pointer.
   if (prefs?.typewriter && update.selectionSet && update.state.selection.main.empty) queueMicrotask(() => { if (update.view.dom.isConnected) update.view.dispatch({ effects: EditorView.scrollIntoView(pos, { y: 'center' }) }); });
@@ -476,7 +816,7 @@ import { EditorView } from '@codemirror/view';
 
 async function addDocument(record, focusEditor) {
   if (documents.has(record.id)) { activate(record.id, focusEditor); return; }
-  const doc = { ...record, savedContent: record.dirty ? '' : record.content };
+  const doc = { ...record, draftNumber: record.path ? 0 : ++draftNumber, savedContent: record.dirty ? '' : record.content };
   documents.set(doc.id, doc);
   const mount = document.createElement('div'); mount.className = 'editor-mount';
   doc.mount = mount;
@@ -491,11 +831,12 @@ async function addDocument(record, focusEditor) {
       updateChrome();
     }, 500);
     updateChrome();
+    refreshSearch();
     clearTimeout(doc.statsTimer); doc.statsTimer = setTimeout(() => { if (doc.id === activeId) { updateStats(); drawSidebar(); } }, 180);
-  }, selectionChanged, command => runCommand(command), file => insertImage(file, doc), href => navigateLink(href));
+  }, update => selectionChanged(doc, update), command => runCommand(command), file => insertImage(file, doc), href => navigateLink(href));
   doc.editor.setSpellcheck(prefs.spellcheck);
   doc.editor.view.scrollDOM.addEventListener('scroll', () => {
-    if (doc.id === activeId) updateScrollEdge(doc);
+    if (doc.id === activeId) { updateScrollEdge(doc); scheduleSelectionTools(); }
   }, { passive: true });
   activate(doc.id, focusEditor);
 }
@@ -519,7 +860,7 @@ function updateScrollEdge(doc, reset = false) {
  */
 async function openDocuments(records) {
   const list = (Array.isArray(records) ? records : [records]).filter(Boolean);
-  if (!list.length) return;
+  if (!list.length) return null;
   const welcome = welcomeId ? documents.get(welcomeId) : null;
   if (welcome && documents.size === 1 && !welcome.dirty && !welcome.path) {
     welcomeId = null;
@@ -527,6 +868,7 @@ async function openDocuments(records) {
   }
   for (const record of list) await addDocument(record);
   await adoptFolderFromMain();
+  return list.at(-1).id;
 }
 /**
  * A file opened while no workspace is open makes its own directory the file
@@ -551,15 +893,31 @@ function activate(id, focusEditor = current()?.mount?.contains(document.activeEl
   // An in-cell draft belongs to the outgoing document. Commit it before its
   // mount is detached; the background flush / autosave path never does this.
   if (activeId && activeId !== id) documents.get(activeId)?.editor?.commitActiveCell();
+  if (activeId !== id) {
+    hideSelectionTools();
+    dismissedSelection = null;
+    selectionComposing = false;
+  }
   activeId = id;
   const doc = current();
   const host = $('#editor-host');
-  if (doc.mount.parentNode !== host) host.replaceChildren(doc.mount);
+  const remounted = doc.mount.parentNode !== host;
+  if (remounted) host.replaceChildren(doc.mount);
   doc.editor.setSource(sourceMode);
   updateScrollEdge(doc, true);
   doc.editor.view.requestMeasure();
-  updateChrome(); updateStats(); drawSidebar(); saveSession();
-  if (focusEditor && !$('.main-pane').inert && !$('#dialog').open) doc.editor.view.focus();
+  updateChrome(); updateStats(); drawSidebar(); updateSelectionStatus(doc.editor.view.state); saveSession();
+  if (focusEditor) focusActiveEditor(id);
+  if (remounted && !sourceMode) {
+    renderDiagrams(doc.mount).then(() => {
+      if (current() === doc && doc.mount.isConnected) doc.editor.view.requestMeasure();
+    }).catch(() => {});
+  }
+  if (native && !cleanWelcome(doc)) loadWritingNotes(doc).catch(error => notify(error.message, true));
+}
+
+function focusActiveEditor(id) {
+  if (id === activeId && !$('.main-pane').inert && !$('#dialog').open) current()?.editor.view.focus();
 }
 /**
  * Mirror asset-reference rewrites made by the main process (a Save As into a
@@ -616,6 +974,8 @@ async function applySavedDocument(doc, saved) {
   doc.error = '';
   updateDirty(doc);
   if (doc.dirty) await flush(doc);
+  else await persistWritingAnchors(doc);
+  if (saved.warnings?.length) notify(saved.warnings.join('\n'), true);
   doc.editor.view.dispatch({ effects: [] });
   updateChrome();
   saveSession();
@@ -640,6 +1000,8 @@ async function saveNow(doc, saveAs, { commitCell = false } = {}) {
     // the live text before touching savedContent, otherwise the stale reference
     // would be flushed back into the store on the next save.
     await applySavedDocument(doc, saved);
+    await adoptFolderFromMain();
+    refreshSearch();
     if (folder) { folder = await api('refreshFolder'); drawSidebar(); }
   } finally { doc.saving = false; updateChrome(); }
 }
@@ -655,11 +1017,13 @@ async function closeDocumentNow(doc, createReplacement, includePath) {
   // close / quit loop, never from the background flush.
   doc.editor.commitActiveCell();
   await flush(doc);
-  const closed = await api('closeDocument', id, includePath);
+  const pending = [...(doc.pendingNoteAnchors?.values() || [])];
+  const closed = await api('closeDocument', id, true, pending);
   if (!closed) return false;
+  if (closed.warnings?.length) notify(closed.warnings.join('\n'), true);
   const wasActive = activeId === id;
   const wasEditing = doc.mount.contains(document.activeElement);
-  clearTimeout(doc.timer); clearTimeout(doc.statsTimer); doc.editor.destroy(); documents.delete(id);
+  clearTimeout(doc.timer); clearTimeout(doc.statsTimer); doc.editor.destroy(); documents.delete(id); refreshSearch();
   if (!wasActive) {
     updateChrome(); drawSidebar(); saveSession();
   } else if (documents.size) {
@@ -669,7 +1033,7 @@ async function closeDocumentNow(doc, createReplacement, includePath) {
     if (createReplacement) await addDocument(await api('newDocument', ''), wasEditing);
     else saveSession();
   }
-  return closed;
+  return includePath ? closed : true;
 }
 // External changes are shown one at a time: the queue keeps a second prompt
 // from silently replacing the first, and waits while another dialog is open.
@@ -811,10 +1175,13 @@ function applyPreferences() {
   }
   document.body.classList.toggle('heading-numbering', !!prefs.headingNumbering);
   document.body.classList.toggle('hide-formatbar', prefs.showFormatbar === false);
-  applyCustomTheme(prefs.theme).catch(error => notify(error.message, true));
   const themeKey = custom ? prefs.theme : theme;
-  if (lastThemeKey !== null && lastThemeKey !== themeKey) refreshDiagrams(document).catch(() => {});
-  lastThemeKey = themeKey;
+  const themeUpdate = applyCustomTheme(prefs.theme);
+  const request = customThemeSeq;
+  themeUpdate.then(() => {
+    if (request !== customThemeSeq) return;
+    return refreshDiagrams(document, themeKey);
+  }).catch(error => notify(error.message, true));
   for (const doc of documents.values()) doc.editor.setSpellcheck(prefs.spellcheck);
 }
 async function setPreferences(patch) { prefs = { ...prefs, ...patch }; applyPreferences(); await api('settings', patch); }
@@ -897,7 +1264,7 @@ const paletteCommands = () => [
   ['新建窗口', 'new-window', '文件', `${modKey}⇧N`],
   ['打开文档…', 'open', '文件', `${modKey}O`],
   ['打开文件夹…', 'folder', '文件', macDesktop() ? '' : `${modKey}⇧O`],
-  ['在文件夹中搜索…', 'folder-search', '文件', `${modKey}⇧F`],
+  ['搜索文档…', 'folder-search', '文件', `${modKey}⇧F`],
   ['最近打开的文件…', 'recent-files', '文件', ''],
   ['命令面板 / 快速打开…', 'quick-open', '文件', macDesktop() ? `${modKey}⇧O` : `${modKey}P`],
   ['保存', 'save', '文件', `${modKey}S`],
@@ -911,6 +1278,7 @@ const paletteCommands = () => [
   ['查找与替换', 'find', '编辑', `${modKey}F`],
   ['复制为 Markdown', 'copy-markdown', '编辑', `${modKey}⇧C`],
   ['复制为 HTML', 'copy-html', '编辑', ''],
+  ...(native ? [['复制选区为图片', 'copy-selection-image', '编辑', ''], ['留个续写提示', 'writing-note-add', '编辑', '']] : []),
   ['粘贴为纯文本', 'paste-plain', '编辑', `${modKey}⇧V`],
   ['清除格式', 'clear-format', '编辑', `${modKey}\\`],
   ['插入表格', 'table', '段落', `${modKey}T`],
@@ -1110,17 +1478,49 @@ async function deletePdfPreset() {
   } catch (error) { notify(error.message, true); }
 }
 
+function exportCSS() {
+  const chromeRule = /\.(?:code-copy|table-column-resizer)\b/;
+  return [...document.styleSheets].flatMap(sheet => { try { return [...sheet.cssRules].filter(rule => !chromeRule.test(rule.selectorText || '')).map(rule => rule.cssText); } catch { return []; } }).join('\n');
+}
+function pngRequest(name, target, css = exportCSS()) {
+  const width = Math.round((Number(prefs.lineWidth) || 860) + 96);
+  // A Typora theme paints its paper on #write/body, which the loader scopes
+  // to .prose. Use that computed paper for the capture background so the
+  // PNG margins match the themed document instead of the app chrome.
+  const pagePaper = getComputedStyle(target).backgroundColor;
+  const background = pagePaper && pagePaper !== 'rgba(0, 0, 0, 0)' && pagePaper !== 'transparent'
+    ? pagePaper
+    : (getComputedStyle(document.body).backgroundColor || '#ffffff');
+  return {
+    html: pngHTML(name, target.innerHTML, css, {
+      width, background,
+      theme: document.documentElement.dataset.theme || 'light',
+      ui: document.documentElement.dataset.ui || 'typora',
+      headingNumbering: !!prefs.headingNumbering
+    }),
+    width,
+    pixelRatio: window.devicePixelRatio || 1
+  };
+}
+
 async function exportDocument(format) {
   const doc = current(); if (!doc) return;
-  await flush(doc);
+  doc.editor.commitActiveCell();
+  const source = doc.content, name = displayName(doc);
   const pdfConfig = format === 'pdf' ? currentPdfExport() : null;
+  await flush(doc);
+  if (format === 'zip') {
+    const result = await api('exportDocument', doc.id, format);
+    if (result) notify(`已导出：${result}`, false, result);
+    return;
+  }
   // `chrome: false` drops the editor-only affordances (code copy buttons,
   // front-matter / alert decorations) so the serialized HTML and the printed
   // PDF carry the document body only.
   // Every language the document fences must be registered before the export is
   // serialised, otherwise a lazily loaded language would export unstyled.
-  await ensureLanguages(doc.content);
-  const target = $('#print-document'); target.innerHTML = renderMarkdown(doc.content, doc.id, { chrome: false, mathNumbering: !!prefs.mathNumbering });
+  await ensureLanguages(source);
+  const target = $('#print-document'); target.innerHTML = renderMarkdown(source, doc.id, { chrome: false, mathNumbering: !!prefs.mathNumbering });
   await renderDiagrams(target);
   await document.fonts.ready;
   await Promise.all([...target.querySelectorAll('img')].map(img => { img.loading = 'eager'; return img.decode().catch(() => {}); }));
@@ -1130,37 +1530,16 @@ async function exportDocument(format) {
     // Editor-only affordances have no meaning in a shared file: drop the copy
     // button and column-resize rules from the inlined stylesheet, so an export
     // carries neither the button nor a trace of it.
-    const chromeRule = /\.(?:code-copy|table-column-resizer)\b/;
-    const css = [...document.styleSheets].flatMap(sheet => { try { return [...sheet.cssRules].filter(rule => !chromeRule.test(rule.selectorText || '')).map(rule => rule.cssText); } catch { return []; } }).join('\n');
-    if (format === 'html') request = { html: styledHTML(doc.name, target.innerHTML, css) };
-    else {
-      const width = Math.round((Number(prefs.lineWidth) || 860) + 96);
-      // A Typora theme paints its paper on #write/body, which the loader scopes
-      // to .prose. Use that computed paper for the capture background so the
-      // PNG margins match the themed document instead of the app chrome.
-      const pagePaper = getComputedStyle(target).backgroundColor;
-      const background = pagePaper && pagePaper !== 'rgba(0, 0, 0, 0)' && pagePaper !== 'transparent'
-        ? pagePaper
-        : (getComputedStyle(document.body).backgroundColor || '#ffffff');
-      request = {
-        html: pngHTML(doc.name, target.innerHTML, css, {
-          width, background,
-          theme: document.documentElement.dataset.theme || 'light',
-          ui: document.documentElement.dataset.ui || 'typora',
-          headingNumbering: !!prefs.headingNumbering
-        }),
-        width,
-        pixelRatio: window.devicePixelRatio || 1
-      };
-    }
+    const css = exportCSS();
+    if (format === 'html') request = { html: styledHTML(name, target.innerHTML, css) };
+    else request = pngRequest(name, target, css);
   } else if (format === 'html-unstyled') {
-    request = { html: unstyledHTML(doc.name, target) };
+    request = { html: unstyledHTML(name, target) };
   } else if (format === 'pdf') {
-    const chromeRule = /\.(?:code-copy|table-column-resizer)\b/;
-    const css = [...document.styleSheets].flatMap(sheet => { try { return [...sheet.cssRules].filter(rule => !chromeRule.test(rule.selectorText || '')).map(rule => rule.cssText); } catch { return []; } }).join('\n');
+    const css = exportCSS();
     request = {
       pdf: pdfConfig,
-      html: printHTML(document.title, target.innerHTML, css, {
+      html: printHTML(name, target.innerHTML, css, {
         theme: document.documentElement.dataset.theme || 'light',
         ui: document.documentElement.dataset.ui || 'typora',
         headingNumbering: !!prefs.headingNumbering
@@ -1176,7 +1555,7 @@ async function exportDocument(format) {
     if (format === 'pdf') {
       try { const saved = await api('settings', { pdfExport: pdfConfig }); Object.assign(prefs, saved); } catch { /* the file is already saved */ }
     }
-    notify(`已导出：${result}`);
+    notify(`已导出：${result}`, false, result);
   }
 }
 async function runCommand(command, detail) {
@@ -1239,12 +1618,26 @@ async function runCommand(command, detail) {
     };
     if (simple[command]) { await simple[command](); return; }
     switch (command) {
+      case 'selection-link': await linkSelection(); break;
+      case 'copy-selection-image': await copySelectionImage(); break;
+      case 'writing-note-add': await addWritingNote(); break;
       case 'undo': editor?.undo(); break;
       case 'redo': editor?.redo(); break;
+      case 'welcome-new': {
+        const example = current();
+        const record = await api('newDocument', '');
+        if (cleanWelcome(example)) {
+          welcomeId = null;
+          await closeDocument(example.id, false);
+        }
+        await addDocument(record, true);
+        break;
+      }
       case 'new': await addDocument(await api('newDocument', ''), true); break;
       case 'new-window': await api('newWindow'); break;
+      case 'welcome-open':
       case 'open': await openDocuments(await api('openDocument')); break;
-      case 'folder': { const selected = await api('openFolder'); if (selected) { folder = selected; sideMode = 'files'; setSidebarVisible(true); drawSidebar(); } saveSession(); break; }
+      case 'folder': { const selected = await api('openFolder'); if (selected) { folder = selected; refreshSearch(); sideMode = 'files'; setSidebarVisible(true); drawSidebar(); } saveSession(); break; }
       case 'open-recent': {
         if (!detail?.path) break;
         await openDocuments(await api('openPath', detail.path));
@@ -1253,7 +1646,7 @@ async function runCommand(command, detail) {
       case 'open-recent-folder': {
         if (!detail?.path) break;
         const info = await api('openFolderPath', detail.path);
-        if (info) { folder = info; sideMode = 'files'; setSidebarVisible(true); drawSidebar(); saveSession(); }
+        if (info) { folder = info; refreshSearch(); sideMode = 'files'; setSidebarVisible(true); drawSidebar(); saveSession(); }
         break;
       }
       case 'refresh-recent': recentFiles = await api('recentFiles'); break;
@@ -1319,26 +1712,32 @@ async function runCommand(command, detail) {
         const external = ['docx', 'odt', 'epub', 'tex', 'rst'];
         // The browser preview only knows the browser's print dialog and a
         // download; it must not advertise PNG or the main-process PDF options.
-        const formats = native ? ['pdf', 'html', 'html-unstyled', 'png', ...external] : ['pdf', 'html'];
+        const formats = native ? ['pdf', 'png', 'html'] : ['pdf', 'html'];
         const descriptions = {
-          pdf: '带书签，可配置页眉页脚',
+          pdf: '适合打印或发送',
           html: '自包含样式与图片',
           'html-unstyled': '无样式 · 语义 HTML',
-          png: '整篇长图 · 离线捕获'
+          png: '整篇长图 · 离线捕获',
+          zip: 'Markdown 原稿与本地图片'
         };
-        const options = formats.map(format => {
+        const formatButton = format => {
           const needsPandoc = external.includes(format);
           const locked = needsPandoc && !capabilities.installed;
-          const label = format === 'html-unstyled' ? 'HTML' : format.toUpperCase();
+          const label = ({ html: '网页 · HTML', png: '长图 · PNG', 'html-unstyled': '无样式 HTML' })[format] || format.toUpperCase();
           const description = descriptions[format] || (!needsPandoc ? '直接导出' : locked ? '需要 Pandoc（未安装）' : 'Pandoc 可用');
           return `<button data-export="${format}" ${locked ? 'disabled aria-disabled="true"' : ''}><strong>${label}</strong><span>${description}</span></button>`;
-        }).join('');
+        };
+        const options = formats.map(formatButton).join('');
         const note = !native
           ? '浏览器预览只支持 HTML 与 PDF（使用系统打印对话框）。PNG、HTML（无样式）和 PDF 页眉页脚需要桌面版。'
           : capabilities.installed
             ? `已检测到 ${escapeHTML(capabilities.version || 'Pandoc')}，全部格式可用。`
             : '未检测到 Pandoc。DOCX / ODT / EPUB / LaTeX / RST 需要安装 Pandoc（macOS 可执行 <code>brew install pandoc</code>，或访问 pandoc.org/installing.html），安装后重启墨页即可解锁。HTML、HTML（无样式）、PNG 与 PDF 始终可用，HTML / TXT / Markdown 也可直接导入。';
-        showDialog('导出文档', `<p class="dialog-description">选择要分享的文档格式。</p><div class="export-options">${options}</div>${native ? pdfExportOptionsHTML(pdfExportConfig()) : ''}<p class="dialog-description">${note}</p>`);
+        const advanced = native ? `<details class="export-details" id="pdf-settings"><summary>PDF 设置</summary>${pdfExportOptionsHTML(pdfExportConfig())}</details>
+          <details class="export-details" id="more-export-formats"><summary>更多格式</summary>
+          <div class="export-options">${['html-unstyled', 'zip', ...external].map(formatButton).join('')}</div><p class="dialog-description">${note}</p></details>`
+          : `<p class="dialog-description">${note}</p>`;
+        showDialog('导出文档', `<div class="export-options">${options}</div>${advanced}`);
         break;
       }
       case 'settings': {
@@ -1599,6 +1998,11 @@ document.addEventListener('click', async event => {
     if (busy) return; busy = true; exported.disabled = true; exported.setAttribute('aria-busy', 'true');
     try { await exportDocument(exported.dataset.export); $('#dialog').close(); } catch (error) { notify(error.message, true); } finally { busy = false; exported.disabled = false; exported.removeAttribute('aria-busy'); } return;
   }
+  const writingNote = target?.closest?.('[data-writing-note-action]');
+  if (writingNote) {
+    try { await writingNoteAction(writingNote); } catch (error) { notify(error.message, true); }
+    return;
+  }
   const side = target?.closest?.('[data-side]'); if (side) { sideMode = side.dataset.side; drawSidebar(); return; }
   const close = target?.closest?.('[data-close]');
   if (close) {
@@ -1623,7 +2027,17 @@ document.addEventListener('click', async event => {
   const searchHit = target?.closest?.('[data-search-hit]'); if (searchHit) { dismissCompactSidebar(); await openSearchHit(searchHit); return; }
   const fileOp = target?.closest?.('[data-file-op]');
   if (fileOp) { await runFileOperation(fileOp.dataset.fileOp, null, true); return; }
-  const file = target?.closest?.('[data-path]'); if (file) { try { await openDocuments(await api('openDocument', file.dataset.path)); dismissCompactSidebar(); } catch (error) { notify(error.message, true); } return; }
+  const file = target?.closest?.('[data-path]');
+  if (file) {
+    try {
+      const openedId = await openDocuments(await api('openDocument', file.dataset.path));
+      if (openedId && openedId === activeId) {
+        dismissCompactSidebar();
+        focusActiveEditor(openedId);
+      }
+    } catch (error) { notify(error.message, true); }
+    return;
+  }
   const line = target?.closest?.('[data-line]'); if (line) { event.preventDefault(); dismissCompactSidebar(); current()?.editor.jump(Number(line.dataset.line)); return; }
 });
 document.addEventListener('submit', async event => {
@@ -1909,13 +2323,14 @@ try {
     ? [...documents.values()].find(doc => doc.path === initial.session.activePath)
     : null;
   if (sessionActive) activate(sessionActive.id);
-  if (!documents.size) { const doc = await api('newDocument', welcome, '欢迎使用.md'); await addDocument(doc); welcomeId = doc.id; }
+  if (!documents.size) { const doc = await api('newDocument', welcome, '欢迎使用.md'); welcomeId = doc.id; await addDocument(doc); }
   drawSidebar();
   recentFiles = await api('recentFiles').catch(() => []);
   // Another program creating / renaming / deleting a file refreshes the tree.
   bridge.onFolderChanged?.(info => {
     if (!info || !folder || info.path !== folder.path) return;
     folder = info;
+    refreshSearch();
     if (sideMode === 'files') drawSidebar();
   });
   if (initial.recoveryCount) notify(`已恢复 ${initial.recoveryCount} 篇未保存文档，请检查并另存为。`);

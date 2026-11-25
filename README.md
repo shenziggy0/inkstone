@@ -82,7 +82,7 @@ macOS 使用临时签名（`mac.identity` 为 `"-"`，关闭 Hardened Runtime，
 
 Windows 安装包保持可选目录（`oneClick: false`，`allowToChangeInstallationDirectory: true`），并带上 `.md` / `.markdown` 文件关联。安装程序的许可页显示 `docs/install/windows-license.html`（与 `docs/install/Windows安装说明.txt` 同一份说明）。若弹出 SmartScreen，选择“更多信息”→“仍要运行”。新版本装到原目录会就地升级。
 
-应用图标使用 `build/icon.png`（1024×1024，白底黑字 `IN`）。electron-builder 会据此生成各平台图标。
+墨页的图标是一张折角白纸，下端收成钢笔笔尖，放在靛蓝色的圆角底板上。electron-builder 使用 `build/icon.png`（1024×1024）生成各平台图标。
 
 也可以在 GitHub Actions 里手动打包。打包用的版本号来自 git tag，不需要为了出包去改 `package.json`。工作流只在运行器上把该版本写进 `package.json` 和 `package-lock.json`，不会提交或推送。
 

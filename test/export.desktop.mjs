@@ -81,7 +81,11 @@ const sampleLines = [
   '',
   '![普通相对图](./plain.png)',
   '',
-  '![网站根图](/rooted.png)',
+  '起始未选 首段已选',
+  '',
+  '![网站根图][root-photo]',
+  '',
+  '尾段已选 结束未选',
   '',
   '[^one]: 脚注完整性哨兵。',
   '',
@@ -92,6 +96,8 @@ const sampleLines = [
   '末页哨兵 LAST-INKSTONE-PAGE。',
   '',
   '![末端校验图](/end.png)',
+  '',
+  '[root-photo]: /rooted.png',
   ''
 ];
 const sample = path.join(work, 'sample.md');
@@ -132,10 +138,13 @@ try {
   const stubCancel = () => app.evaluate(({ dialog }) => {
     dialog.showSaveDialog = async () => ({ canceled: true, filePath: undefined });
   });
-  const openExport = async () => {
+  const openExport = async (details) => {
     await page.locator('[data-command="export"]').click();
     await page.locator('#dialog[open]').waitFor();
     await page.locator('[data-export="pdf"]').waitFor();
+    assert.equal(await page.locator('#pdf-settings').getAttribute('open'), null, 'PDF 设置默认收起');
+    assert.equal(await page.locator('#more-export-formats').getAttribute('open'), null, '更多格式默认收起');
+    if (details) await page.locator(`${details} > summary`).click();
   };
   const closeDialog = async () => {
     if (await page.locator('#dialog[open]').count()) await page.locator('#dialog [data-dismiss]').first().click();
@@ -144,7 +153,7 @@ try {
   const waitExportClosed = () => page.waitForFunction(() => !document.querySelector('#dialog').open, null, { timeout: 120000 });
   const exportTo = async (format, target) => {
     await stubSave(target);
-    await openExport();
+    await openExport(format === 'html-unstyled' ? '#more-export-formats' : undefined);
     await page.locator(`[data-export="${format}"]`).click();
     await waitExportClosed();
     await waitFile(target);
@@ -257,7 +266,7 @@ try {
   console.log(`STEP default PDF: ${pages} pages, A4, outline, images, links, last-page sentinel`);
 
   // ── Custom PDF options + reusable preset ──────────────────────────────
-  await openExport();
+  await openExport('#pdf-settings');
   await page.locator('#pdf-header').fill('INKSTONE-HEADER');
   await page.locator('#pdf-footer').fill('第 ${pageNo} 页 / ${pageCount} 页');
   await page.locator('#pdf-page-size').selectOption('Letter');
@@ -275,7 +284,7 @@ try {
   await closeDialog();
   const customPdf = path.join(out, 'custom.pdf');
   await stubSave(customPdf);
-  await openExport();
+  await openExport('#pdf-settings');
   await page.locator('#pdf-preset-select').selectOption({ label: '窄页脚' });
   await page.locator('[data-export="pdf"]').click();
   await waitExportClosed();
@@ -301,7 +310,7 @@ try {
   console.log(`STEP custom PDF: Letter, narrow margins, running header/footer, ${customPages} pages, preset persisted`);
 
   // Reopening the dialog restores the named preset without changing it.
-  await openExport();
+  await openExport('#pdf-settings');
   await page.locator('#pdf-preset-select').selectOption({ label: '窄页脚' });
   assert.equal(await page.locator('#pdf-header').inputValue(), 'INKSTONE-HEADER');
   assert.equal(await page.locator('#pdf-page-size').inputValue(), 'Letter');
@@ -358,9 +367,51 @@ try {
   assert.ok(!printState.text.includes('文档属性'));
   assert.match(printState.text, /警示块正文/);
 
+  // ── Selected paragraphs + a rooted reference image on the system clipboard
+  await page.locator('#notification').getByRole('button', { name: '关闭', exact: true }).click();
+  await page.locator('#editor-host .cm-content').evaluate(editor => {
+    const view = editor.cmTile.root.view;
+    const text = view.state.doc.toString();
+    const from = text.indexOf('首段已选');
+    const tail = '尾段已选';
+    const to = text.indexOf(tail, from) + tail.length;
+    view.dispatch({ selection: { anchor: from, head: to }, scrollIntoView: true });
+    view.focus();
+  });
+  await page.locator('#selection-tools [data-command="copy-selection-image"]').click();
+  await page.waitForFunction(() => {
+    const notification = document.querySelector('#notification');
+    return !notification.hidden && (notification.classList.contains('error') || notification.textContent.includes('选区已复制为图片'));
+  });
+  assert.match(await page.locator('#notification').textContent(), /选区已复制为图片/);
+  const clipboardImage = await app.evaluate(async ({ clipboard, nativeImage }, filenames) => {
+    const item = (await clipboard.read()).find(entry => entry.types.includes('image/png'));
+    if (!item) return { width: 0, height: 0, counts: [] };
+    const png = await item.getType('image/png');
+    const image = nativeImage.createFromBuffer(Buffer.from(await png.arrayBuffer()));
+    const bitmap = image.toBitmap();
+    const colors = filenames.map(file => nativeImage.createFromPath(file).toBitmap().subarray(0, 3));
+    const counts = colors.map(color => {
+      let matching = 0;
+      for (let offset = 0; offset < bitmap.length; offset += 4) {
+        // The operating system may convert to the display color profile when
+        // passing the clipboard image between applications.
+        if (Math.abs(bitmap[offset] - color[0]) <= 24
+          && Math.abs(bitmap[offset + 1] - color[1]) <= 24
+          && Math.abs(bitmap[offset + 2] - color[2]) <= 24) matching++;
+      }
+      return matching;
+    });
+    return { ...image.getSize(), counts };
+  }, [path.join(work, 'media-root/rooted.png'), path.join(work, 'plain.png'), path.join(work, 'media-root/end.png')]);
+  assert.ok(clipboardImage.height > 0 && clipboardImage.height < 500 * pixelRatio, `选区图应贴合小节高度：${clipboardImage.height}`);
+  assert.ok(clipboardImage.counts[0] > 200, `选区图片必须包含引用式本地图像素：${clipboardImage.counts}`);
+  assert.ok(clipboardImage.counts.slice(1).every(count => count < 200), `选区之外的图片不得出现：${clipboardImage.counts}`);
+  console.log('STEP selection PNG: real clipboard with rooted reference image, adjacent images omitted');
+
   // ── Explicit limit failure: no file and no window ─────────────────────
   await app.evaluate(({ dialog }, filePath) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [filePath] }); }, longDocument);
-  await page.locator('[data-command="open"]').click();
+  await page.getByRole('button', { name: '打开文档', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('#location').textContent.includes('long.md'));
   await page.waitForFunction(() => document.querySelector('.cm-content').textContent.includes('用于验证 PNG 尺寸上限的段落'));
   const oversized = path.join(out, 'oversized.png');
@@ -383,7 +434,7 @@ try {
   const beforeCancel = await readSettings();
   const cancelTarget = path.join(out, 'cancelled.pdf');
   await stubCancel();
-  await openExport();
+  await openExport('#pdf-settings');
   await page.locator('#pdf-header').fill('CANCELLED-HEADER');
   await page.locator('#pdf-footer').fill('CANCELLED-FOOTER');
   await page.locator('[data-export="pdf"]').click();
@@ -399,7 +450,7 @@ try {
 
   // ── Unstyled HTML keeps a diagram's own SVG presentation ───────────────
   await app.evaluate(({ dialog }, filePath) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [filePath] }); }, mermaidDocument);
-  await page.locator('[data-command="open"]').click();
+  await page.getByRole('button', { name: '打开文档', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('#location').textContent.includes('mermaid.md'));
   await page.waitForFunction(() => document.querySelectorAll('#editor-host .md-widget svg').length >= 1);
   const mermaidPlainPath = path.join(out, 'mermaid-plain.html');
@@ -430,7 +481,7 @@ try {
   console.log('STEP desktop export dialog exposes native-only formats; browser preview keeps HTML/PDF by branch');
 
   assert.deepEqual(errors, []);
-  console.log('PASS: HTML (with/without styles), default PDF, custom PDF header/footer/page numbers/paper/margins/preset, whole-document PNG, size-limit failure, cancel safety, no hidden windows.');
+  console.log('PASS: HTML (with/without styles), default and custom PDFs, whole-document PNG, selected PNG to clipboard, size-limit failure, cancel safety, no hidden windows.');
 } finally {
   if (page && process.env.INKSTONE_SCREENSHOT) await page.screenshot({ path: process.env.INKSTONE_SCREENSHOT }).catch(() => {});
   const closed = app.waitForEvent('close').catch(() => {});

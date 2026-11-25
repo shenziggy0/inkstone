@@ -20,7 +20,6 @@ import outline from 'lucide-static/icons/list-tree.svg?raw';
 import articles from 'lucide-static/icons/library-big.svg?raw';
 import help from 'lucide-static/icons/book-open.svg?raw';
 import out from 'lucide-static/icons/arrow-up-right.svg?raw';
-import pen from 'lucide-static/icons/feather.svg?raw';
 import compose from 'lucide-static/icons/square-pen.svg?raw';
 import command from 'lucide-static/icons/command.svg?raw';
 import h1 from 'lucide-static/icons/heading-1.svg?raw';
@@ -41,7 +40,7 @@ import chevron from 'lucide-static/icons/chevron-right.svg?raw';
 
 const icons = {
   panel, file, folder, open, plus, search, code, arrow, settings, moon, save, focus, close,
-  more, image, filePlus, folderPlus, refresh, outline, articles, help, out, pen, compose,
+  more, image, filePlus, folderPlus, refresh, outline, articles, help, out, compose,
   command, h1, h2, bold, italic, strike, link, table, braces, math, diagram, sun, theme,
   appearance, type, chevron
 };

@@ -1,3 +1,4 @@
+import { parseFragment } from 'parse5';
 import { createMarkdownParser } from './markdown-parser.mjs';
 
 const parser = createMarkdownParser();
@@ -54,14 +55,26 @@ wrapRule(parser.inline.ruler, 'image', original => (state, silent) => {
   const matched = original(state, silent);
   if (!matched || silent) return matched;
   const token = state.tokens.at(-1);
-  if (token.meta?.label) return matched;
   const helpers = state.md.helpers;
   const afterLabel = helpers.parseLinkLabel(state, start + 1, false) + 1;
+  if (token.meta?.label) {
+    if (state.env.allAssetReferences) token.meta.assetRange = [afterLabel, state.pos];
+    return matched;
+  }
   let from = afterLabel + 1;
   while (from < state.pos && /[ \t\n]/.test(state.src[from])) from++;
   const parsed = helpers.parseLinkDestination(state.src, from, state.pos);
   if (parsed.ok && token.attrGet('src')) {
     token.meta = { assetRange: destinationRange(state.src, from, parsed.pos) };
+  }
+  return matched;
+});
+
+wrapRule(parser.inline.ruler, 'html_inline', original => (state, silent) => {
+  const start = state.pos;
+  const matched = original(state, silent);
+  if (matched && !silent && state.env.allAssetReferences) {
+    state.tokens.at(-1).meta = { htmlStart: start };
   }
   return matched;
 });
@@ -75,6 +88,7 @@ wrapRule(parser.inline.ruler, 'footnote_inline', original => (state, silent) => 
     const { id } = state.tokens.at(-1).meta;
     for (const token of state.env.footnotes.list[id].tokens) {
       if (token.meta?.assetRange) token.meta.assetRange = token.meta.assetRange.map(offset => start + offset);
+      if (token.meta?.htmlStart !== undefined) token.meta.htmlStart += start;
     }
   }
   return matched;
@@ -95,7 +109,8 @@ parser.core.ruler.before('footnote_tail', 'inkstone_asset_positions', state => {
       rowCursor = 0;
     }
     if (token.type === 'tr_close') row = null;
-    if (token.type !== 'inline') continue;
+    const htmlBlock = token.type === 'html_block' && state.env.allAssetReferences;
+    if (token.type !== 'inline' && !htmlBlock) continue;
     const map = token.map ?? row;
     if (!map) continue;
     const mapped = [];
@@ -116,20 +131,65 @@ parser.core.ruler.before('footnote_tail', 'inkstone_asset_positions', state => {
       }
       offset += line.length + 1;
     }
-    const mapImage = image => {
-      const range = image.meta?.assetRange;
-      if (!range) return;
-      const line = mapped.find(({ inlineStart, length }) => range[0] >= inlineStart && range[1] <= inlineStart + length);
-      if (line) image.meta.documentRange = range.map(position => line.sourceOffset(position - line.inlineStart));
+    const mapRange = range => {
+      const offsets = range.map(position => {
+        const line = mapped.find(({ inlineStart, length }) => position >= inlineStart && position <= inlineStart + length);
+        return line?.sourceOffset(position - line.inlineStart);
+      });
+      if (offsets.every(Number.isInteger)) return offsets;
     };
-    for (const child of token.children) {
-      if (child.type === 'image') mapImage(child);
-      if (child.type === 'footnote_ref') {
-        for (const image of state.env.footnotes?.list?.[child.meta.id]?.tokens || []) mapImage(image);
-      }
+    if (htmlBlock) {
+      token.meta = { ...token.meta, htmlImages: htmlImageReferences(token.content, mapRange) };
+      continue;
     }
+    const htmlImages = [];
+    const mapChildren = children => {
+      for (const child of children) {
+        const range = child.meta?.assetRange;
+        if (child.type === 'image' && range) child.meta.documentRange = mapRange(range);
+        if (child.type === 'footnote_ref') mapChildren(state.env.footnotes?.list?.[child.meta.id]?.tokens || []);
+      }
+      if (!state.env.allAssetReferences) return;
+      const htmlTokens = children.filter(child => child.meta?.htmlStart !== undefined);
+      if (!htmlTokens.some(child => /<img\b/i.test(child.content))) return;
+      // Preserve source offsets while parsing tags together. This keeps inert
+      // markup within comments, templates and other raw-text elements inert.
+      let previousEnd = 0;
+      const html = htmlTokens.map(child => {
+        const start = child.meta.htmlStart;
+        const part = ' '.repeat(Math.max(0, start - previousEnd)) + child.content;
+        previousEnd = start + child.content.length;
+        return part;
+      }).join('');
+      for (const image of htmlImageReferences(html, mapRange)) htmlImages.push(image);
+    };
+    mapChildren(token.children);
+    if (htmlImages.length) token.meta = { ...token.meta, htmlImages };
   }
 });
+
+function htmlImageReferences(html, mapRange) {
+  if (!/<img\b/i.test(html)) return [];
+  const images = [];
+  const nodes = [parseFragment(html, { sourceCodeLocationInfo: true })];
+  while (nodes.length) {
+    const node = nodes.pop();
+    const children = node.childNodes || [];
+    for (let index = children.length - 1; index >= 0; index--) nodes.push(children[index]);
+    if (node.tagName !== 'img' || node.namespaceURI !== 'http://www.w3.org/1999/xhtml') continue;
+    const src = node.attrs.find(attribute => attribute.name === 'src')?.value;
+    const location = node.sourceCodeLocation?.attrs?.src;
+    if (!src || !location) continue;
+    const { startOffset, endOffset } = location;
+    const attribute = html.slice(startOffset, endOffset);
+    const valueStart = /^src[\t\n\f\r ]*=[\t\n\f\r ]*/i.exec(attribute)?.[0].length;
+    if (valueStart === undefined) continue;
+    const quoted = attribute[valueStart] === '"' || attribute[valueStart] === "'";
+    const range = mapRange([startOffset + valueStart + Number(quoted), endOffset - Number(quoted)]);
+    images.push({ src, range });
+  }
+  return images;
+}
 
 function assetName(src) {
   const match = /^(?:\.\/)?assets\/(.*)$/.exec(src || '');
@@ -141,7 +201,7 @@ function assetName(src) {
   return name;
 }
 
-export function collectAssetReferences(content) {
+export function collectAssetReferences(content, { all = false } = {}) {
   // Use Markdown-it's LF coordinate space, then map back to the exact input
   // so the original BOM and all line endings survive edits.
   const start = content.startsWith('\uFEFF') ? 1 : 0;
@@ -159,33 +219,60 @@ export function collectAssetReferences(content) {
     }
     return start + position + low;
   };
-  const env = { assetDefinitions: new Map() };
+  const env = { assetDefinitions: new Map(), allAssetReferences: all };
+  const tokens = parser.parse(source, env);
+  const linkLabels = new Set();
+  if (all) {
+    for (const token of tokens) {
+      for (const link of token.children || []) {
+        if (link.type === 'link_open' && link.meta?.label) linkLabels.add(link.meta.label);
+      }
+    }
+  }
   const references = new Map();
-  for (const token of parser.parse(source, env)) {
+  const addReference = (src, name, range, extra = {}) => {
+    const from = range ? toOriginal(range[0]) : null;
+    const to = range ? toOriginal(range[1]) : null;
+    references.set(range ? from : Symbol(), { name, src, from, to, raw: range ? content.slice(from, to) : src, ...extra });
+  };
+  for (const token of tokens) {
     for (const image of token.children || []) {
       if (image.type !== 'image') continue;
       const src = image.attrGet('src');
       const name = assetName(src);
-      if (!name) continue;
-      const range = image.meta?.label ? env.assetDefinitions.get(image.meta.label) : image.meta?.documentRange;
-      const from = range ? toOriginal(range[0]) : null;
-      const to = range ? toOriginal(range[1]) : null;
-      references.set(range ? from : Symbol(), { name, src, from, to, raw: range ? content.slice(from, to) : src });
+      if (!src || (!all && !name)) continue;
+      const label = image.meta?.label;
+      // A definition may also serve an ordinary link. Update just the image's
+      // reference suffix in that case so the link still uses the original URL.
+      if (linkLabels.has(label)) {
+        addReference(src, name, image.meta?.documentRange, { inlineImageTitle: image.attrGet('title') || '' });
+      } else {
+        addReference(src, name, label ? env.assetDefinitions.get(label) : image.meta?.documentRange);
+      }
     }
+    for (const image of token.meta?.htmlImages || []) addReference(image.src, null, image.range);
   }
-  return [...references.values()];
+  const result = [...references.values()];
+  return all ? result.sort((a, b) => (a.from ?? Infinity) - (b.from ?? Infinity)) : result;
 }
 
 export function rewriteAssetReferences(content, renamed, references) {
   if (!renamed.length) return content;
   references ??= collectAssetReferences(content);
   const replacements = new Map(renamed.map(({ from, to }) => [from, to]));
-  const edits = references.filter(ref => ref.from !== null && (replacements.has(ref.raw) || replacements.has(ref.src)));
+  const edits = references.flatMap(ref => {
+    const insert = replacements.get(ref.raw) ?? replacements.get(ref.src);
+    return ref.from === null || insert === undefined ? [] : [{ ...ref, insert }];
+  });
+  return applyReferenceEdits(content, edits);
+}
+
+export function applyReferenceEdits(content, edits) {
   if (!edits.length) return content;
   const parts = [];
   let cursor = 0;
   for (const ref of edits.sort((a, b) => a.from - b.from)) {
-    parts.push(content.slice(cursor, ref.from), replacements.get(ref.raw) ?? replacements.get(ref.src));
+    parts.push(content.slice(cursor, ref.from), ref.insert);
     cursor = ref.to;
   }
   return parts.join('') + content.slice(cursor);

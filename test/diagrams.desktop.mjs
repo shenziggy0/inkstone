@@ -23,6 +23,7 @@ const run = promisify(execFile);
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'inkstone-diagrams-desktop-'));
 const project = path.resolve(import.meta.dirname, '..');
 const samplePath = path.join(root, 'diagram-sample.md');
+const otherPath = path.join(root, 'plain.md');
 
 const SAMPLE = [
   '# 图表围栏验收',
@@ -77,16 +78,21 @@ const SAMPLE = [
   ''
 ].join('\n');
 await fs.writeFile(samplePath, SAMPLE);
+await fs.writeFile(otherPath, '# 另一篇稿件\n');
 
 const env = { ...process.env, INKSTONE_TEST_USER_DATA: path.join(root, 'profile') };
 delete env.ELECTRON_RUN_AS_NODE;
-const app = await electron.launch({ args: [project, samplePath, '--no-sandbox', '--disable-gpu'], env });
+const app = await electron.launch({ args: [project, samplePath, otherPath, '--no-sandbox', '--disable-gpu'], env });
 const errors = [];
 try {
   const page = await app.firstWindow();
   page.setDefaultTimeout(30000);
   page.on('pageerror', error => errors.push(error.message));
   await page.locator('.cm-content').waitFor();
+  const nextDocument = () => app.evaluate(({ BrowserWindow }) =>
+    BrowserWindow.getAllWindows()[0].webContents.send('inkstone:command', 'next-document'));
+  await page.waitForFunction(() => document.querySelector('#location').textContent === 'plain.md');
+  await nextDocument();
   await page.waitForFunction(() => document.querySelector('#location').textContent.includes('diagram-sample.md'));
 
   // ── reading view ────────────────────────────────────────────────────────
@@ -96,7 +102,47 @@ try {
       pre.some(node => node.dataset.diagram === 'flow' && node.dataset.processed === 'true' && node.querySelector('svg')) &&
       pre.filter(node => node.dataset.processed === 'error').length === 2 &&
       !!document.querySelector('.md-widget pre.mermaid svg');
-  });
+  }, null, { timeout: 5000 });
+  await page.locator('[data-command="settings"]').click();
+  await page.locator('#preferences select[name="theme"]').selectOption('system');
+  await page.locator('#preferences button[type="submit"]').click();
+  await page.emulateMedia({ colorScheme: null });
+  const systemTheme = mode => app.evaluate(({ nativeTheme }, value) => { nativeTheme.themeSource = value; }, mode);
+  await systemTheme('light');
+  await page.waitForFunction(() => document.documentElement.dataset.theme === 'light');
+  const diagramColorsMatch = () => {
+    const sequence = document.querySelector('.md-widget pre[data-diagram="sequence"] svg');
+    const flow = document.querySelector('.md-widget pre[data-diagram="flow"] svg');
+    const mermaid = document.querySelector('.md-widget pre.mermaid svg');
+    const ink = getComputedStyle(document.body).color;
+    const hasCurrentStroke = svg => svg && [...svg.querySelectorAll('path[stroke]')].some(node => getComputedStyle(node).stroke === ink);
+    return hasCurrentStroke(sequence) && hasCurrentStroke(flow) && !!mermaid;
+  };
+  await page.waitForFunction(diagramColorsMatch, null, { timeout: 5000 });
+  const mermaidId = () => page.locator('.md-widget pre.mermaid svg').getAttribute('id');
+  const lightMermaidId = await mermaidId();
+  await nextDocument();
+  await page.waitForFunction(() => document.querySelector('#location').textContent === 'plain.md');
+  await systemTheme('dark');
+  await page.waitForFunction(() => document.documentElement.dataset.theme === 'dark');
+  await nextDocument();
+  await page.waitForFunction(diagramColorsMatch, null, { timeout: 5000 });
+  await page.waitForFunction(oldId => {
+    const svg = document.querySelector('.md-widget pre.mermaid svg');
+    return svg && svg.id !== oldId;
+  }, lightMermaidId, { timeout: 5000 });
+  const darkMermaidId = await mermaidId();
+  await nextDocument();
+  await page.waitForFunction(() => document.querySelector('#location').textContent === 'plain.md');
+  await nextDocument();
+  await page.waitForFunction(diagramColorsMatch, null, { timeout: 5000 });
+  assert.equal(await mermaidId(), darkMermaidId, '主题相同的换稿应复用已绘制的 Mermaid SVG');
+  console.log('STEP 批量打开后的后台文稿补绘三类图表，系统变暗后切回更新配色，同主题切回复用 SVG');
+
+  await systemTheme('light');
+  await page.waitForFunction(() => document.documentElement.dataset.theme === 'light');
+  await page.waitForFunction(diagramColorsMatch, null, { timeout: 5000 });
+
   const reading = await page.evaluate(() => {
     const blocks = [...document.querySelectorAll('.md-widget pre.diagram')];
     const text = node => [...node.querySelectorAll('svg text')].map(item => item.textContent);

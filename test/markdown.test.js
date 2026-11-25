@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { headingForAnchor } from '../src/links.js';
-import { parser, headings, statistics } from '../src/markdown.js';
+import * as markdown from '../src/markdown.js';
+
+const { parser, headings, statistics } = markdown;
 
 // Mirror renderBlocks(): parse the whole document once, then render against
 // the same env. This is exactly what makes cross-block features work.
@@ -37,6 +39,66 @@ test('one parse env resolves reference links and footnotes across blocks', () =>
   assert.match(html, /<a href="https:\/\/example.com\/ref">链接<\/a>/);
   assert.match(html, /class="footnote-ref"/);
   assert.match(html, /脚注内容/);
+});
+
+function renderSelection(source, first, last = first) {
+  const lf = source.replace(/\r\n/g, '\n');
+  const from = lf.indexOf(first);
+  const to = lf.indexOf(last, from) + last.length;
+  const plan = markdown.prepareSelectedMarkdown(source, { from, to });
+  return { html: parser.renderer.render(plan.tokens, parser.options, plan.env), imageRoot: plan.imageRoot };
+}
+
+test('selection clips both paragraph endpoints and retains image definitions and root', () => {
+  const source = '\uFEFF---\r\ntypora-root-url: media\r\n---\r\n\r\n# 未选标题\r\n\r\n前缀 首段 **加粗**\r\n\r\n![实拍照片][photo]\r\n\r\n尾段 后缀\r\n\r\n[photo]: /photo.png\r\n';
+  const { html, imageRoot } = renderSelection(source, '首段', '尾段');
+  assert.match(html, /^<p>首段 <strong>加粗<\/strong><\/p>\n<p><img src="\/photo\.png" alt="实拍照片"><\/p>\n<p>尾段<\/p>\n$/);
+  assert.equal(imageRoot, 'media');
+});
+
+test('selection keeps a partly selected image and diagram as complete objects', () => {
+  const source = '不应复制 ![照片][p] 末尾\n\n[p]: photo.png\n\n```sequence\n甲->乙: 开始\n乙-->甲: 完成\n```\n';
+  const image = renderSelection(source, '照片').html;
+  assert.match(image, /^<p><img src="photo\.png" alt="照片"><\/p>\n$/);
+  const diagram = renderSelection(source, '开始').html;
+  assert.match(diagram, /^<pre class="diagram" data-diagram="sequence">甲-&gt;乙: 开始\n乙--&gt;甲: 完成\n<\/pre>\n?$/);
+});
+
+test('selection preserves paragraph layout inside an ordered list and excludes siblings', () => {
+  const source = '3. 前一项\n4. 前缀 保留 **格式**\n5. 后一项\n';
+  const { html } = renderSelection(source, '保留', '**格式**');
+  assert.match(html, /^<ol start="4">\n<li>保留 <strong>格式<\/strong><\/li>\n<\/ol>\n$/);
+});
+
+test('selection keeps inline formatting where the first and last words cut through formatting', () => {
+  const source = '前文 **前缀 重点** 接着 *结尾 后缀* 后文';
+  const { html } = renderSelection(source, '重点', '结尾');
+  assert.equal(html, '<p><strong>重点</strong> 接着 <em>结尾</em></p>\n');
+});
+
+test('selection cuts ordinary multiline code at the requested offsets', () => {
+  const source = '```text\n撤掉 首行\n次行 撤掉\n```';
+  const { html } = renderSelection(source, '首行', '次行');
+  assert.match(html, /<code class="hljs">首行\n次行<\/code>/);
+  assert.doesNotMatch(html, /撤掉/);
+});
+
+test('selection preserves literal Markdown syntax inside inline code', () => {
+  const literal = '![字面](./photo.png)';
+  const source = `前文 \`前缀 ${literal} 后缀\` 末尾`;
+  const { html } = renderSelection(source, literal);
+  assert.equal(html, `<p><code>${literal}</code></p>\n`);
+});
+
+test('selection can copy part of a named footnote definition in the source', () => {
+  const source = '正文[^picked] 和 [^other]\n\n[^picked]: 前缀 定义 ![图](p.png) 尾段 后缀\n\n[^other]: 未选的脚注\n';
+  const { html } = renderSelection(source, '定义', '尾段');
+  assert.match(html, /<p>定义 <img src="p\.png" alt="图"> 尾段<\/p>/);
+  assert.doesNotMatch(html, /前缀|后缀|未选的脚注|footnote-backref/);
+});
+
+test('empty selection cannot fall back to the whole document', () => {
+  assert.equal(markdown.renderSelectedMarkdown('完整内容', 'doc', { from: 2, to: 2 }), '');
 });
 
 test('duplicate headings receive numbered ids from a shared slug counter', () => {
@@ -103,4 +165,11 @@ test('Typora parity: soft line breaks render as <br> and CJK punctuation flanks 
   for (const [source, expected] of cjkCases) {
     assert.match(render(source).html, expected, source);
   }
+});
+
+test('draft names use visible prose rather than front matter, source examples or lone images', async () => {
+  const { draftTitleFromSource } = await import('../src/markdown.js');
+  assert.equal(draftTitleFromSource('---\ntitle: 内部元数据\n---\n\n![图片](assets/a.png)\n\n```md\n# 示例\n```\n\n先写 **海边故事**\n接下来是下一行'), '先写 海边故事');
+  assert.equal(draftTitleFromSource('一行正文\n\n# **行李清单**\n'), '行李清单');
+  assert.equal(draftTitleFromSource('![图片](assets/a.png)'), '');
 });
