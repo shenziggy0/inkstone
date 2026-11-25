@@ -35,6 +35,7 @@ try {
   };
   await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setContentSize(1000, 650));
   await page.waitForFunction(() => document.querySelector('#location')?.textContent === '山间手记.md');
+  assert.equal(await page.evaluate(async () => (await window.desktop.settings()).value.theme), 'system');
   await page.waitForFunction(() => document.querySelector('.cm-content img[alt="正文配图"]')?.naturalWidth === 256);
   await page.locator('.topbar [data-command="source"]').click();
   await page.keyboard.press(process.platform === 'darwin' ? 'Meta+ArrowDown' : 'Control+End');
@@ -178,8 +179,11 @@ try {
   await page.waitForFunction(() => !document.querySelector('dialog').open);
   console.log('PASS 手机宽度下面板铺满屏幕、下拉关闭');
   await cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }, { name: 'prefers-reduced-transparency', value: 'reduce' }] });
-  const settings = await page.evaluate(() => ({ blur: getComputedStyle(document.querySelector('.glass-group')).backdropFilter, motion: getComputedStyle(document.querySelector('.sidebar-tabs'), '::before').transitionDuration }));
-  assert.deepEqual(settings, { blur: 'none', motion: '0s' });
+  const settings = await page.evaluate(() => {
+    const toolbar = getComputedStyle(document.querySelector('.glass-group'));
+    return { blur: toolbar.backdropFilter, fill: toolbar.backgroundColor, motion: getComputedStyle(document.querySelector('#side-files')).transitionDuration };
+  });
+  assert.deepEqual(settings, { blur: 'none', fill: 'rgb(255, 255, 255)', motion: '0s' });
   assert.deepEqual(errors, []);
   console.log('PASS 减少动态效果、降低透明度、无渲染错误');
 

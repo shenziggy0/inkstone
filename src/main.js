@@ -1,6 +1,6 @@
 import './styles.css';
 import './workspace.css';
-import { workspaceHTML, toolbarMenuHTML, preferencesHTML, installGlassHighlights, installSheetDrag } from './workspace.js';
+import { workspaceHTML, toolbarMenuHTML, preferencesHTML, installSheetDrag } from './workspace.js';
 import { icon } from './icons.js';
 import 'katex/dist/katex.min.css';
 import { createEditor } from './editor.js';
@@ -39,8 +39,8 @@ let titleBarInfo = { overlay: false, height: 64, controlsWidth: 0, trashName: '�
 let appPlatform = '';
 const trashName = () => titleBarInfo.trashName || '废纸篓';
 const $ = selector => document.querySelector(selector);
-$('#app').innerHTML = workspaceHTML(native);
-installGlassHighlights($('.topbar'));
+const modKey = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl+';
+$('#app').innerHTML = workspaceHTML(native, modKey);
 installSheetDrag($('#dialog'));
 const compactLayout = matchMedia('(max-width: 760px)');
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
@@ -124,12 +124,13 @@ async function flush(doc = current()) {
 function updateChrome() {
   const doc = current(); if (!doc) return;
   const title = displayName(doc);
-  $('#welcome-actions').hidden = !cleanWelcome(doc);
+  const isWelcome = cleanWelcome(doc);
+  $('#welcome-actions').hidden = !isWelcome;
   document.title = `${doc.dirty ? '• ' : ''}${title} — 墨页`;
   // The filename remains visible even when the tab strip is folded away.
   $('#location').textContent = `${doc.dirty ? '• ' : ''}${title}`;
   $('#location').title = doc.path || title;
-  $('#save-status').textContent = doc.error ? doc.error : doc.dirty ? '有未保存的更改' : doc.path ? '已保存' : '未保存到文件';
+  $('#save-status').textContent = doc.error || (doc.dirty ? '有未保存的更改' : doc.path ? '已保存' : isWelcome ? '可编辑示例' : '未保存到文件');
   $('#save-status').classList.toggle('status-error', !!doc.error);
   $('#save-status').dataset.state = doc.error ? 'error' : doc.dirty ? 'dirty' : doc.path ? 'saved' : 'draft';
   // Typing changes the body far more often than it changes a tab. Keep the
@@ -163,13 +164,14 @@ function drawOpenDocuments() {
 function drawSidebar() {
   const container = $('#side-content');
   $('.filter-label').hidden = sideMode !== 'files' && sideMode !== 'articles';
-  $('#side-title').textContent = sideMode === 'outline' ? '文档结构' : sideMode === 'articles' ? '全部文章' : (folder?.name || '文件工作空间');
+  const sideTitle = { outline: '文档结构', articles: '全部文章', search: '全文搜索', files: folder?.name || '文件工作空间' };
+  $('#side-title').textContent = sideTitle[sideMode];
+  $('#side-title').title = sideMode === 'files' && folder ? folder.path : sideTitle[sideMode];
   container.setAttribute('aria-labelledby', `side-${sideMode}`);
-  for (const [index, tab] of [...document.querySelectorAll('[data-side]')].entries()) {
+  for (const tab of document.querySelectorAll('[data-side]')) {
     const selected = tab.dataset.side === sideMode;
     tab.setAttribute('aria-selected', String(selected));
     tab.tabIndex = selected ? 0 : -1;
-    if (selected) $('.sidebar-tabs').style.setProperty('--tab-index', index);
   }
   if (sideMode === 'articles') {
     const query = $('#file-filter').value.toLowerCase();
@@ -206,12 +208,14 @@ function drawSidebar() {
   } else {
     const query = $('#file-filter').value.toLowerCase();
     const renderEntries = (entries, depth = 0) => entries.map(entry => {
+      const path = escapeHTML(entry.path);
       if (entry.children) {
         const children = renderEntries(entry.children || [], depth + 1);
-        return `<details open><summary data-tree-path="${escapeHTML(entry.path)}" data-tree-kind="folder" style="padding-left:${12 + depth * 12}px">${icon('folder')}${escapeHTML(entry.name)}</summary>${children}</details>`;
+        return `<details open><summary data-tree-path="${path}" data-tree-kind="folder" title="${path}" style="padding-left:${12 + depth * 12}px">${icon('folder')}<span>${escapeHTML(entry.name)}</span></summary>${children}</details>`;
       }
       if (query && !entry.name.toLowerCase().includes(query)) return '';
-      return `<button class="file-item" style="padding-left:${12 + depth * 12}px" data-path="${escapeHTML(entry.path)}" data-tree-path="${escapeHTML(entry.path)}" data-tree-kind="file">${icon('file')}<span>${escapeHTML(entry.name)}</span></button>`;
+      const currentFile = entry.path === current()?.path ? ' aria-current="page"' : '';
+      return `<button class="file-item" style="padding-left:${12 + depth * 12}px" data-path="${path}" data-tree-path="${path}" data-tree-kind="file" title="${path}"${currentFile}>${icon('file')}<span>${escapeHTML(entry.name)}</span></button>`;
     }).join('');
     // The tree owns the create / rename / trash actions: a small toolbar for the
     // common ones, and a native context menu on every entry.
@@ -1252,7 +1256,6 @@ function showDialog(title, body, purpose = 'other') {
   if (!node.open) node.showModal();
 }
 const flattenFiles = entries => entries.flatMap(entry => entry.children ? flattenFiles(entry.children) : [entry]);
-const modKey = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘' : 'Ctrl+';
 // Typora's own file shortcuts: macOS uses ⌘⇧O for quick open and leaves folder
 // opening to its menu item / sidebar button; Windows / Linux keep Ctrl+P for
 // quick open and Ctrl+Shift+O for a folder.
@@ -1683,7 +1686,12 @@ async function runCommand(command, detail) {
       case 'sidebar': setSidebarVisible(document.body.classList.contains('sidebar-hidden')); break;
       case 'focus': await setPreferences({ focus: !prefs.focus }); break;
       case 'typewriter': await setPreferences({ typewriter: !prefs.typewriter }); break;
-      case 'theme': await setPreferences({ theme: ['light', 'dark', 'sepia'][(['light', 'dark', 'sepia'].indexOf(prefs.theme) + 1) % 3] }); break;
+      case 'theme': {
+        const themes = ['light', 'dark', 'sepia'];
+        const currentTheme = prefs.theme === 'system' ? document.documentElement.dataset.theme : prefs.theme;
+        await setPreferences({ theme: themes[(themes.indexOf(currentTheme) + 1) % themes.length] });
+        break;
+      }
       case 'toggle-ui': await setPreferences({ uiMode: prefs.uiMode === 'workbench' ? 'typora' : 'workbench' }); break;
       case 'quote': editor?.prefix('> '); break;
       case 'task': editor?.prefix('- [ ] '); break;

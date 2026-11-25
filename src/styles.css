@@ -5,7 +5,7 @@
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; overflow-x: clip; height: 100%; }
-body { font: var(--text-base)/1.5 var(--font-body); color: var(--color-ink); background: var(--color-paper); }
+body { font: var(--text-base)/1.45 var(--font-body); color: var(--color-ink); background: var(--color-paper); }
 button, input, select { font: inherit; color: inherit; }
 button { background: transparent; border: 0; border-radius: var(--radius-sm); cursor: pointer; white-space: nowrap; }
 button:hover { background: var(--color-hover); }
@@ -145,7 +145,7 @@ summary[data-tree-path] { user-select: none; }
 .cm-editor .cm-lv-strike { text-decoration: line-through; color: var(--color-muted); }
 .cm-editor .cm-lv-mark { background: var(--color-highlight); border-radius: 2px; }
 .cm-editor .cm-lv-code { font-family: var(--font-code); font-size: .88em; background: var(--color-code); padding: .1em .3em; border-radius: var(--radius-sm); }
-.cm-editor .cm-lv-link { color: var(--color-focus); text-decoration: none; }
+.cm-editor .cm-lv-link { color: var(--color-action-text); text-decoration: none; }
 .cm-editor .cm-lv-image { color: var(--color-focus); }
 .cm-editor .cm-lv-math { font-family: var(--font-code); font-size: .92em; }
 .cm-editor .cm-lv-sub { vertical-align: sub; font-size: .78em; }
@@ -166,7 +166,7 @@ summary[data-tree-path] { user-select: none; }
 .prose h5 { font-size: 1em; margin: 1em 0 .8em; }
 .prose h6 { font-size: 1em; margin: 1em 0 .8em; color: var(--color-muted); }
 .prose p, .prose blockquote, .prose ul, .prose ol, .prose dl, .prose table { margin: .8em 0; }
-.prose a { color: var(--color-focus); text-decoration: none; }
+.prose a { color: var(--color-action-text); text-decoration: none; }
 .prose a:hover { text-decoration: underline; text-underline-offset: 2px; }
 .prose code { font: .9em/1.6 var(--font-code); background: var(--color-code); padding: .2em .4em; border-radius: var(--radius-sm); }
 .prose pre { position: relative; margin: .8em 0; padding: 16px 20px; border: 0; border-radius: var(--radius-sm); background: var(--color-code); overflow: auto; white-space: pre; }
@@ -253,18 +253,13 @@ kbd { font: .9em var(--font-code); color: var(--color-ink); }
 .front-matter-label { font: 600 11px var(--font-body); letter-spacing: .08em; color: var(--color-muted); margin-bottom: var(--space-sm); }
 .front-matter-row { display: flex; gap: var(--space-lg); }
 .front-matter-key { color: var(--color-muted); min-width: 6em; }
-.prose blockquote.alert { border-left-width: 4px; border-radius: var(--radius-md); padding: .7em 1.1em; background: var(--color-code); }
-.prose blockquote.alert-note { border-left-color: #3b82f6; }
-.prose blockquote.alert-tip { border-left-color: #16a34a; }
-.prose blockquote.alert-important { border-left-color: #8b5cf6; }
-.prose blockquote.alert-warning { border-left-color: #d97706; }
-.prose blockquote.alert-caution { border-left-color: #dc2626; }
-.alert-label { font-weight: 650; font-size: .9em; margin-bottom: .25em; }
-.prose blockquote.alert-note .alert-label { color: #2563eb; }
-.prose blockquote.alert-tip .alert-label { color: #15803d; }
-.prose blockquote.alert-important .alert-label { color: #7c3aed; }
-.prose blockquote.alert-warning .alert-label { color: #b45309; }
-.prose blockquote.alert-caution .alert-label { color: #b91c1c; }
+.prose blockquote.alert { border-left: 4px solid var(--alert-color, var(--color-rule)); border-radius: var(--radius-md); padding: .7em 1.1em; background: var(--color-code); }
+.alert-note { --alert-color: var(--color-action-text); }
+.alert-tip { --alert-color: var(--color-success); }
+.alert-important { --alert-color: var(--color-important); }
+.alert-warning { --alert-color: var(--color-warning); }
+.alert-caution { --alert-color: var(--color-error); }
+.alert-label { color: var(--alert-color); font-weight: 650; font-size: .9em; margin-bottom: .25em; }
 /* Equation numbers are rendered inside the KaTeX tree (\tag), not by CSS
    counters: a counter cannot be referenced from \ref or survive the HTML
    export. The body class stays as the preference marker. */
@@ -349,14 +344,14 @@ kbd { font: .9em var(--font-code); color: var(--color-ink); }
 .heading-numbering .prose h3::before { content: counter(ink-h1) '.' counter(ink-h2) '.' counter(ink-h3) '　'; }
 .heading-numbering .prose h4::before { content: counter(ink-h1) '.' counter(ink-h2) '.' counter(ink-h3) '.' counter(ink-h4) '　'; }
 /* Version diff and draggable outline sections */
-.diff-view { max-height: 46vh; overflow: auto; border: 1px solid var(--color-rule); border-radius: var(--radius-sm); font: 12px/1.7 var(--font-code); }
+.diff-view { background: var(--color-paper); max-height: 46vh; overflow: auto; border: 1px solid var(--color-rule); border-radius: var(--radius-sm); font: 12px/1.7 var(--font-code); }
 .diff-line { display: flex; gap: var(--space-sm); padding: 0 var(--space-md); white-space: pre-wrap; overflow-wrap: anywhere; }
 .diff-line code { font: inherit; background: none; padding: 0; }
 .diff-sign { flex: 0 0 1.2em; text-align: center; color: var(--color-muted); user-select: none; }
-.diff-add { background: rgba(22, 163, 74, .12); }
-.diff-add .diff-sign { color: #16a34a; }
-.diff-remove { background: rgba(220, 38, 38, .10); }
-.diff-remove .diff-sign { color: #dc2626; }
+.diff-add { background: color-mix(in srgb, var(--color-success) 12%, var(--color-paper)); }
+.diff-add .diff-sign { color: var(--color-success); }
+.diff-remove { background: color-mix(in srgb, var(--color-error) 10%, var(--color-paper)); }
+.diff-remove .diff-sign { color: var(--color-error); }
 #dialog:has(.diff-view) { width: min(760px, calc(100vw - 32px)); }
 .outline-item[draggable="true"] { cursor: grab; }
 .outline-item.dragging { opacity: .45; }

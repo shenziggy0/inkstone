@@ -19,7 +19,7 @@ const digest = data => crypto.createHash('sha256').update(data).digest('hex');
 if (process.env.INKSTONE_TEST_USER_DATA) app.setPath('userData', process.env.INKSTONE_TEST_USER_DATA);
 protocol.registerSchemesAsPrivileged([{ scheme: 'inkstone-asset', privileges: { standard: true, secure: true, supportFetchAPI: true } }]);
 
-let preferences = { theme: 'light', fontSize: 16, lineWidth: 860, autoSave: false, focus: false, typewriter: false, spellcheck: true, mathNumbering: false, headingNumbering: false, sidebarWidth: 240, zoomLevel: 0, windowBounds: null, windowMaximized: false, showFormatbar: true, uiMode: 'typora', sidebarVisible: false, workbenchSidebarVisible: true, restoreSession: true, uiDefaultsMigrated: false, imageRoot: '', pdfExport: { ...DEFAULT_PDF_EXPORT }, pdfPresets: [] };
+let preferences = { theme: 'system', fontSize: 16, lineWidth: 860, autoSave: false, focus: false, typewriter: false, spellcheck: true, mathNumbering: false, headingNumbering: false, sidebarWidth: 240, zoomLevel: 0, windowBounds: null, windowMaximized: false, showFormatbar: true, uiMode: 'typora', sidebarVisible: false, workbenchSidebarVisible: true, restoreSession: true, uiDefaultsMigrated: false, imageRoot: '', pdfExport: { ...DEFAULT_PDF_EXPORT }, pdfPresets: [] };
 // Recent documents / folders and the session restored at startup.
 const workspace = new WorkspaceState(app.getPath('userData'));
 const pendingFiles = [];
@@ -38,10 +38,10 @@ const TITLE_BAR_HEIGHT = 64;
 const TRASH_NAME = MAC ? '废纸篓' : '回收站';
 /** Match the renderer's chrome while the native window controls are visible. */
 const chromeTheme = () => preferences.theme === 'system' ? (nativeTheme.shouldUseDarkColors ? 'dark' : 'light') : preferences.theme;
-const chromeColor = () => ({ dark: '#191b26', sepia: '#eee7db' })[chromeTheme()] || '#eef0f7';
+const chromeColor = () => ({ dark: '#101011', sepia: '#f1ece2' })[chromeTheme()] || '#fbfbfb';
 const titleBarOverlay = () => ({
   color: chromeColor(),
-  symbolColor: chromeTheme() === 'dark' ? '#e6e7f0' : '#333333',
+  symbolColor: chromeTheme() === 'dark' ? '#f0efed' : '#1d1d1f',
   height: TITLE_BAR_HEIGHT
 });
 // Reserved width of the native window buttons (minimise / maximise / close) so

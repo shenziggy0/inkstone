@@ -22,12 +22,12 @@
 - **技术文档语法**：GFM 表格（就地输入、Enter 追加行、Tab 走单元格、拖动列宽）、KaTeX 公式、Mermaid 图表、代码高亮（常用语言内置，其余按需加载）。
 - **文件与工作区**：文件树、文件夹全文搜索、最近文件、会话恢复、崩溃恢复、保存历史与逐行 diff、外部修改提示。
 - **链接与图片**：本地 `.md` 链接支持跨文档锚点，源码中的行内链接可用 Ctrl/Cmd+点击打开。图片迁移支持标题、尖括号和引用式写法；首次保存会保全临时图片，跨目录另存或移动时会复制文档引用的本地 `assets/` 图片。
-- **界面**采用 iOS 风格的半透明工具栏和分段导航。默认打开简洁写作布局，可在偏好设置中启用带标签和排版工具的完整工作台。窄窗口使用抽屉式文稿库，手机宽度下可下拉收起设置面板。外观支持跟随系统、浅色、深色、纸张与自定义 CSS 主题，并响应系统的减少动态效果与降低透明度设置。中文命令面板（`Ctrl/Cmd+P`）、大纲、专注与打字机模式均可使用，兼容的 Typora 主题通过 `#write` 映射到正文。
+- **界面**采用 乳白毛玻璃工具栏、实底文稿库和通栏状态栏。默认打开简洁写作布局，可在偏好设置中启用带标签和排版工具的完整工作台。窄窗口使用抽屉式文稿库，手机宽度下可下拉收起设置面板。外观默认跟随系统，也可选择浅色、深色、纸张与自定义 CSS 主题，并响应系统的减少动态效果与降低透明度设置。中文命令面板（`Ctrl/Cmd+P`）、大纲、专注与打字机模式均可使用，兼容的 Typora 主题通过 `#write` 映射到正文。
 - **导出**：自包含 HTML、无样式 HTML、整篇 PNG、PDF（大纲、页眉页脚、页码、纸张与页边距预设），以及复制为 Markdown/HTML。Pandoc 未安装时，对应格式会降级并提示。
 
 ## 当前进度
 
-当前版本 `0.1.3`，已在 GitHub Releases 提供双平台安装包（macOS 为临时签名、未公证；Windows 安装包未签名）。
+Apple 芯片 Mac 和 Windows x64 的安装包可从 [GitHub 最新发布页](https://github.com/shenziggy0/inkstone/releases/latest) 下载。macOS 应用使用临时签名，未经 Apple 公证。Windows 安装包未签名。
 
 | 平台 | 状态 |
 | --- | --- |
@@ -82,7 +82,7 @@ macOS 使用临时签名（`mac.identity` 为 `"-"`，关闭 Hardened Runtime，
 
 Windows 安装包保持可选目录（`oneClick: false`，`allowToChangeInstallationDirectory: true`），并带上 `.md` / `.markdown` 文件关联。安装程序的许可页显示 `docs/install/windows-license.html`（与 `docs/install/Windows安装说明.txt` 同一份说明）。若弹出 SmartScreen，选择“更多信息”→“仍要运行”。新版本装到原目录会就地升级。
 
-墨页的图标是一张折角白纸，下端收成钢笔笔尖，放在靛蓝色的圆角底板上。electron-builder 使用 `build/icon.png`（1024×1024）生成各平台图标。
+墨页的图标是一枚斜置的墨蓝笔尖，右上折起一角钴蓝色，底板为乳白色。electron-builder 使用 `build/icon.png`（1024×1024）生成各平台图标。
 
 也可以在 GitHub Actions 里手动打包。打包用的版本号来自 git tag，不需要为了出包去改 `package.json`。工作流只在运行器上把该版本写进 `package.json` 和 `package-lock.json`，不会提交或推送。
 

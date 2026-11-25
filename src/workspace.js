@@ -10,17 +10,20 @@ const formatGroups = [
   [['link', '插入链接', 'link'], ['table', '插入表格', 'table'], ['code', '插入代码块', 'braces'], ['math', '插入公式', 'math'], ['diagram', '插入图表', 'diagram'], ['image', '插入图片', 'image']]
 ];
 
-export function workspaceHTML(native) {
+export function workspaceHTML(native, modKey) {
   return `<header class="topbar">
     <button class="app-menu-button" data-command="app-menu" aria-label="菜单" title="菜单">菜单</button>
-    <div class="brand"><img class="brand-mark" src="${brandLogo}" width="33" height="33" alt="" draggable="false"><span class="brand-name">Inkstone</span></div>
-    <div class="glass-group library-actions">${button('sidebar', '切换侧边栏', 'panel')}${button('open', '打开文档', 'open')}${button('new', '新建文档', 'compose')}</div>
-    <div class="document-location">${icon('file')}<span id="location">未命名.md</span></div>
+    <div class="brand"><img class="brand-mark" src="${brandLogo}" width="34" height="34" alt="墨页" draggable="false"><span class="brand-name">Inkstone</span></div>
+    <div class="library-actions">${button('sidebar', '切换侧边栏', 'panel')}</div>
+    <div class="document-location"><span id="location">未命名.md</span></div>
     <div class="top-actions">
-      <div class="glass-group editor-actions">${button('find', '查找与替换', 'search')}${button('source', '切换源码模式', 'code')}${button('save', '保存文档', 'save')}</div>
+      <div class="glass-group milk-glass document-tools">
+        ${button('new', '新建文档', 'compose')}${button('open', '打开文档', 'open')}
+        <div class="editor-actions">${button('find', '查找与替换', 'search')}${button('source', '切换源码模式', 'code')}${button('save', '保存文档', 'save')}</div>
+      </div>
       <button class="export-button" data-command="export" aria-label="导出" title="导出文档">${icon('arrow')}<span>导出</span></button>
-      <div class="glass-group settings-action">${button('settings', '偏好设置', 'settings')}</div>
-      <div class="glass-group overflow-action">${button('toolbar-menu', '更多操作', 'more')}</div>
+      <div class="settings-action">${button('settings', '偏好设置', 'settings')}</div>
+      <div class="overflow-action">${button('toolbar-menu', '更多操作', 'more')}</div>
     </div>
   </header>
   <div class="workspace">
@@ -38,14 +41,14 @@ export function workspaceHTML(native) {
     <main class="main-pane" aria-label="写作区">
       <div class="tabbar"><div id="document-tabs" role="tablist" aria-label="打开的文档"></div>${button('new', '新建文档', 'plus')}${button('document-menu', '文档操作', 'more')}</div>
       <div class="formatbar" role="toolbar" aria-label="排版工具"><div class="format-tools">${formatGroups.map(group => group.map(args => button(...args)).join('')).join('<span class="divider" aria-hidden="true"></span>')}</div><span id="mode-label">即时渲染</span></div>
-      <div class="welcome-actions" id="welcome-actions" hidden>
-        <button class="primary" data-command="welcome-new">写第一篇</button>
-        <button data-command="welcome-open">打开已有文档</button>
+      <div class="welcome-actions" id="welcome-actions" role="group" aria-label="开始写作" hidden>
+        <button data-command="welcome-new">${icon('compose')}写第一篇<kbd aria-hidden="true">${modKey}N</kbd></button>
+        <button data-command="welcome-open">${icon('open')}打开已有文档<kbd aria-hidden="true">${modKey}O</kbd></button>
       </div>
       <div id="editor-host"></div>
-      <div id="notification" role="alert" hidden></div>
+      <div id="notification" class="milk-glass" role="alert" hidden></div>
       <footer class="statusbar"><div class="document-status"><span id="save-status" role="status">就绪</span><span id="breadcrumb" class="status-breadcrumb"></span></div><div class="reading-controls"><span id="selection-status"></span><span id="position">行 1，列 1</span><span id="statistics"></span><span id="encoding"></span><div class="status-actions">${button('focus', '专注模式', 'focus')}${button('theme', '切换主题', 'theme')}</div><button class="restore-tools icon-button" data-command="expand-tools" aria-label="展开写作工具" title="展开写作工具">${icon('more')}</button></div></footer>
-      <div id="selection-tools" class="selection-tools" role="toolbar" aria-label="选区操作" hidden>
+      <div id="selection-tools" class="selection-tools milk-glass" role="toolbar" aria-label="选区操作" hidden>
         <button type="button" data-command="bold" data-selection-format>粗体</button>
         <button type="button" data-command="selection-link" data-selection-format>链接</button>
         <button type="button" data-command="heading-1" data-selection-format>标题</button>
@@ -53,22 +56,9 @@ export function workspaceHTML(native) {
       </div>
     </main>
   </div>
-  <div id="context-menu" class="context-menu" role="menu" hidden></div>
-  <dialog id="dialog" aria-labelledby="dialog-title"><div id="dialog-content"></div></dialog>
+  <div id="context-menu" class="context-menu milk-glass" role="menu" hidden></div>
+  <dialog id="dialog" class="milk-glass" aria-labelledby="dialog-title"><div id="dialog-content"></div></dialog>
   <article class="print-document prose write-surface" id="print-document"></article>`;
-}
-
-// Light follows a fine pointer inside the glass. Touch and keyboard use the
-// same controls with their own pressed and focus states, without a pointer loop.
-export function installGlassHighlights(bar) {
-  const allow = matchMedia('(hover: hover) and (pointer: fine) and (prefers-reduced-motion: no-preference)');
-  bar.addEventListener('pointermove', event => {
-    const group = event.target.closest('.glass-group');
-    if (!allow.matches || !group) return;
-    const bounds = group.getBoundingClientRect();
-    group.style.setProperty('--light-x', `${Math.round(event.clientX - bounds.left)}px`);
-    group.style.setProperty('--light-y', `${Math.round(event.clientY - bounds.top)}px`);
-  }, { passive: true });
 }
 
 export function installSheetDrag(dialog) {

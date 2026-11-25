@@ -186,7 +186,7 @@ try {
   }));
   assert.equal(restored.theme, 'light');
   assert.equal(restored.background, 'rgb(255, 255, 255)');
-  assert.equal(restored.h1, 'rgb(51, 51, 51)');
+  assert.equal(restored.h1, 'rgb(29, 29, 31)');
 
   // Existing native-app custom CSS keeps targeting the real top bar, and a
   // `.prose p` selector keeps applying to the rendered blocks without a nested

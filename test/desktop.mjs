@@ -116,13 +116,13 @@ try {
     const darkOverlay = await app.evaluate(() => globalThis.__overlays.at(-1) || null);
     assert.ok(darkOverlay, '切换主题后必须调用 setTitleBarOverlay');
     assert.equal(darkOverlay.height, 64, '标题栏覆盖层高度应保持 64px');
-    assert.equal(darkOverlay.color, '#191b26', `深色主题下窗口按钮区应改为深色，实际 ${JSON.stringify(darkOverlay)}`);
-    assert.ok(darkOverlay.symbolColor === '#e6e7f0', '深色模式下窗口按钮符号必须换色才可见');
+    assert.equal(darkOverlay.color, '#101011', `深色主题下窗口按钮区应改为深色，实际 ${JSON.stringify(darkOverlay)}`);
+    assert.ok(darkOverlay.symbolColor === '#f0efed', '深色模式下窗口按钮符号必须换色才可见');
     await page.locator('[data-command="theme"]').click();
     await page.locator('[data-command="theme"]').click();
     await page.waitForFunction(() => document.documentElement.dataset.theme === 'light');
     const lightOverlay = await app.evaluate(() => globalThis.__overlays.at(-1));
-    assert.equal(lightOverlay.color, '#eef0f7', '回到浅色主题后窗口按钮区颜色也要跟着回来');
+    assert.equal(lightOverlay.color, '#fbfbfb', '回到浅色主题后窗口按钮区颜色也要跟着回来');
     await app.evaluate(({ BrowserWindow }) => {
       const win = BrowserWindow.getAllWindows()[0];
       if (globalThis.__originalOverlay) win.setTitleBarOverlay = globalThis.__originalOverlay;

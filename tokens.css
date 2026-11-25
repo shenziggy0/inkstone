@@ -1,69 +1,97 @@
-/* The paper belongs to the document. The window, navigation, and controls
-   have separate materials so a change of appearance keeps each layer legible. */
-:root {
+/* The manuscript follows the document theme. Floating controls use their
+   own light foreground and background together, including on dark paper. */
+:root, .milk-glass {
   color-scheme: light;
+  --window-edge: #fbfbfb;
   --color-paper: #fff;
   --color-surface: #fff;
-  --color-sidebar: #f1f2fa;
-  --color-ink: #333;
-  --color-title: #212535;
-  --color-muted: #565f73;
-  --color-rule: #dce0eb;
-  --color-accent: #414db5;
+  --color-sidebar: #fbfbfb;
+  --color-subtle: #f3f3f4;
+  --color-hover: #ebebed;
+  --color-title: #1d1d1f;
+  --color-ink: #1d1d1f;
+  --color-secondary: #3c3c43;
+  /* A darker text role keeps small labels legible on white. */
+  --color-muted: #6b6b71;
+  --color-faint: #c2c2c7;
+  --color-rule: #eaeaea;
+  --color-strong-rule: #d6d6da;
+  --color-accent: #2f6feb;
+  --color-accent-hover: #2560d6;
   --color-on-accent: #fff;
-  --color-focus: #3c55bb;
-  --color-hover: #eaedf7;
-  --color-selected: #e0e5fb;
-  --color-error: #ab2e3c;
+  --color-action-text: #255bc4;
+  --color-selected: #e8f0fe;
+  --color-focus: #3b82f6;
+  --color-error: #a12938;
   --color-success: #266d53;
-  --color-code: #f3f4f9;
+  --color-warning: #96550b;
+  --color-important: #7540be;
+  --color-code: #f3f3f4;
   --color-highlight: #fff0ad;
-  --color-syntax-keyword: #994296;
+  --color-syntax-keyword: #8f3b89;
   --color-syntax-string: #1d6656;
   --color-syntax-number: #98500f;
-  --color-syntax-function: #424eb0;
-  --window-edge: #eef0f7;
-  --window-glow: #dce1f7;
-  --window-warm: #f2eaf4;
-  --glass-fill: rgb(255 255 255 / .66);
-  --glass-panel: rgb(247 248 253 / .87);
-  --glass-line: rgb(64 73 113 / .15);
+  --color-syntax-function: #354faf;
+  --glass-fill: rgb(255 255 255 / .88);
+  --glass-line: #dedee0;
   --glass-rim: rgb(255 255 255 / .96);
-  --color-shadow: rgb(28 37 69 / .13);
-  --color-backdrop: rgb(27 32 54 / .28);
+  --color-shadow: rgb(0 0 0 / .10);
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --window-edge: #101011;
+  --color-paper: #141416;
+  --color-surface: #141416;
+  --color-sidebar: #101011;
+  --color-subtle: #222224;
+  --color-hover: #29292d;
+  --color-title: #f0efed;
+  --color-ink: #f0efed;
+  --color-secondary: #cfcecc;
+  --color-muted: #a3a3a8;
+  --color-faint: #74747c;
+  --color-rule: #2c2c2f;
+  --color-strong-rule: #414145;
+  --color-accent: #3672d6;
+  --color-accent-hover: #326ac6;
+  --color-action-text: #9bc0ff;
+  --color-selected: #203451;
+  --color-focus: #88b3ff;
+  --color-error: #ff9ca6;
+  --color-success: #7dd7ae;
+  --color-warning: #efbd83;
+  --color-important: #c5a3f4;
+  --color-code: #222224;
+  --color-highlight: #5d5028;
+  --color-shadow: rgb(0 0 0 / .28);
+  --color-syntax-keyword: #e6a6df;
+  --color-syntax-string: #98d7c3;
+  --color-syntax-number: #efbd83;
+  --color-syntax-function: #b0bdff;
+}
+:root[data-theme="sepia"] {
+  --window-edge: #f1ece2; --color-sidebar: #f5efe3;
+  --color-paper: #fbf6eb; --color-surface: #fffaf0; --color-subtle: #f2eadb;
+  --color-ink: #40372e; --color-title: #392d21; --color-secondary: #574937;
+  --color-muted: #6b5c49; --color-faint: #b3a58f;
+  --color-rule: #ddd2bf; --color-strong-rule: #cdbfa7;
+  --color-accent: #80542f; --color-accent-hover: #684326; --color-action-text: #744921; --color-focus: #80542f;
+  --color-hover: #eee4d1; --color-selected: #e8dac1; --color-code: #f0e8d8;
+}
+:root {
+  --color-backdrop: rgb(12 12 14 / .28);
+  --shadow-float: 0 10px 28px rgb(0 0 0 / .10), 0 1px 3px rgb(0 0 0 / .08);
   --font-body: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
   --font-display: var(--font-body);
   --font-code: 'SFMono-Regular', 'Cascadia Code', Menlo, Consolas, monospace;
   --space-xs: 4px; --space-sm: 8px; --space-md: 12px; --space-lg: 16px; --space-xl: 24px; --space-2xl: 32px; --space-3xl: 48px;
-  --text-xs: 12px; --text-sm: 13px; --text-base: 14px; --text-md: 16px; --text-lg: 20px; --text-xl: 24px;
-  --radius-sm: 7px; --radius-md: 12px; --radius-lg: 22px;
+  --text-xs: 12px; --text-sm: 13px; --text-base: 13px; --text-md: 16px; --text-lg: 20px; --text-xl: 24px;
+  --radius-sm: 8px; --radius-md: 10px; --radius-lg: 12px;
   --ease-out: cubic-bezier(.2,.75,.22,1);
   --ease-in: cubic-bezier(.4,0,.85,.4);
   --ease-in-out: cubic-bezier(.45,0,.22,1);
-  --ease-spring: cubic-bezier(.2,.92,.26,1.1);
-  --dur-micro: 140ms; --dur-short: 220ms; --dur-spring: 340ms;
+  --ease-spring: cubic-bezier(.2,.8,.25,1);
+  --dur-micro: 140ms; --dur-short: 120ms; --dur-spring: 180ms;
   --editor-size: 16px; --editor-width: 860px; --editor-leading: 1.6;
   --sidebar-width: 240px; --titlebar-height: 64px;
-}
-:root[data-theme="dark"] {
-  color-scheme: dark;
-  --color-paper: #21232c; --color-surface: #2d303b; --color-sidebar: #252834;
-  --color-ink: #e6e7f0; --color-title: #f6f7ff; --color-muted: #afb5c9;
-  --color-rule: #3c4151; --color-accent: #b0bbff; --color-on-accent: #1e2549;
-  --color-focus: #aebaff; --color-hover: #353a4a; --color-selected: #39425f;
-  --color-error: #ff9ca6; --color-success: #7dd7ae; --color-code: #2a2d39;
-  --color-highlight: #5d5028; --window-edge: #191b26; --window-glow: #30334d; --window-warm: #332b3e;
-  --glass-fill: rgb(53 57 74 / .76); --glass-panel: rgb(41 44 58 / .90);
-  --glass-line: rgb(169 179 218 / .19); --glass-rim: rgb(222 229 255 / .15);
-  --color-shadow: rgb(0 0 0 / .32); --color-backdrop: rgb(5 8 17 / .52);
-  --color-syntax-keyword: #e6a6df; --color-syntax-string: #98d7c3; --color-syntax-number: #efbd83; --color-syntax-function: #b0bdff;
-}
-:root[data-theme="sepia"] {
-  --color-paper: #fbf6eb; --color-surface: #fffaf0; --color-sidebar: #f0e8d9;
-  --color-ink: #40372e; --color-title: #392d21; --color-muted: #675844;
-  --color-rule: #ddd2bf; --color-accent: #80542f; --color-focus: #80542f;
-  --color-hover: #eee4d1; --color-selected: #e8dac1; --color-code: #f0e8d8;
-  --window-edge: #eee7db; --window-glow: #e2d8c1; --window-warm: #f2dfcf;
-  --glass-fill: rgb(255 250 238 / .73); --glass-panel: rgb(250 244 231 / .90);
-  --glass-line: rgb(108 80 44 / .18); --glass-rim: rgb(255 253 241 / .94);
 }

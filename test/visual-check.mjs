@@ -16,6 +16,7 @@ const app = await electron.launch({ args: [project, '--no-sandbox', '--disable-g
 try {
   const page = await app.firstWindow();
   page.setDefaultTimeout(15000);
+  await page.emulateMedia({ colorScheme: 'light' });
   await page.locator('.cm-content').waitFor();
   // The very first window is the deliverable: a clean Typora-like page.
   await page.waitForTimeout(250);
@@ -23,6 +24,12 @@ try {
   await page.locator('.topbar [data-command="sidebar"]').click();
   await page.waitForTimeout(200);
   await page.screenshot({ path: shot('sidebar') });
+  // Keep the viewport, document, selection, and scroll position identical.
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await page.waitForFunction(() => document.documentElement.dataset.theme === 'dark');
+  await page.screenshot({ path: shot('sidebar-dark'), animations: 'disabled' });
+  await page.emulateMedia({ colorScheme: 'light' });
+  await page.waitForFunction(() => document.documentElement.dataset.theme === 'light');
   await page.locator('.topbar [data-command="sidebar"]').click();
   await page.locator('.topbar [data-command="new"]').click();
   await page.locator('.cm-content').click();
